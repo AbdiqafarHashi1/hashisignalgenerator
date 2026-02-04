@@ -16,6 +16,11 @@ settings = get_settings()
 state = StateStore()
 
 
+@app.get("/")
+async def root() -> dict[str, str]:
+    return {"status": "ok"}
+
+
 @app.get("/health")
 async def health() -> dict[str, str]:
     return {"status": "ok"}

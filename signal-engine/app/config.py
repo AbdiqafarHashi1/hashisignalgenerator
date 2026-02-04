@@ -13,6 +13,7 @@ class Settings(BaseSettings):
         env_file=".env",
         env_file_encoding="utf-8",
         case_sensitive=False,
+        extra="forbid",
     )
 
     MODE: Literal["prop_cfd", "personal_crypto"] = "prop_cfd"
@@ -36,6 +37,9 @@ class Settings(BaseSettings):
 
     news_blackouts: str = ""
     data_dir: str = "data"
+    telegram_enabled: bool = False
+    telegram_bot_token: str | None = None
+    telegram_chat_id: str | None = None
 
     @model_validator(mode="after")
     def apply_mode_defaults(self) -> "Settings":

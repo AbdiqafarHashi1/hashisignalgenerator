@@ -16,3 +16,7 @@ venv/
 
 # Logs / misc
 *.log
+
+# runtime / local data
+data/trades.db
+data/*.db

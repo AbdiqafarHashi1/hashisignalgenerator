@@ -23,6 +23,9 @@ class BinanceKlineSnapshot(BaseModel):
     interval: str
     price: float
     volume: float
+    kline_open_time_ms: int
+    kline_close_time_ms: int
+    kline_is_closed: bool
     candle: BinanceCandle
 
 
@@ -50,10 +53,16 @@ async def fetch_btcusdt_klines(interval: str = "15m") -> BinanceKlineSnapshot:
     if not data:
         raise ValueError("No kline data returned from Binance")
     candle = _parse_kline(data[-1])
+    open_time_ms = int(data[-1][0])
+    close_time_ms = int(data[-1][6])
+    now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
     return BinanceKlineSnapshot(
         symbol="BTCUSDT",
         interval=interval,
         price=candle.close,
         volume=candle.volume,
+        kline_open_time_ms=open_time_ms,
+        kline_close_time_ms=close_time_ms,
+        kline_is_closed=now_ms >= close_time_ms,
         candle=candle,
     )

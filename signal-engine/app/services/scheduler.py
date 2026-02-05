@@ -50,15 +50,26 @@ class DecisionScheduler:
             await task
         return True
 
-    async def run_once(self) -> TradePlan:
+    async def run_once(self, force: bool = False) -> tuple[TradePlan | None, str | None]:
         snapshot = await fetch_btcusdt_klines()
+        if not force and not snapshot.kline_is_closed:
+            return None, "candle_open"
+        last_processed = self._state.get_last_processed_close_time_ms()
+        if not force and last_processed == snapshot.kline_close_time_ms:
+            return None, "candle_already_processed"
         request = _build_decision_request(snapshot)
         plan = decide(request, self._state, self._settings)
         self._state.set_latest_decision(snapshot.symbol, plan)
+        if snapshot.kline_is_closed:
+            self._state.set_last_processed_close_time_ms(snapshot.kline_close_time_ms)
         if plan.status == Status.TRADE:
-            message = format_trade_message(snapshot.symbol, plan)
-            await send_telegram_message(message, self._settings)
-        return plan
+            dedupe_key = _notification_key(snapshot, plan)
+            last_notified = self._state.get_last_notified_key()
+            if dedupe_key != last_notified:
+                message = format_trade_message(snapshot.symbol, plan)
+                await send_telegram_message(message, self._settings)
+                self._state.set_last_notified_key(dedupe_key)
+        return plan, None
 
     async def _run_loop(self) -> None:
         while not self._stop_event.is_set():
@@ -103,4 +114,19 @@ def _build_decision_request(snapshot: BinanceKlineSnapshot) -> DecisionRequest:
         market=market,
         bias=bias,
         timestamp=datetime.now(timezone.utc),
+    )
+
+
+def _notification_key(snapshot: BinanceKlineSnapshot, plan: TradePlan) -> str:
+    entry = (
+        "none"
+        if plan.entry_zone is None
+        else f"{plan.entry_zone[0]:.2f}-{plan.entry_zone[1]:.2f}"
+    )
+    stop = "none" if plan.stop_loss is None else f"{plan.stop_loss:.2f}"
+    take_profit = "none" if plan.take_profit is None else f"{plan.take_profit:.2f}"
+    score = "none" if plan.signal_score is None else str(plan.signal_score)
+    return (
+        f"{snapshot.symbol}:{snapshot.kline_close_time_ms}:"
+        f"{plan.status.value}:{plan.direction.value}:{entry}:{stop}:{take_profit}:{score}"
     )

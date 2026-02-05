@@ -23,6 +23,8 @@ class StateStore:
         self._lock = Lock()
         self._daily: dict[str, DailyState] = {}
         self._posture_cache: dict[tuple[str, str], PostureSnapshot] = {}
+        self._last_processed_close_time_ms: int | None = None
+        self._last_notified_key: str | None = None
 
     def _today_key(self) -> str:
         return datetime.now(timezone.utc).date().isoformat()
@@ -48,6 +50,22 @@ class StateStore:
         state = self.get_daily_state(symbol)
         with self._lock:
             state.latest_decision = plan
+
+    def get_last_processed_close_time_ms(self) -> int | None:
+        with self._lock:
+            return self._last_processed_close_time_ms
+
+    def set_last_processed_close_time_ms(self, value: int | None) -> None:
+        with self._lock:
+            self._last_processed_close_time_ms = value
+
+    def get_last_notified_key(self) -> str | None:
+        with self._lock:
+            return self._last_notified_key
+
+    def set_last_notified_key(self, value: str | None) -> None:
+        with self._lock:
+            self._last_notified_key = value
 
     def record_trade(self, symbol: str) -> None:
         state = self.get_daily_state(symbol)

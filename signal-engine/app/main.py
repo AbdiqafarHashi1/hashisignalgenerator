@@ -24,20 +24,17 @@ async def root() -> dict[str, str]:
     return {"status": "ok"}
 
 
-@app.get("/")
-async def root() -> dict[str, str]:
-    return {"status": "ok"}
-
-
 @app.get("/health")
 async def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
 @app.get("/run")
-async def run_once() -> dict:
-    plan = await scheduler.run_once()
-    return {"symbol": symbol, "plan": plan}
+async def run_once(force: bool = Query(False)) -> dict:
+    plan, reason = await scheduler.run_once(force=force)
+    if plan is None:
+        return {"status": "skipped", "reason": reason}
+    return {"status": "ok", "symbol": symbol, "plan": plan}
 
 
 @app.get("/state")

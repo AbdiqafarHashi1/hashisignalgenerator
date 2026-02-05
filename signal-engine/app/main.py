@@ -14,6 +14,7 @@ from .services.stats import compute_stats
 from .storage.store import log_event
 from .strategy.decision import decide
 from .services.scheduler import DecisionScheduler
+from .services.scheduler import DecisionScheduler
 
 app = FastAPI(title="signal-engine", version="1.0.0")
 settings = get_settings()

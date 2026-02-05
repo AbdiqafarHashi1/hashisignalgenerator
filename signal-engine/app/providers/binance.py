@@ -43,9 +43,9 @@ def _parse_kline(raw: list) -> BinanceCandle:
     )
 
 
-async def fetch_klines(symbol: str, interval: str = "15m") -> BinanceKlineSnapshot:
+async def fetch_btcusdt_klines(interval: str = "15m") -> BinanceKlineSnapshot:
     url = f"{BINANCE_BASE_URL}/api/v3/klines"
-    params = {"symbol": symbol, "interval": interval, "limit": 1}
+    params = {"symbol": "BTCUSDT", "interval": interval, "limit": 1}
     async with httpx.AsyncClient(timeout=10.0) as client:
         response = await client.get(url, params=params)
         response.raise_for_status()
@@ -57,7 +57,7 @@ async def fetch_klines(symbol: str, interval: str = "15m") -> BinanceKlineSnapsh
     close_time_ms = int(data[-1][6])
     now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
     return BinanceKlineSnapshot(
-        symbol=symbol,
+        symbol="BTCUSDT",
         interval=interval,
         price=candle.close,
         volume=candle.volume,

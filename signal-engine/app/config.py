@@ -4,7 +4,7 @@ from datetime import datetime, time
 from functools import lru_cache
 from typing import Literal
 
-from pydantic import model_validator
+from pydantic import AliasChoices, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -13,9 +13,13 @@ class Settings(BaseSettings):
         env_file=".env",
         env_file_encoding="utf-8",
         case_sensitive=False,
+        extra="forbid",
     )
 
-    MODE: Literal["prop_cfd", "personal_crypto"] = "prop_cfd"
+    MODE: Literal["prop_cfd", "personal_crypto", "paper", "signal_only"] = "prop_cfd"
+    engine_mode: Literal["paper", "signal_only"] = "signal_only"
+    symbols: list[str] = Field(default_factory=lambda: ["BTCUSDT"], validation_alias=AliasChoices("SYMBOLS", "symbols"))
+    heartbeat_minutes: int = Field(30, validation_alias=AliasChoices("HEARTBEAT_MINUTES", "heartbeat_minutes"))
 
     account_size: float | None = None
     base_risk_pct: float | None = None
@@ -36,9 +40,22 @@ class Settings(BaseSettings):
 
     news_blackouts: str = ""
     data_dir: str = "data"
+    telegram_enabled: bool = False
+    telegram_bot_token: str | None = None
+    telegram_chat_id: str | None = None
+
+    @field_validator("symbols", mode="before")
+    @classmethod
+    def parse_symbols(cls, value: str | list[str]) -> list[str]:
+        if isinstance(value, str):
+            return [item.strip() for item in value.split(",") if item.strip()]
+        return value
 
     @model_validator(mode="after")
     def apply_mode_defaults(self) -> "Settings":
+        if self.MODE in {"paper", "signal_only"}:
+            self.engine_mode = self.MODE
+            self.MODE = "prop_cfd"
         if self.MODE == "prop_cfd":
             defaults = {
                 "account_size": 25000,

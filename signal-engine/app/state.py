@@ -23,6 +23,11 @@ class StateStore:
         self._lock = Lock()
         self._daily: dict[str, DailyState] = {}
         self._posture_cache: dict[tuple[str, str], PostureSnapshot] = {}
+        self._last_processed_close_time_ms: dict[str, int] = {}
+        self._last_notified_key: dict[str, str] = {}
+        self._symbols: list[str] = []
+        self._last_heartbeat_ts: datetime | None = None
+        self._last_telegram_update_id: int | None = None
 
     def _today_key(self) -> str:
         return datetime.now(timezone.utc).date().isoformat()
@@ -48,6 +53,52 @@ class StateStore:
         state = self.get_daily_state(symbol)
         with self._lock:
             state.latest_decision = plan
+
+    def get_last_processed_close_time_ms(self, symbol: str) -> int | None:
+        with self._lock:
+            return self._last_processed_close_time_ms.get(symbol)
+
+    def set_last_processed_close_time_ms(self, symbol: str, value: int | None) -> None:
+        with self._lock:
+            if value is None:
+                self._last_processed_close_time_ms.pop(symbol, None)
+            else:
+                self._last_processed_close_time_ms[symbol] = value
+
+    def get_last_notified_key(self, symbol: str) -> str | None:
+        with self._lock:
+            return self._last_notified_key.get(symbol)
+
+    def set_last_notified_key(self, symbol: str, value: str | None) -> None:
+        with self._lock:
+            if value is None:
+                self._last_notified_key.pop(symbol, None)
+            else:
+                self._last_notified_key[symbol] = value
+
+    def get_symbols(self) -> list[str]:
+        with self._lock:
+            return list(self._symbols)
+
+    def set_symbols(self, symbols: list[str]) -> None:
+        with self._lock:
+            self._symbols = list(symbols)
+
+    def get_last_heartbeat_ts(self) -> datetime | None:
+        with self._lock:
+            return self._last_heartbeat_ts
+
+    def set_last_heartbeat_ts(self, value: datetime | None) -> None:
+        with self._lock:
+            self._last_heartbeat_ts = value
+
+    def get_last_telegram_update_id(self) -> int | None:
+        with self._lock:
+            return self._last_telegram_update_id
+
+    def set_last_telegram_update_id(self, value: int | None) -> None:
+        with self._lock:
+            self._last_telegram_update_id = value
 
     def record_trade(self, symbol: str) -> None:
         state = self.get_daily_state(symbol)

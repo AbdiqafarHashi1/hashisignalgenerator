@@ -14,7 +14,7 @@ class Settings(BaseSettings):
         env_file_encoding="utf-8",
         case_sensitive=False,
         extra="forbid",
-        extra="forbid",
+
     )
 
     MODE: Literal["prop_cfd", "personal_crypto", "paper", "signal_only"] = "prop_cfd"

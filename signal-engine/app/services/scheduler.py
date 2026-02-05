@@ -20,10 +20,20 @@ from .notifier import format_trade_message, send_telegram_message
 
 
 class DecisionScheduler:
-    def __init__(self, settings: Settings, state: StateStore, interval_seconds: int = 60) -> None:
+    def __init__(
+        self,
+        settings: Settings,
+        state: StateStore,
+        database,
+        paper_trader=None,
+        interval_seconds: int = 60
+    ) -> None:
         self._settings = settings
         self._state = state
+        self._database = database
+        self._paper_trader = paper_trader
         self._interval = interval_seconds
+
         self._stop_event = asyncio.Event()
         self._task: asyncio.Task | None = None
         self._lock = asyncio.Lock()

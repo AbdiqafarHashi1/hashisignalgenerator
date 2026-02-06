@@ -7,7 +7,7 @@ import { apiFetch, API_BASE, ApiError, getEngineStatus, EngineStatus } from "../
 const CONTROL_BUTTONS = [
   { label: "Start", path: "/start" },
   { label: "Stop", path: "/stop" },
-  { label: "Run Once (Force)", path: "/run?force=true" },
+  { label: "Run Once (Force)", path: "/run" },
   { label: "Test Telegram", path: "/test/telegram" },
 ];
 
@@ -173,7 +173,10 @@ export default function DashboardPage() {
       const apiError = err as ApiError;
       setStatusError((prev) => {
         if (prev !== apiError.message) {
-          addActivityMessage(`Engine status error: ${apiError.message}`, "error");
+          addActivityMessage(
+            `Engine status error: ${apiError.message} (URL: ${apiError.url})`,
+            "error"
+          );
         }
         return apiError.message;
       });
@@ -221,7 +224,7 @@ export default function DashboardPage() {
     } catch (err) {
       const apiError = err as ApiError;
       setError(`${label}: ${apiError.message}`);
-      addActivityMessage(`${label}: ${apiError.message}`, "error");
+      addActivityMessage(`${label}: ${apiError.message} (URL: ${apiError.url})`, "error");
     }
   };
 

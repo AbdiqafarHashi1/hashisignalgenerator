@@ -28,12 +28,50 @@ cp .env.example .env
 uvicorn app.main:app --reload
 ```
 
+## Hetzner Ubuntu deployment (API + Dashboard)
+1. Install Docker + Compose plugin.
+   ```bash
+   sudo apt update
+   sudo apt install -y docker.io docker-compose-plugin
+   sudo usermod -aG docker $USER
+   newgrp docker
+   ```
+2. Clone the repo and create your `.env` file.
+   ```bash
+   git clone <YOUR_REPO_URL> signal-engine
+   cd signal-engine
+   cp .env.example .env
+   ```
+   Update TELEGRAM settings, MODE, SYMBOLS, and any risk settings as needed.
+3. Build and start the services.
+   ```bash
+   docker compose up -d --build
+   ```
+4. Access:
+   - Dashboard: `http://SERVER_IP/`
+   - API docs: `http://SERVER_IP:8000/docs`
+
+No domain is required for the initial deployment. Add a domain + HTTPS later when ready.
+
 ## API
 - `GET /health`
+- `GET /heartbeat`
+- `GET /run?force=true`
+- `GET /start`
+- `GET /stop`
+- `GET /stats`
+- `GET /trades`
+- `GET /positions`
+- `GET /equity`
+- `GET /symbols`
+- `POST /symbols`
+- `GET /paper/reset`
 - `POST /webhook/tradingview`
 - `GET /decision/latest?symbol=BTCUSDT`
 - `POST /trade_outcome`
+- `GET /state`
 - `GET /state/today?symbol=BTCUSDT`
+- `GET /test/telegram`
 
 ## TradingView webhook payload
 Send a single JSON payload that includes the TradingView structure plus normalized market + bias inputs.

@@ -53,8 +53,6 @@ async def latest_state() -> dict:
     for symbol in symbols:
         daily_state = state.get_daily_state(symbol)
         decisions[symbol] = daily_state.latest_decision
-    if not any(decisions.values()):
-        raise HTTPException(status_code=404, detail="no_decision")
     return {"decisions": decisions}
 
 

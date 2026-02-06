@@ -1,11 +1,8 @@
 const DEFAULT_DOCKER_API_BASE = "http://api:8000";
-const DEFAULT_DEV_API_BASE = "http://127.0.0.1:8000";
+const DEFAULT_DEV_API_BASE = "http://localhost:8000";
 
 const resolveApiBase = (): string => {
-  const envBase =
-    process.env.NEXT_PUBLIC_API_BASE ??
-    process.env.NEXT_PUBLIC_API_BASE_URL ??
-    "";
+  const envBase = process.env.NEXT_PUBLIC_API_BASE ?? "";
   if (envBase) {
     return envBase;
   }
@@ -28,15 +25,18 @@ export type ApiError = {
 };
 
 export type EngineStatus = {
-  running: boolean;
-  mode: string;
-  symbols: string[];
-  last_heartbeat_ts: string | null;
-  last_action: {
-    type: string;
-    ts: string | null;
-    detail?: string;
-  } | null;
+  status: string;
+  mode?: string | null;
+  symbols?: string[];
+  last_heartbeat_ts?: string | null;
+  last_action?:
+    | {
+        type?: string;
+        ts?: string | null;
+        detail?: string;
+      }
+    | string
+    | null;
 };
 
 export async function apiFetch<T>(
@@ -74,6 +74,6 @@ export async function apiFetch<T>(
   return (await response.json()) as T;
 }
 
-export async function getEngineStatus(): Promise<EngineStatus> {
+export async function fetchEngineStatus(): Promise<EngineStatus> {
   return apiFetch<EngineStatus>("/engine/status");
 }

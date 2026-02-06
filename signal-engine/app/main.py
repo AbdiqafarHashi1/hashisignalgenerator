@@ -108,10 +108,11 @@ async def reset_paper() -> dict:
 
 
 @app.get("/heartbeat")
-async def heartbeat() -> dict:
-    await scheduler.trigger_heartbeat()
-    return {"status": "ok"}
-
+async def heartbeat():
+    return {
+        "status": "alive",
+        "ts_utc": datetime.now(timezone.utc).isoformat()
+    }
 
 @app.post("/webhook/tradingview")
 async def tradingview_webhook(request: DecisionRequest) -> dict:

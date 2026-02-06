@@ -64,7 +64,7 @@ class DecisionScheduler:
         snapshot = await fetch_btcusdt_klines()
         if not force and not snapshot.kline_is_closed:
             return None, "candle_open"
-        last_processed = self._state.get_last_processed_close_time_ms()
+        last_processed = self._state.get_last_processed_close_time_ms(snapshot.symbol)
         if not force and last_processed == snapshot.kline_close_time_ms:
             return None, "candle_already_processed"
         request = _build_decision_request(snapshot)

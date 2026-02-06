@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable
 from datetime import datetime, timezone
 
 from ..config import Settings
@@ -26,13 +27,15 @@ class DecisionScheduler:
         state: StateStore,
         database,
         paper_trader=None,
-        interval_seconds: int = 60
+        interval_seconds: int = 60,
+        heartbeat_cb: Callable[[], None] | None = None,
     ) -> None:
         self._settings = settings
         self._state = state
         self._database = database
         self._paper_trader = paper_trader
         self._interval = interval_seconds
+        self._heartbeat_cb = heartbeat_cb
 
         self._stop_event = asyncio.Event()
         self._task: asyncio.Task | None = None
@@ -61,6 +64,8 @@ class DecisionScheduler:
         return True
 
     async def run_once(self, force: bool = False) -> tuple[TradePlan | None, str | None]:
+        if self._heartbeat_cb is not None:
+            self._heartbeat_cb()
         snapshot = await fetch_btcusdt_klines()
         if not force and not snapshot.kline_is_closed:
             return None, "candle_open"

@@ -2,7 +2,7 @@
 
 import type { ReactNode } from "react";
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { apiFetch, API_BASE, ApiError } from "../lib/api";
+import { apiFetch, API_BASE, ApiError, getEngineStatus, EngineStatus } from "../lib/api";
 
 const CONTROL_BUTTONS = [
   { label: "Start", path: "/start" },
@@ -40,10 +40,45 @@ export default function DashboardPage() {
   const [equityCurve, setEquityCurve] = useState<Array<Record<string, unknown>>>([]);
   const [stats, setStats] = useState<StatsResponse | null>(null);
   const [todayState, setTodayState] = useState<Record<string, unknown> | null>(null);
-  const [actionStatus, setActionStatus] = useState<string>("");
   const [error, setError] = useState<string>("");
+  const [engineStatus, setEngineStatus] = useState<EngineStatus | null>(null);
+  const [statusError, setStatusError] = useState<string>("");
+  const [activityMessages, setActivityMessages] = useState<
+    Array<{ id: string; message: string; tone: "info" | "error" }>
+  >([]);
 
   const symbolLabel = useMemo(() => selectedSymbol || "--", [selectedSymbol]);
+  const statusLastHeartbeat = useMemo(() => {
+    if (!engineStatus?.last_heartbeat_ts) {
+      return null;
+    }
+    const ts = new Date(engineStatus.last_heartbeat_ts).getTime();
+    if (Number.isNaN(ts)) {
+      return null;
+    }
+    return ts;
+  }, [engineStatus?.last_heartbeat_ts]);
+
+  const heartbeatAgeSeconds = useMemo(() => {
+    if (!statusLastHeartbeat) {
+      return null;
+    }
+    return Math.max(0, Math.floor((Date.now() - statusLastHeartbeat) / 1000));
+  }, [statusLastHeartbeat]);
+
+  const isDisconnected = useMemo(() => {
+    if (statusError) {
+      return true;
+    }
+    if (!statusLastHeartbeat) {
+      return true;
+    }
+    return (heartbeatAgeSeconds ?? 0) > 15;
+  }, [heartbeatAgeSeconds, statusError, statusLastHeartbeat]);
+
+  const isRunning = engineStatus?.running ?? false;
+  const statusBadge = isDisconnected ? "DISCONNECTED" : isRunning ? "RUNNING" : "STOPPED";
+  const statusClass = isDisconnected ? "yellow" : isRunning ? "green" : "red";
 
   const loadSymbols = useCallback(async () => {
     try {
@@ -57,6 +92,14 @@ export default function DashboardPage() {
       setError(`Symbols: ${apiError.message}`);
     }
   }, [selectedSymbol]);
+
+  const addActivityMessage = useCallback((message: string, tone: "info" | "error" = "info") => {
+    const id = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    setActivityMessages((prev) => {
+      const next = [{ id, message, tone }, ...prev];
+      return next.slice(0, 10);
+    });
+  }, []);
 
   const loadFast = useCallback(async () => {
     if (!selectedSymbol) {
@@ -121,6 +164,22 @@ export default function DashboardPage() {
     }
   }, []);
 
+  const loadEngineStatus = useCallback(async () => {
+    try {
+      const payload = await getEngineStatus();
+      setEngineStatus(payload);
+      setStatusError("");
+    } catch (err) {
+      const apiError = err as ApiError;
+      setStatusError((prev) => {
+        if (prev !== apiError.message) {
+          addActivityMessage(`Engine status error: ${apiError.message}`, "error");
+        }
+        return apiError.message;
+      });
+    }
+  }, [addActivityMessage]);
+
   useEffect(() => {
     loadSymbols();
   }, [loadSymbols]);
@@ -139,17 +198,30 @@ export default function DashboardPage() {
     };
   }, [selectedSymbol, loadFast, loadSlow]);
 
+  useEffect(() => {
+    loadEngineStatus();
+    const statusTimer = setInterval(loadEngineStatus, 3000);
+    return () => clearInterval(statusTimer);
+  }, [loadEngineStatus]);
+
   const handleAction = async (path: string, label: string) => {
-    setActionStatus(`${label}...`);
     setError("");
     try {
       await apiFetch(path);
-      setActionStatus(`${label} ✅`);
-      setTimeout(() => setActionStatus(""), 2500);
+      if (label === "Start") {
+        addActivityMessage("Engine started");
+      } else if (label === "Stop") {
+        addActivityMessage("Engine stopped");
+      } else if (label.startsWith("Run Once")) {
+        addActivityMessage("Manual run executed");
+      } else {
+        addActivityMessage(`${label} completed`);
+      }
+      loadEngineStatus();
     } catch (err) {
       const apiError = err as ApiError;
-      setActionStatus("");
       setError(`${label}: ${apiError.message}`);
+      addActivityMessage(`${label}: ${apiError.message}`, "error");
     }
   };
 
@@ -157,7 +229,7 @@ export default function DashboardPage() {
     <div className="min-h-screen px-6 py-8">
       <div className="mx-auto flex max-w-6xl flex-col gap-6">
         <header className="flex flex-wrap items-center justify-between gap-4 rounded-2xl border border-binance-border bg-binance-card/80 p-6 shadow-panel">
-          <div className="space-y-2">
+          <div className="space-y-3">
             <p className="text-sm uppercase tracking-[0.3em] text-slate-500">
               Signal Engine
             </p>
@@ -165,6 +237,28 @@ export default function DashboardPage() {
             <p className="text-sm text-slate-400">
               API Base: <span className="text-slate-200">{API_BASE}</span>
             </p>
+            <div className="flex flex-wrap items-center gap-3 text-sm text-slate-300">
+              <span
+                className={`rounded-full px-3 py-1 text-xs font-semibold uppercase tracking-[0.2em] text-white ${statusClass}`}
+              >
+                {statusBadge}
+              </span>
+              <span>
+                Last heartbeat:{" "}
+                {heartbeatAgeSeconds === null ? "never" : `${heartbeatAgeSeconds}s ago`}
+              </span>
+              <span className="text-slate-400">Mode: {engineStatus?.mode ?? "--"}</span>
+            </div>
+            <div className="text-xs text-slate-400">
+              <span className="font-semibold text-slate-300">Last action:</span>{" "}
+              {engineStatus?.last_action
+                ? `${engineStatus.last_action.type} • ${engineStatus.last_action.ts ?? "--"}${
+                    engineStatus.last_action.detail
+                      ? ` • ${engineStatus.last_action.detail}`
+                      : ""
+                  }`
+                : "--"}
+            </div>
           </div>
           <div className="flex flex-col items-end gap-2 text-right">
             <span className="text-sm text-slate-400">Active symbol</span>
@@ -196,20 +290,46 @@ export default function DashboardPage() {
             </div>
           </div>
           <div className="flex flex-wrap gap-3">
-            {CONTROL_BUTTONS.map((button) => (
-              <button
-                key={button.label}
-                onClick={() => handleAction(button.path, button.label)}
-                className="rounded-lg border border-binance-border bg-binance-dark px-4 py-2 text-sm font-semibold text-slate-200 transition hover:border-binance-accent hover:text-white"
-              >
-                {button.label}
-              </button>
-            ))}
+            {CONTROL_BUTTONS.map((button) => {
+              const disabled =
+                (button.label === "Start" && isRunning) ||
+                (button.label === "Stop" && !isRunning);
+              return (
+                <button
+                  key={button.label}
+                  onClick={() => handleAction(button.path, button.label)}
+                  disabled={disabled}
+                  className={`rounded-lg border border-binance-border px-4 py-2 text-sm font-semibold transition ${
+                    disabled
+                      ? "cursor-not-allowed bg-slate-800 text-slate-500"
+                      : "bg-binance-dark text-slate-200 hover:border-binance-accent hover:text-white"
+                  }`}
+                >
+                  {button.label}
+                </button>
+              );
+            })}
           </div>
-          {actionStatus ? (
-            <p className="text-sm text-binance-accent">{actionStatus}</p>
-          ) : null}
           {error ? <p className="text-sm text-red-400">{error}</p> : null}
+          <div className="rounded-xl border border-binance-border bg-binance-dark/60 p-3">
+            <p className="mb-2 text-xs uppercase tracking-[0.2em] text-slate-400">
+              Activity
+            </p>
+            {activityMessages.length ? (
+              <ul className="space-y-1 text-sm">
+                {activityMessages.map((item) => (
+                  <li
+                    key={item.id}
+                    className={item.tone === "error" ? "text-red-400" : "text-slate-200"}
+                  >
+                    {item.message}
+                  </li>
+                ))}
+              </ul>
+            ) : (
+              <p className="text-sm text-slate-500">No recent activity.</p>
+            )}
+          </div>
         </section>
 
         <section className="grid gap-6 lg:grid-cols-2">

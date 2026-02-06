@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 
 import httpx
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 BINANCE_BASE_URL = "https://api.binance.com"
 
@@ -27,6 +27,7 @@ class BinanceKlineSnapshot(BaseModel):
     kline_close_time_ms: int
     kline_is_closed: bool
     candle: BinanceCandle
+    candles: list[BinanceCandle] = Field(default_factory=list)
 
 
 def _parse_kline(raw: list) -> BinanceCandle:
@@ -43,16 +44,17 @@ def _parse_kline(raw: list) -> BinanceCandle:
     )
 
 
-async def fetch_btcusdt_klines(interval: str = "15m") -> BinanceKlineSnapshot:
+async def fetch_btcusdt_klines(interval: str = "5m", limit: int = 120) -> BinanceKlineSnapshot:
     url = f"{BINANCE_BASE_URL}/api/v3/klines"
-    params = {"symbol": "BTCUSDT", "interval": interval, "limit": 1}
+    params = {"symbol": "BTCUSDT", "interval": interval, "limit": limit}
     async with httpx.AsyncClient(timeout=10.0) as client:
         response = await client.get(url, params=params)
         response.raise_for_status()
         data = response.json()
     if not data:
         raise ValueError("No kline data returned from Binance")
-    candle = _parse_kline(data[-1])
+    candles = [_parse_kline(raw) for raw in data]
+    candle = candles[-1]
     open_time_ms = int(data[-1][0])
     close_time_ms = int(data[-1][6])
     now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
@@ -65,4 +67,5 @@ async def fetch_btcusdt_klines(interval: str = "15m") -> BinanceKlineSnapshot:
         kline_close_time_ms=close_time_ms,
         kline_is_closed=now_ms >= close_time_ms,
         candle=candle,
+        candles=candles,
     )

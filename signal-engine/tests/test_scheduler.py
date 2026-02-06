@@ -12,7 +12,7 @@ from app.state import StateStore
 
 
 def _build_snapshot(close_time_ms: int, closed: bool) -> BinanceKlineSnapshot:
-    open_time = datetime.fromtimestamp((close_time_ms - 900_000) / 1000, tz=timezone.utc)
+    open_time = datetime.fromtimestamp((close_time_ms - 300_000) / 1000, tz=timezone.utc)
     close_time = datetime.fromtimestamp(close_time_ms / 1000, tz=timezone.utc)
     candle = BinanceCandle(
         open_time=open_time,
@@ -25,13 +25,14 @@ def _build_snapshot(close_time_ms: int, closed: bool) -> BinanceKlineSnapshot:
     )
     return BinanceKlineSnapshot(
         symbol="BTCUSDT",
-        interval="15m",
+        interval="5m",
         price=candle.close,
         volume=candle.volume,
-        kline_open_time_ms=close_time_ms - 900_000,
+        kline_open_time_ms=close_time_ms - 300_000,
         kline_close_time_ms=close_time_ms,
         kline_is_closed=closed,
         candle=candle,
+        candles=[candle],
     )
 
 
@@ -54,7 +55,7 @@ def _trade_plan() -> TradePlan:
 def test_scheduler_skips_open_candle(monkeypatch) -> None:
     snapshot = _build_snapshot(close_time_ms=1_000_000, closed=False)
 
-    async def fake_fetch():
+    async def fake_fetch(*args, **kwargs):
         return snapshot
 
     monkeypatch.setattr(scheduler_module, "fetch_btcusdt_klines", fake_fetch)
@@ -67,7 +68,7 @@ def test_scheduler_skips_open_candle(monkeypatch) -> None:
         plan, reason = await scheduler.run_once()
         assert plan is None
         assert reason == "candle_open"
-        assert state.get_last_processed_close_time_ms() is None
+        assert state.get_last_processed_close_time_ms("BTCUSDT") is None
 
     asyncio.run(run())
 
@@ -76,7 +77,7 @@ def test_scheduler_runs_once_per_candle(monkeypatch) -> None:
     snapshot = _build_snapshot(close_time_ms=2_000_000, closed=True)
     calls = {"decide": 0}
 
-    async def fake_fetch():
+    async def fake_fetch(*args, **kwargs):
         return snapshot
 
     def fake_decide(*args, **kwargs):
@@ -94,7 +95,7 @@ def test_scheduler_runs_once_per_candle(monkeypatch) -> None:
         plan, reason = await scheduler.run_once()
         assert plan is not None
         assert reason is None
-        assert state.get_last_processed_close_time_ms() == snapshot.kline_close_time_ms
+        assert state.get_last_processed_close_time_ms("BTCUSDT") == snapshot.kline_close_time_ms
         plan, reason = await scheduler.run_once()
         assert plan is None
         assert reason == "candle_already_processed"
@@ -107,7 +108,7 @@ def test_scheduler_dedupes_notifications(monkeypatch) -> None:
     snapshot = _build_snapshot(close_time_ms=3_000_000, closed=True)
     sent = {"count": 0}
 
-    async def fake_fetch():
+    async def fake_fetch(*args, **kwargs):
         return snapshot
 
     def fake_decide(*args, **kwargs):

@@ -63,7 +63,7 @@ def score_signal(
     else:
         entry_width_pct = 1.0
 
-    # tighter entry zones score higher (15m)
+    # tighter entry zones score higher (5m)
     if entry_width_pct <= 0.0015:        # 0.15%
         structure_quality += 14
     elif entry_width_pct <= 0.0030:      # 0.30%

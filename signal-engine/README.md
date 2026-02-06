@@ -11,13 +11,12 @@ A conservative, signal-only decision engine for crypto/CFD setups. The engine ta
 ## Architecture
 The decision pipeline is a strict, multi-tier filter:
 1. Daily posture (cached per symbol/day)
-2. Regime filter
-3. Bias filter (Token Metrics style)
-4. Structure filter (TradingView webhook)
-5. State/risk gate (daily limits)
-6. Signal scoring and minimum threshold
-7. Dynamic R:R selection
-8. Final TradePlan output
+2. State/risk gate (daily limits + cooldowns)
+3. Trend filter (EMA50 on 5m candles)
+4. Momentum filter (ADX or ATR-over-ATR-SMA)
+5. Engulfing trigger at EMA pullback/break-retest with optional volume confirmation
+6. Fixed scalper SL/TP distances with capped risk
+7. Final TradePlan output
 
 ## Quick start
 ```bash
@@ -86,7 +85,7 @@ Send a single JSON payload that includes the TradingView structure plus normaliz
     "sl_hint": 66350,
     "setup_type": "sweep_reclaim",
     "tf_bias": "4h",
-    "tf_entry": "15m"
+    "tf_entry": "5m"
   },
   "market": {
     "funding_rate": 0.0012,
@@ -97,9 +96,15 @@ Send a single JSON payload that includes the TradingView structure plus normaliz
   "bias": {
     "direction": "long",
     "confidence": 0.81
-  }
+  },
+  "interval": "5m",
+  "candles": [
+    { "open": 67000, "high": 67200, "low": 66950, "close": 67150, "volume": 120.5 },
+    { "open": 67150, "high": 67320, "low": 67020, "close": 67280, "volume": 141.2 }
+  ]
 }
 ```
+The engine expects 5m candles for scalper logic. If you omit `candles`, the engine will return a `RISK_OFF` plan with a `no_candles` rationale.
 
 ## Environment variables
 Modes are strict and can only be `prop_cfd` or `personal_crypto`.
@@ -111,6 +116,8 @@ Key settings (defaults depend on MODE):
 - `max_risk_pct`
 - `max_trades_per_day`
 - `max_daily_loss_pct`
+- `daily_profit_target_pct`
+- `max_consecutive_losses`
 - `min_signal_score`
 
 Risk environment thresholds:
@@ -126,12 +133,22 @@ Safety controls:
 - `max_losses_per_day`
 - `news_blackouts` (UTC windows like `12:00-13:00,19:30-20:15`)
 
-## How R:R supports monthly targets
-The engine only approves trades with asymmetric R:R aligned to posture and setup type:
-- NORMAL posture ranges from 1:2 to 1:2.5
-- OPPORTUNISTIC posture ranges from 1:3 to 1:3.5
-
-When paired with strict risk caps and high-score filtering, the engine focuses on a small number of high-expectancy opportunities. This is designed to make the target monthly returns plausible without increasing frequency or risk.
+Scalper controls:
+- `candle_interval`
+- `candle_history_limit`
+- `ema_length`
+- `momentum_mode`
+- `adx_period`
+- `adx_threshold`
+- `atr_period`
+- `atr_sma_period`
+- `ema_pullback_pct`
+- `engulfing_wick_ratio`
+- `volume_confirm_enabled`
+- `volume_sma_period`
+- `volume_confirm_multiplier`
+- `max_stop_pct`
+- `take_profit_pct`
 
 ## Logging
 Every webhook and decision is logged as JSONL in `./data/logs/YYYY-MM-DD.jsonl` with a correlation id.

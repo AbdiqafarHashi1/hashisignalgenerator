@@ -50,7 +50,7 @@ class TradingViewPayload(BaseModel):
     sl_hint: float
     setup_type: SetupType
     tf_bias: str = "4h"
-    tf_entry: str = "15m"
+    tf_entry: str = "5m"
 
 
 class ScoreBreakdown(BaseModel):
@@ -61,11 +61,21 @@ class ScoreBreakdown(BaseModel):
     total: int
 
 
+class Candle(BaseModel):
+    open: float
+    high: float
+    low: float
+    close: float
+    volume: float | None = None
+
+
 class DecisionRequest(BaseModel):
     tradingview: TradingViewPayload
     market: MarketSnapshot
     bias: BiasSignal
     timestamp: datetime | None = None
+    candles: list[Candle] | None = None
+    interval: str | None = None
 
 
 class PostureSnapshot(BaseModel):

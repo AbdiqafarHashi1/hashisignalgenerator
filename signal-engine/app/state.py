@@ -13,6 +13,7 @@ class DailyState(BaseModel):
     date: str
     trades: int = 0
     losses: int = 0
+    consecutive_losses: int = 0
     pnl_usd: float = 0.0
     last_loss_ts: datetime | None = None
     latest_decision: TradePlan | None = None
@@ -111,25 +112,32 @@ class StateStore:
             state.pnl_usd += pnl_usd
             if not win:
                 state.losses += 1
+                state.consecutive_losses += 1
                 state.last_loss_ts = timestamp
+            else:
+                state.consecutive_losses = 0
 
     def check_limits(self, symbol: str, cfg: Settings, now: datetime) -> tuple[bool, Status, list[str]]:
         state = self.get_daily_state(symbol)
         rationale: list[str] = []
         account_loss_limit = cfg.account_size * cfg.max_daily_loss_pct
+        profit_target = cfg.account_size * (cfg.daily_profit_target_pct or 0.0)
 
         if state.pnl_usd <= -account_loss_limit:
-            rationale.append("daily_loss_limit_exceeded")
+            rationale.append("daily_loss_limit")
             return False, Status.RISK_OFF, rationale
-        if state.losses >= cfg.max_losses_per_day:
-            rationale.append("max_losses_reached")
+        if profit_target > 0 and state.pnl_usd >= profit_target:
+            rationale.append("daily_profit_target")
+            return False, Status.RISK_OFF, rationale
+        if cfg.max_consecutive_losses and state.consecutive_losses >= cfg.max_consecutive_losses:
+            rationale.append("max_losses")
             return False, Status.RISK_OFF, rationale
         if state.trades >= cfg.max_trades_per_day:
-            rationale.append("max_trades_reached")
-            return False, Status.NO_TRADE, rationale
+            rationale.append("max_trades")
+            return False, Status.RISK_OFF, rationale
         if state.last_loss_ts is not None:
             minutes_since = (now - state.last_loss_ts).total_seconds() / 60.0
             if minutes_since < cfg.cooldown_minutes_after_loss:
-                rationale.append("cooldown_after_loss")
-                return False, Status.NO_TRADE, rationale
+                rationale.append("cooldown")
+                return False, Status.RISK_OFF, rationale
         return True, Status.NO_TRADE, rationale

@@ -25,7 +25,7 @@ class DecisionScheduler:
         self,
         settings: Settings,
         state: StateStore,
-        database,
+        database=None,
         paper_trader=None,
         interval_seconds: int = 60,
         heartbeat_cb: Callable[[], None] | None = None,
@@ -66,7 +66,10 @@ class DecisionScheduler:
     async def run_once(self, force: bool = False) -> tuple[TradePlan | None, str | None]:
         if self._heartbeat_cb is not None:
             self._heartbeat_cb()
-        snapshot = await fetch_btcusdt_klines()
+        snapshot = await fetch_btcusdt_klines(
+            interval=self._settings.candle_interval,
+            limit=self._settings.candle_history_limit,
+        )
         if not force and not snapshot.kline_is_closed:
             return None, "candle_open"
         last_processed = self._state.get_last_processed_close_time_ms(snapshot.symbol)
@@ -76,14 +79,14 @@ class DecisionScheduler:
         plan = decide(request, self._state, self._settings)
         self._state.set_latest_decision(snapshot.symbol, plan)
         if snapshot.kline_is_closed:
-            self._state.set_last_processed_close_time_ms(snapshot.kline_close_time_ms)
+            self._state.set_last_processed_close_time_ms(snapshot.symbol, snapshot.kline_close_time_ms)
         if plan.status == Status.TRADE:
             dedupe_key = _notification_key(snapshot, plan)
-            last_notified = self._state.get_last_notified_key()
+            last_notified = self._state.get_last_notified_key(snapshot.symbol)
             if dedupe_key != last_notified:
                 message = format_trade_message(snapshot.symbol, plan)
                 await send_telegram_message(message, self._settings)
-                self._state.set_last_notified_key(dedupe_key)
+                self._state.set_last_notified_key(snapshot.symbol, dedupe_key)
         return plan, None
 
     async def _run_loop(self) -> None:
@@ -123,12 +126,24 @@ def _build_decision_request(snapshot: BinanceKlineSnapshot) -> DecisionRequest:
         "entry_high": entry_high,
         "sl_hint": sl_hint,
         "setup_type": SetupType.break_retest,
+        "tf_entry": snapshot.interval,
     }
     return DecisionRequest(
         tradingview=tradingview_payload,
         market=market,
         bias=bias,
         timestamp=datetime.now(timezone.utc),
+        interval=snapshot.interval,
+        candles=[
+            {
+                "open": item.open,
+                "high": item.high,
+                "low": item.low,
+                "close": item.close,
+                "volume": item.volume,
+            }
+            for item in snapshot.candles
+        ],
     )
 
 

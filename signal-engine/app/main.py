@@ -35,11 +35,7 @@ paper_trader = PaperTrader(settings, database)
 
 running = False
 last_heartbeat_ts: datetime | None = None
-last_action: dict[str, Any] = {
-    "type": "boot",
-    "ts": datetime.now(timezone.utc),
-    "detail": "engine_initialized",
-}
+last_action: str | None = None
 
 
 def _record_heartbeat() -> None:
@@ -47,15 +43,9 @@ def _record_heartbeat() -> None:
     last_heartbeat_ts = datetime.now(timezone.utc)
 
 
-def _record_action(action_type: str, detail: str | None = None) -> None:
+def _record_action(action_type: str) -> None:
     global last_action
-    payload: dict[str, Any] = {
-        "type": action_type,
-        "ts": datetime.now(timezone.utc),
-    }
-    if detail:
-        payload["detail"] = detail
-    last_action = payload
+    last_action = action_type
 
 
 scheduler = DecisionScheduler(settings, state, database, paper_trader, heartbeat_cb=_record_heartbeat)
@@ -78,7 +68,7 @@ async def health() -> dict[str, str]:
 
 @app.get("/run")
 async def run_once(force: bool = Query(False)) -> dict:
-    _record_action("run_once")
+    _record_action("run")
     results = await scheduler.run_once(force=force)
     return {"status": "ok", "results": results}
 
@@ -98,7 +88,7 @@ async def start_scheduler() -> dict[str, str]:
     started = await scheduler.start()
     global running
     running = scheduler.running
-    _record_action("start", "scheduler_started" if started else "already_running")
+    _record_action("start")
     return {"status": "started" if started else "already_running"}
 
 
@@ -107,7 +97,7 @@ async def stop_scheduler() -> dict[str, str]:
     stopped = await scheduler.stop()
     global running
     running = scheduler.running
-    _record_action("stop", "scheduler_stopped" if stopped else "already_stopped")
+    _record_action("stop")
     return {"status": "stopped" if stopped else "already_stopped"}
 
 
@@ -166,14 +156,10 @@ async def engine_status() -> dict[str, Any]:
     global running
     running = scheduler.running
     return {
-        "running": running,
-        "mode": settings.engine_mode,
-        "symbols": settings.symbols,
+        "status": "RUNNING" if running else "STOPPED",
+        "mode": settings.MODE,
         "last_heartbeat_ts": last_heartbeat_ts.isoformat() if last_heartbeat_ts else None,
-        "last_action": {
-            **last_action,
-            "ts": last_action.get("ts").isoformat() if last_action.get("ts") else None,
-        },
+        "last_action": last_action,
     }
 
 @app.post("/webhook/tradingview")

@@ -11,6 +11,18 @@ body {
   font-feature-settings: "ss01";
 }
 
+.green {
+  background: #16a34a;
+}
+
+.red {
+  background: #dc2626;
+}
+
+.yellow {
+  background: #ca8a04;
+}
+
 ::-webkit-scrollbar {
   width: 8px;
 }

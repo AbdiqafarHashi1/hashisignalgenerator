@@ -8,6 +8,18 @@ export type ApiError = {
   message: string;
 };
 
+export type EngineStatus = {
+  running: boolean;
+  mode: string;
+  symbols: string[];
+  last_heartbeat_ts: string | null;
+  last_action: {
+    type: string;
+    ts: string | null;
+    detail?: string;
+  } | null;
+};
+
 export async function apiFetch<T>(
   path: string,
   options: RequestInit = {}
@@ -33,4 +45,8 @@ export async function apiFetch<T>(
   }
 
   return (await response.json()) as T;
+}
+
+export async function getEngineStatus(): Promise<EngineStatus> {
+  return apiFetch<EngineStatus>("/engine/status");
 }

@@ -2,11 +2,16 @@
 
 import json
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timezone, date
 from pathlib import Path
 from typing import Any
 
 from ..config import Settings
+
+def _json_default(o):
+    if isinstance(o, (datetime, date)):
+        return o.isoformat()
+    return str(o)
 
 
 def _log_path(cfg: Settings, when: datetime) -> Path:
@@ -25,4 +30,5 @@ def log_event(cfg: Settings, event_type: str, payload: dict[str, Any], correlati
         "payload": payload,
     }
     with path.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps(record, separators=(",", ":")) + "\n")
+        handle.write(json.dumps(record, separators=(",", ":"), default=_json_default) + "\n")
+

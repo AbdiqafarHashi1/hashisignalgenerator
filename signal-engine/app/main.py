@@ -5,6 +5,7 @@ from uuid import uuid4
 
 from fastapi import FastAPI, HTTPException, Query
 
+from .services.notifier import send_telegram_message
 from .config import get_settings
 from .models import DecisionRequest, TradeOutcome, Status
 from .state import StateStore
@@ -13,7 +14,6 @@ from .services.paper_trader import PaperTrader
 from .services.stats import compute_stats
 from .storage.store import log_event
 from .strategy.decision import decide
-from .services.scheduler import DecisionScheduler
 from .services.scheduler import DecisionScheduler
 
 app = FastAPI(title="signal-engine", version="1.0.0")
@@ -28,6 +28,11 @@ scheduler = DecisionScheduler(settings, state, database, paper_trader)
 @app.get("/")
 async def root() -> dict[str, str]:
     return {"status": "ok"}
+
+@app.get("/test/telegram")
+async def test_telegram() -> dict:
+    ok = await send_telegram_message("✅ Telegram test from Swagger", settings)
+    return {"status": "sent" if ok else "failed"}
 
 
 @app.get("/health")

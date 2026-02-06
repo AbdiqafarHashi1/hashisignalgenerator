@@ -2,7 +2,7 @@
 
 import type { ReactNode } from "react";
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { apiFetch, API_BASE, ApiError, getEngineStatus, EngineStatus } from "../../lib/api";
+import { apiFetch, API_BASE, ApiError, fetchEngineStatus, EngineStatus } from "../../lib/api";
 
 const CONTROL_BUTTONS = [
   { label: "Start", path: "/start" },
@@ -35,6 +35,7 @@ export default function LiveDashboard() {
   const [symbols, setSymbols] = useState<string[]>([]);
   const [selectedSymbol, setSelectedSymbol] = useState<string>("");
   const [decision, setDecision] = useState<Record<string, unknown> | null>(null);
+  const [decisionError, setDecisionError] = useState<string>("");
   const [positions, setPositions] = useState<Array<Record<string, unknown>>>([]);
   const [trades, setTrades] = useState<Array<Record<string, unknown>>>([]);
   const [equityCurve, setEquityCurve] = useState<Array<Record<string, unknown>>>([]);
@@ -43,6 +44,8 @@ export default function LiveDashboard() {
   const [error, setError] = useState<string>("");
   const [engineStatus, setEngineStatus] = useState<EngineStatus | null>(null);
   const [statusError, setStatusError] = useState<string>("");
+  const [actionInFlight, setActionInFlight] = useState<string | null>(null);
+  const [heartbeatAgeSeconds, setHeartbeatAgeSeconds] = useState<number | null>(null);
   const [activityMessages, setActivityMessages] = useState<
     Array<{ id: string; message: string; tone: "info" | "error" }>
   >([]);
@@ -59,26 +62,20 @@ export default function LiveDashboard() {
     return ts;
   }, [engineStatus?.last_heartbeat_ts]);
 
-  const heartbeatAgeSeconds = useMemo(() => {
-    if (!statusLastHeartbeat) {
-      return null;
-    }
-    return Math.max(0, Math.floor((Date.now() - statusLastHeartbeat) / 1000));
-  }, [statusLastHeartbeat]);
+  const isRunning = engineStatus?.status === "RUNNING";
+  const isStopped = engineStatus?.status === "STOPPED";
+  const statusBadge = statusError
+    ? "DISCONNECTED/API ERROR"
+    : isRunning
+    ? "RUNNING"
+    : isStopped
+    ? "STOPPED"
+    : "UNKNOWN";
+  const statusClass = statusError ? "yellow" : isRunning ? "green" : "red";
 
-  const isDisconnected = useMemo(() => {
-    if (statusError) {
-      return true;
-    }
-    if (!statusLastHeartbeat) {
-      return true;
-    }
-    return (heartbeatAgeSeconds ?? 0) > 15;
-  }, [heartbeatAgeSeconds, statusError, statusLastHeartbeat]);
-
-  const isRunning = engineStatus?.running ?? false;
-  const statusBadge = isDisconnected ? "DISCONNECTED" : isRunning ? "RUNNING" : "STOPPED";
-  const statusClass = isDisconnected ? "yellow" : isRunning ? "green" : "red";
+  const formatApiError = useCallback((label: string, apiError: ApiError) => {
+    return `${label}: ${apiError.message} (Status: ${apiError.status} URL: ${apiError.url})`;
+  }, []);
 
   const loadSymbols = useCallback(async () => {
     try {
@@ -89,9 +86,9 @@ export default function LiveDashboard() {
       }
     } catch (err) {
       const apiError = err as ApiError;
-      setError(`Symbols: ${apiError.message}`);
+      setError(formatApiError("Symbols", apiError));
     }
-  }, [selectedSymbol]);
+  }, [formatApiError, selectedSymbol]);
 
   const addActivityMessage = useCallback((message: string, tone: "info" | "error" = "info") => {
     const id = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
@@ -110,12 +107,15 @@ export default function LiveDashboard() {
         `/decision/latest?symbol=${selectedSymbol}`
       );
       setDecision(decisionPayload.decision ?? null);
+      setDecisionError("");
     } catch (err) {
       const apiError = err as ApiError;
-      if (apiError.status === 404) {
+      if (apiError.status === 404 && apiError.message === "no_decision") {
         setDecision(null);
+        setDecisionError("");
       } else {
-        setError(`Decision: ${apiError.message}`);
+        setDecision(null);
+        setDecisionError(formatApiError("Decision", apiError));
       }
     }
 
@@ -124,7 +124,7 @@ export default function LiveDashboard() {
       setPositions(positionsPayload.positions ?? []);
     } catch (err) {
       const apiError = err as ApiError;
-      setError(`Positions: ${apiError.message}`);
+      setError(formatApiError("Positions", apiError));
     }
 
     try {
@@ -134,9 +134,9 @@ export default function LiveDashboard() {
       setTodayState(todayPayload.state ?? null);
     } catch (err) {
       const apiError = err as ApiError;
-      setError(`State today: ${apiError.message}`);
+      setError(formatApiError("State today", apiError));
     }
-  }, [selectedSymbol]);
+  }, [formatApiError, selectedSymbol]);
 
   const loadSlow = useCallback(async () => {
     try {
@@ -144,7 +144,7 @@ export default function LiveDashboard() {
       setTrades(tradesPayload.trades ?? []);
     } catch (err) {
       const apiError = err as ApiError;
-      setError(`Trades: ${apiError.message}`);
+      setError(formatApiError("Trades", apiError));
     }
 
     try {
@@ -152,7 +152,7 @@ export default function LiveDashboard() {
       setStats(statsPayload);
     } catch (err) {
       const apiError = err as ApiError;
-      setError(`Stats: ${apiError.message}`);
+      setError(formatApiError("Stats", apiError));
     }
 
     try {
@@ -160,28 +160,26 @@ export default function LiveDashboard() {
       setEquityCurve(equityPayload.equity_curve ?? []);
     } catch (err) {
       const apiError = err as ApiError;
-      setError(`Equity: ${apiError.message}`);
+      setError(formatApiError("Equity", apiError));
     }
-  }, []);
+  }, [formatApiError]);
 
   const loadEngineStatus = useCallback(async () => {
     try {
-      const payload = await getEngineStatus();
+      const payload = await fetchEngineStatus();
       setEngineStatus(payload);
       setStatusError("");
     } catch (err) {
       const apiError = err as ApiError;
+      const message = formatApiError("Engine status", apiError);
       setStatusError((prev) => {
-        if (prev !== apiError.message) {
-          addActivityMessage(
-            `Engine status error: ${apiError.message} (URL: ${apiError.url})`,
-            "error"
-          );
+        if (prev !== message) {
+          addActivityMessage(message, "error");
         }
-        return apiError.message;
+        return message;
       });
     }
-  }, [addActivityMessage]);
+  }, [addActivityMessage, formatApiError]);
 
   useEffect(() => {
     loadSymbols();
@@ -207,9 +205,25 @@ export default function LiveDashboard() {
     return () => clearInterval(statusTimer);
   }, [loadEngineStatus]);
 
+  useEffect(() => {
+    if (!statusLastHeartbeat) {
+      setHeartbeatAgeSeconds(null);
+      return;
+    }
+    const updateAge = () => {
+      setHeartbeatAgeSeconds(
+        Math.max(0, Math.floor((Date.now() - statusLastHeartbeat) / 1000))
+      );
+    };
+    updateAge();
+    const heartbeatTimer = setInterval(updateAge, 1000);
+    return () => clearInterval(heartbeatTimer);
+  }, [statusLastHeartbeat]);
+
   const handleAction = async (path: string, label: string) => {
     setError("");
     try {
+      setActionInFlight(label);
       await apiFetch(path);
       if (label === "Start") {
         addActivityMessage("Engine started");
@@ -220,13 +234,31 @@ export default function LiveDashboard() {
       } else {
         addActivityMessage(`${label} completed`);
       }
-      loadEngineStatus();
+      await loadEngineStatus();
     } catch (err) {
       const apiError = err as ApiError;
-      setError(`${label}: ${apiError.message}`);
-      addActivityMessage(`${label}: ${apiError.message} (URL: ${apiError.url})`, "error");
+      const message = formatApiError(label, apiError);
+      setError(message);
+      addActivityMessage(message, "error");
+    } finally {
+      setActionInFlight(null);
     }
   };
+
+  const decisionDisplay =
+    decision ?? (decisionError ? { status: "error" } : { status: "waiting" });
+  const lastActionText = useMemo(() => {
+    if (!engineStatus?.last_action) {
+      return "--";
+    }
+    if (typeof engineStatus.last_action === "string") {
+      return engineStatus.last_action;
+    }
+    const type = engineStatus.last_action.type ?? "unknown";
+    const ts = engineStatus.last_action.ts ?? "--";
+    const detail = engineStatus.last_action.detail ? ` • ${engineStatus.last_action.detail}` : "";
+    return `${type} • ${ts}${detail}`;
+  }, [engineStatus?.last_action]);
 
   return (
     <div className="min-h-screen px-6 py-8">
@@ -252,15 +284,12 @@ export default function LiveDashboard() {
               </span>
               <span className="text-slate-400">Mode: {engineStatus?.mode ?? "--"}</span>
             </div>
+            {statusError ? (
+              <p className="text-xs text-yellow-400">{statusError}</p>
+            ) : null}
             <div className="text-xs text-slate-400">
               <span className="font-semibold text-slate-300">Last action:</span>{" "}
-              {engineStatus?.last_action
-                ? `${engineStatus.last_action.type} • ${engineStatus.last_action.ts ?? "--"}${
-                    engineStatus.last_action.detail
-                      ? ` • ${engineStatus.last_action.detail}`
-                      : ""
-                  }`
-                : "--"}
+              {lastActionText}
             </div>
           </div>
           <div className="flex flex-col items-end gap-2 text-right">
@@ -296,7 +325,8 @@ export default function LiveDashboard() {
             {CONTROL_BUTTONS.map((button) => {
               const disabled =
                 (button.label === "Start" && isRunning) ||
-                (button.label === "Stop" && !isRunning);
+                (button.label === "Stop" && !isRunning) ||
+                Boolean(actionInFlight);
               return (
                 <button
                   key={button.label}
@@ -338,7 +368,10 @@ export default function LiveDashboard() {
         <section className="grid gap-6 lg:grid-cols-2">
           <div className="space-y-6">
             <Panel title="Latest Decision">
-              <JsonBlock data={decision ?? { status: "waiting" }} />
+              {decisionError ? (
+                <p className="mb-3 text-sm text-red-400">{decisionError}</p>
+              ) : null}
+              <JsonBlock data={decisionDisplay} />
             </Panel>
             <Panel title="Today State">
               <JsonBlock data={todayState ?? { status: "waiting" }} />

@@ -1,11 +1,30 @@
-export const API_BASE =
-  typeof window === "undefined"
-    ? process.env.INTERNAL_API_BASE_URL ?? "http://api:8000"
-    : process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000";
+const DEFAULT_DOCKER_API_BASE = "http://api:8000";
+const DEFAULT_DEV_API_BASE = "http://127.0.0.1:8000";
+
+const resolveApiBase = (): string => {
+  const envBase =
+    process.env.NEXT_PUBLIC_API_BASE ??
+    process.env.NEXT_PUBLIC_API_BASE_URL ??
+    "";
+  if (envBase) {
+    return envBase;
+  }
+
+  if (typeof window === "undefined") {
+    return process.env.INTERNAL_API_BASE_URL ?? DEFAULT_DOCKER_API_BASE;
+  }
+
+  const isLocalhost =
+    window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1";
+  return isLocalhost ? DEFAULT_DEV_API_BASE : DEFAULT_DOCKER_API_BASE;
+};
+
+export const API_BASE = resolveApiBase();
 
 export type ApiError = {
   status: number;
   message: string;
+  url: string;
 };
 
 export type EngineStatus = {
@@ -24,13 +43,21 @@ export async function apiFetch<T>(
   path: string,
   options: RequestInit = {}
 ): Promise<T> {
-  const response = await fetch(`${API_BASE}${path}`, {
-    ...options,
-    headers: {
-      "Content-Type": "application/json",
-      ...(options.headers ?? {}),
-    },
-  });
+  const url = `${API_BASE}${path}`;
+  let response: Response;
+  try {
+    response = await fetch(url, {
+      ...options,
+      headers: {
+        "Content-Type": "application/json",
+        ...(options.headers ?? {}),
+      },
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Failed to fetch";
+    const apiError: ApiError = { status: 0, message, url };
+    throw apiError;
+  }
 
   if (!response.ok) {
     let message = response.statusText;
@@ -40,7 +67,7 @@ export async function apiFetch<T>(
     } catch (error) {
       message = response.statusText;
     }
-    const apiError: ApiError = { status: response.status, message };
+    const apiError: ApiError = { status: response.status, message, url };
     throw apiError;
   }
 

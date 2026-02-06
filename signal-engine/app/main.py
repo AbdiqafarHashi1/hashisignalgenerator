@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 from uuid import uuid4
 
 from fastapi import FastAPI, HTTPException, Query
+from fastapi.middleware.cors import CORSMiddleware
 
 from .services.notifier import send_telegram_message
 from .config import get_settings
@@ -17,6 +18,14 @@ from .strategy.decision import decide
 from .services.scheduler import DecisionScheduler
 
 app = FastAPI(title="signal-engine", version="1.0.0")
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # allow dashboard
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 settings = get_settings()
 state = StateStore()
 state.set_symbols(settings.symbols)

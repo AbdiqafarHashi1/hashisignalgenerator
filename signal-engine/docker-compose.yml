@@ -5,6 +5,9 @@
       - "8000:8000"
     env_file:
       - .env
+    environment:
+      MARKET_PROVIDER: "binance_public"
+      MARKET_DATA_ENABLED: "true"
     volumes:
       - ./data:/app/data
     restart: unless-stopped

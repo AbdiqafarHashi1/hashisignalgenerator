@@ -2,6 +2,8 @@
 
 from datetime import datetime, time
 from functools import lru_cache
+import json
+import logging
 from typing import Literal
 
 from pydantic import AliasChoices, Field, field_validator, model_validator
@@ -31,6 +33,8 @@ class Settings(BaseSettings):
         False,
         validation_alias=AliasChoices("DEBUG_DISABLE_HARD_RISK_GATES", "debug_disable_hard_risk_gates"),
     )
+    market_provider: str = Field("binance_public", validation_alias=AliasChoices("MARKET_PROVIDER", "market_provider"))
+    market_data_enabled: bool = Field(True, validation_alias=AliasChoices("MARKET_DATA_ENABLED", "market_data_enabled"))
 
     account_size: float | None = None
     base_risk_pct: float | None = None
@@ -76,11 +80,17 @@ class Settings(BaseSettings):
     @classmethod
     def parse_symbols(cls, value: str | list[str]) -> list[str]:
         if isinstance(value, str):
-            return [item.strip() for item in value.split(",") if item.strip()]
-        return value
+            try:
+                value = json.loads(value)
+            except json.JSONDecodeError as exc:
+                raise ValueError(f"SYMBOLS must be a JSON list string, got {value!r}") from exc
+        if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+            raise ValueError(f"SYMBOLS must be a list of strings, got {value!r}")
+        return [item.strip().upper() for item in value if item.strip()]
 
     @model_validator(mode="after")
     def apply_mode_defaults(self) -> "Settings":
+        logger = logging.getLogger(__name__)
         if self.MODE in {"paper", "signal_only"}:
             self.engine_mode = self.MODE
             self.MODE = "prop_cfd"
@@ -112,16 +122,24 @@ class Settings(BaseSettings):
             if getattr(self, key) is None:
                 setattr(self, key, value)
         if self.debug_loosen:
-            self.candle_interval = "1m"
-            self.min_signal_score = 0
-            self.trend_strength_min = min(self.trend_strength_min or 0.0, 0.1)
-            self.engulfing_wick_ratio = max(self.engulfing_wick_ratio, 1.5)
-            self.news_blackouts = ""
-            self.cooldown_minutes_after_loss = 0
-            if self.max_trades_per_day is None:
-                self.max_trades_per_day = 50
-            else:
-                self.max_trades_per_day = max(self.max_trades_per_day, 50)
+            changes: list[str] = []
+            if self.min_signal_score is not None:
+                original = self.min_signal_score
+                self.min_signal_score = max(0, self.min_signal_score - 8)
+                if self.min_signal_score != original:
+                    changes.append(f"min_signal_score {original}->{self.min_signal_score}")
+            if self.trend_strength_min is not None:
+                original = self.trend_strength_min
+                self.trend_strength_min = max(0.0, self.trend_strength_min - 0.05)
+                if self.trend_strength_min != original:
+                    changes.append(f"trend_strength_min {original}->{self.trend_strength_min}")
+            if self.adx_threshold is not None:
+                original = self.adx_threshold
+                self.adx_threshold = max(0.0, self.adx_threshold - 3.0)
+                if self.adx_threshold != original:
+                    changes.append(f"adx_threshold {original}->{self.adx_threshold}")
+            if changes:
+                logger.info("debug_loosen applied: %s", ", ".join(changes))
         return self
 
     def _profile_defaults(self) -> dict[str, object]:
@@ -182,6 +200,8 @@ class Settings(BaseSettings):
             "debug_loosen": self.debug_loosen,
             "debug_disable_hard_risk_gates": self.debug_disable_hard_risk_gates,
             "strategy": self.strategy,
+            "market_provider": self.market_provider,
+            "market_data_enabled": self.market_data_enabled,
         }
 
 

@@ -8,6 +8,8 @@ from app.models import Direction, Posture, Status, TradePlan
 from app.providers.binance import BinanceCandle, BinanceKlineSnapshot
 from app.services import scheduler as scheduler_module
 from app.services.scheduler import DecisionScheduler
+from app.services.database import Database
+from app.services.paper_trader import PaperTrader
 from app.state import StateStore
 
 
@@ -135,5 +137,75 @@ def test_scheduler_dedupes_notifications(monkeypatch) -> None:
         await scheduler.run_once(force=True)
         await scheduler.run_once(force=True)
         assert sent["count"] == 1
+
+    asyncio.run(run())
+
+
+def test_scheduler_trade_pipeline_creates_paper_trade(monkeypatch, tmp_path) -> None:
+    snapshot = _build_snapshot(close_time_ms=4_000_000, closed=True)
+    sent = {"count": 0}
+
+    async def fake_fetch(*args, **kwargs):
+        return snapshot
+
+    def fake_decide(*args, **kwargs):
+        return _trade_plan()
+
+    async def fake_send(message: str, settings: Settings):
+        sent["count"] += 1
+        return True
+
+    monkeypatch.setattr(scheduler_module, "fetch_symbol_klines", fake_fetch)
+    monkeypatch.setattr(scheduler_module, "decide", fake_decide)
+    monkeypatch.setattr(scheduler_module, "send_telegram_message", fake_send)
+
+    settings = Settings(
+        MODE="paper",
+        telegram_enabled=True,
+        telegram_bot_token="token",
+        telegram_chat_id="chat",
+        data_dir=str(tmp_path),
+        _env_file=None,
+    )
+    state = StateStore()
+    database = Database(settings)
+    paper_trader = PaperTrader(settings, database)
+    scheduler = DecisionScheduler(settings, state, database=database, paper_trader=paper_trader)
+
+    async def run():
+        await scheduler.run_once(force=True)
+        assert sent["count"] == 1
+        assert len(database.fetch_trades()) == 1
+        assert len(database.fetch_open_trades()) == 1
+
+    asyncio.run(run())
+
+
+def test_scheduler_dedupes_trades_per_candle(monkeypatch, tmp_path) -> None:
+    snapshot = _build_snapshot(close_time_ms=5_000_000, closed=True)
+
+    async def fake_fetch(*args, **kwargs):
+        return snapshot
+
+    def fake_decide(*args, **kwargs):
+        return _trade_plan()
+
+    monkeypatch.setattr(scheduler_module, "fetch_symbol_klines", fake_fetch)
+    monkeypatch.setattr(scheduler_module, "decide", fake_decide)
+
+    settings = Settings(
+        MODE="paper",
+        data_dir=str(tmp_path),
+        _env_file=None,
+    )
+    state = StateStore()
+    database = Database(settings)
+    paper_trader = PaperTrader(settings, database)
+    scheduler = DecisionScheduler(settings, state, database=database, paper_trader=paper_trader)
+
+    async def run():
+        await scheduler.run_once(force=True)
+        await scheduler.run_once(force=True)
+        assert len(database.fetch_trades()) == 1
 
     asyncio.run(run())

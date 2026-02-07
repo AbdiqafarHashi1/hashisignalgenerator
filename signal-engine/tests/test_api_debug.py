@@ -86,3 +86,46 @@ def test_telegram_test_endpoint(monkeypatch) -> None:
     response = client.get("/test/telegram")
     assert response.status_code == 200
     assert response.json()["status"] == "sent"
+
+
+def _fresh_main(monkeypatch, env: dict[str, str]):
+    from importlib import reload
+
+    from app import config as config_module
+    from app import main as main_module
+
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+    config_module.get_settings.cache_clear()
+    return reload(main_module)
+
+
+def test_debug_runtime_includes_profile(monkeypatch) -> None:
+    main_module = _fresh_main(monkeypatch, {"PROFILE": "diag", "MIN_SIGNAL_SCORE": "35"})
+    client = TestClient(main_module.app)
+    response = client.get("/debug/runtime")
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["settings"]["profile"] == "diag"
+    assert payload["settings"]["min_signal_score"] == 35
+
+
+def test_force_signal_respects_hard_gates(monkeypatch) -> None:
+    main_module = _fresh_main(
+        monkeypatch,
+        {"DEBUG_LOOSEN": "true", "ACCOUNT_SIZE": "1000", "MAX_DAILY_LOSS_PCT": "0.01"},
+    )
+    snapshot = _build_snapshot(close_time_ms=2_000_000, closed=True)
+    monkeypatch.setattr(main_module.scheduler, "last_snapshot", lambda symbol: snapshot)
+    daily_state = main_module.state.get_daily_state("BTCUSDT")
+    daily_state.pnl_usd = -20.0
+
+    client = TestClient(main_module.app)
+    response = client.post(
+        "/debug/force_signal",
+        json={"symbol": "BTCUSDT", "direction": "long", "bypass_soft_gates": True},
+    )
+    assert response.status_code == 200
+    decision = response.json()["decision"]
+    assert decision["status"] == "RISK_OFF"
+    assert "daily_loss_limit" in decision["rationale"]

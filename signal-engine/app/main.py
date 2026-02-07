@@ -2,7 +2,7 @@
 
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 from uuid import uuid4
 
 from fastapi import FastAPI, HTTPException, Query
@@ -11,7 +11,7 @@ from pydantic import BaseModel, Field
 
 from .services.notifier import format_trade_message, send_telegram_message
 from .config import get_settings
-from .models import DecisionRequest, Direction, Posture, TradeOutcome, TradePlan, Status
+from .models import BiasSignal, DecisionRequest, Direction, MarketSnapshot, Posture, SetupType, Status, TradeOutcome, TradePlan
 from .state import StateStore
 from .services.database import Database
 from .services.paper_trader import PaperTrader
@@ -188,6 +188,8 @@ async def tradingview_webhook(request: DecisionRequest) -> dict:
 class DebugForceSignalRequest(BaseModel):
     symbol: str | None = Field(default=None, min_length=1)
     direction: Direction | None = None
+    strategy: Literal["scalper", "baseline"] | None = None
+    bypass_soft_gates: bool = False
 
 
 @app.get("/decision/latest")
@@ -224,6 +226,7 @@ async def debug_runtime() -> dict:
         if last_processed_ms is not None:
             last_processed_iso = datetime.fromtimestamp(last_processed_ms / 1000, tz=timezone.utc).isoformat()
         last_decision_ts = state.get_last_decision_ts(symbol)
+        latest_decision = state.get_daily_state(symbol).latest_decision
         symbol_data.append(
             {
                 "symbol": symbol,
@@ -232,6 +235,8 @@ async def debug_runtime() -> dict:
                 "last_processed_candle_ts": last_processed_iso,
                 "last_decision_ts": last_decision_ts.isoformat() if last_decision_ts else None,
                 "active_risk_gates": _active_risk_gates(symbol, now),
+                "last_decision_status": latest_decision.status if latest_decision else None,
+                "gate_reasons_top3": _top_gate_reasons(latest_decision),
             }
         )
     return {
@@ -266,28 +271,21 @@ async def debug_force_signal(payload: DebugForceSignalRequest) -> dict:
     snapshot = scheduler.last_snapshot(symbol)
     if snapshot is None:
         raise HTTPException(status_code=400, detail="no_recent_market_data")
-    entry = snapshot.candle.close
-    stop_loss = entry * (0.99 if direction == Direction.long else 1.01)
-    take_profit = entry * (1.01 if direction == Direction.long else 0.99)
-    posture = state.get_posture(symbol).posture if state.get_posture(symbol) else Posture.NORMAL
-    plan = TradePlan(
-        status=Status.TRADE,
+    effective_settings = settings.model_copy(
+        update={"strategy": payload.strategy or settings.strategy}
+    )
+    plan = _build_force_plan(
+        payload=payload,
+        symbol=symbol,
         direction=direction,
-        entry_zone=(entry, entry),
-        stop_loss=stop_loss,
-        take_profit=take_profit,
-        risk_pct_used=settings.base_risk_pct,
-        position_size_usd=None,
-        signal_score=None,
-        posture=posture,
-        rationale=["debug_force_signal"],
-        raw_input_snapshot={"symbol": symbol, "direction": direction.value},
+        snapshot=snapshot,
+        effective_settings=effective_settings,
     )
     state.set_latest_decision(symbol, plan)
     correlation_id = str(uuid4())
     _record_correlation_id(correlation_id)
     log_event(settings, "decision", plan.model_dump(), correlation_id)
-    if settings.telegram_enabled:
+    if plan.status == Status.TRADE and settings.telegram_enabled:
         message = format_trade_message(symbol, plan)
         await send_telegram_message(message, settings)
     return {"symbol": symbol, "decision": plan}
@@ -336,3 +334,143 @@ def _active_risk_gates(symbol: str, now: datetime) -> list[dict[str, str]]:
         if minutes_since < settings.cooldown_minutes_after_loss:
             active.append({"gate": "cooldown", "reason": "cooldown"})
     return active
+
+
+def _top_gate_reasons(plan: TradePlan | None) -> list[str]:
+    if plan is None:
+        return []
+    if plan.status not in {Status.RISK_OFF, Status.NO_TRADE}:
+        return []
+    return list(plan.rationale)[:3]
+
+
+def _build_force_plan(
+    payload: DebugForceSignalRequest,
+    symbol: str,
+    direction: Direction,
+    snapshot,
+    effective_settings,
+) -> TradePlan:
+    now = datetime.now(timezone.utc)
+    hard_gate_reasons = _hard_risk_gate_reasons(symbol, now)
+    if hard_gate_reasons:
+        return TradePlan(
+            status=Status.RISK_OFF,
+            direction=direction,
+            entry_zone=None,
+            stop_loss=None,
+            take_profit=None,
+            risk_pct_used=None,
+            position_size_usd=None,
+            signal_score=None,
+            posture=Posture.RISK_OFF,
+            rationale=hard_gate_reasons,
+            raw_input_snapshot={"symbol": symbol, "direction": direction.value},
+        )
+    request = _build_force_request(symbol, direction, snapshot)
+    plan = decide(request, state, effective_settings)
+    if payload.bypass_soft_gates and plan.status in {Status.RISK_OFF, Status.NO_TRADE}:
+        if not _contains_hard_gate(plan.rationale):
+            return _forced_trade_plan(symbol, direction, snapshot, plan, effective_settings)
+    return plan
+
+
+def _build_force_request(symbol: str, direction: Direction, snapshot) -> DecisionRequest:
+    candle = snapshot.candle
+    entry_low = min(candle.open, candle.close)
+    entry_high = max(candle.open, candle.close)
+    sl_hint = candle.low if direction == Direction.long else candle.high
+    tradingview_payload = {
+        "symbol": symbol,
+        "direction_hint": direction,
+        "entry_low": entry_low,
+        "entry_high": entry_high,
+        "sl_hint": sl_hint,
+        "setup_type": SetupType.break_retest,
+        "tf_entry": snapshot.interval,
+    }
+    market = MarketSnapshot(
+        funding_rate=0.01,
+        oi_change_24h=0.0,
+        leverage_ratio=1.0,
+        trend_strength=0.5,
+    )
+    bias = BiasSignal(direction=direction, confidence=0.6)
+    return DecisionRequest(
+        tradingview=tradingview_payload,
+        market=market,
+        bias=bias,
+        timestamp=datetime.now(timezone.utc),
+        interval=snapshot.interval,
+        candles=[
+            {
+                "open": item.open,
+                "high": item.high,
+                "low": item.low,
+                "close": item.close,
+                "volume": item.volume,
+            }
+            for item in snapshot.candles
+        ],
+    )
+
+
+def _forced_trade_plan(
+    symbol: str,
+    direction: Direction,
+    snapshot,
+    prior_plan: TradePlan,
+    effective_settings,
+) -> TradePlan:
+    entry = snapshot.candle.close
+    stop_loss = entry * (0.99 if direction == Direction.long else 1.01)
+    take_profit = entry * (1.01 if direction == Direction.long else 0.99)
+    return TradePlan(
+        status=Status.TRADE,
+        direction=direction,
+        entry_zone=(entry, entry),
+        stop_loss=stop_loss,
+        take_profit=take_profit,
+        risk_pct_used=effective_settings.base_risk_pct,
+        position_size_usd=None,
+        signal_score=prior_plan.signal_score,
+        posture=prior_plan.posture,
+        rationale=list(prior_plan.rationale) + ["debug_force_signal", "bypass_soft_gates"],
+        raw_input_snapshot={
+            "symbol": symbol,
+            "direction": direction.value,
+            "strategy": effective_settings.strategy,
+        },
+    )
+
+
+def _hard_risk_gate_reasons(symbol: str, now: datetime) -> list[str]:
+    daily_state = state.get_daily_state(symbol)
+    account_loss_limit = settings.account_size * settings.max_daily_loss_pct
+    reasons: list[str] = []
+    for start_t, end_t in settings.blackout_windows():
+        if start_t <= now.time() <= end_t:
+            reasons.append("news_blackout")
+            break
+    if daily_state.pnl_usd <= -account_loss_limit:
+        reasons.append("daily_loss_limit")
+    if settings.max_losses_per_day and daily_state.losses >= settings.max_losses_per_day:
+        reasons.append("max_losses_per_day")
+    if daily_state.trades >= settings.max_trades_per_day:
+        reasons.append("max_trades")
+    if daily_state.last_loss_ts is not None:
+        minutes_since = (now - daily_state.last_loss_ts).total_seconds() / 60.0
+        if minutes_since < settings.cooldown_minutes_after_loss:
+            reasons.append("cooldown")
+    return reasons
+
+
+def _contains_hard_gate(rationale: list[str]) -> bool:
+    hard_gates = {
+        "news_blackout",
+        "daily_loss_limit",
+        "max_losses_per_day",
+        "max_trades",
+        "cooldown",
+    }
+    return any(reason in hard_gates for reason in rationale)

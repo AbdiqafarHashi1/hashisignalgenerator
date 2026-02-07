@@ -7,7 +7,7 @@ from app.strategy.decision import decide
 
 
 def test_decision_risk_off_on_extreme_market() -> None:
-    cfg = Settings()
+    cfg = Settings(_env_file=None)
     state = StateStore()
     candles = [
         Candle(open=100, high=101, low=99, close=100, volume=100),
@@ -38,7 +38,7 @@ def test_decision_risk_off_on_extreme_market() -> None:
 
 
 def test_decision_no_trade_no_momentum() -> None:
-    cfg = Settings(MODE="prop_cfd", adx_threshold=80)
+    cfg = Settings(MODE="prop_cfd", adx_threshold=80, candle_interval="5m", min_signal_score=0, _env_file=None)
     state = StateStore()
     candles = [
         Candle(open=100, high=101, low=99, close=100, volume=100)

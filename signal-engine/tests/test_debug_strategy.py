@@ -32,6 +32,7 @@ def test_debug_loosen_engulfing_enters(strategy: str) -> None:
         atr_sma_period=2,
         ema_pullback_pct=0.1,
         volume_confirm_enabled=False,
+        _env_file=None,
     )
     state = StateStore()
     candles = _bullish_engulfing_candles()

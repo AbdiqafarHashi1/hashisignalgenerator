@@ -8,6 +8,7 @@ from ..state import StateStore
 from . import posture as posture_engine
 from . import risk as risk_engine
 from . import scalper as scalper_engine
+from . import scoring as scoring_engine
 
 
 def decide(request: DecisionRequest, state: StateStore, cfg: Settings) -> TradePlan:
@@ -70,6 +71,30 @@ def _decide_scalper(request: DecisionRequest, state: StateStore, cfg: Settings) 
             raw_input_snapshot=request.model_dump(),
         )
 
+    score_breakdown = scoring_engine.score_signal(
+        request.market,
+        request.bias,
+        request.tradingview,
+        posture_snapshot.posture,
+        cfg,
+    )
+    signal_score = score_breakdown.total
+    if cfg.min_signal_score is not None and signal_score < cfg.min_signal_score:
+        rationale.append("score_below_min")
+        return TradePlan(
+            status=Status.NO_TRADE,
+            direction=request.tradingview.direction_hint,
+            entry_zone=None,
+            stop_loss=None,
+            take_profit=None,
+            risk_pct_used=None,
+            position_size_usd=None,
+            signal_score=signal_score,
+            posture=posture_snapshot.posture,
+            rationale=rationale,
+            raw_input_snapshot=request.model_dump(),
+        )
+
     candles = request.candles or []
     interval = (request.interval or request.tradingview.tf_entry or "").lower()
     if interval != cfg.candle_interval.lower():
@@ -82,7 +107,7 @@ def _decide_scalper(request: DecisionRequest, state: StateStore, cfg: Settings) 
             take_profit=None,
             risk_pct_used=None,
             position_size_usd=None,
-            signal_score=None,
+            signal_score=signal_score,
             posture=posture_snapshot.posture,
             rationale=rationale,
             raw_input_snapshot=request.model_dump(),
@@ -98,7 +123,7 @@ def _decide_scalper(request: DecisionRequest, state: StateStore, cfg: Settings) 
             take_profit=None,
             risk_pct_used=None,
             position_size_usd=None,
-            signal_score=None,
+            signal_score=signal_score,
             posture=posture_snapshot.posture,
             rationale=rationale,
             raw_input_snapshot=request.model_dump(),
@@ -115,7 +140,7 @@ def _decide_scalper(request: DecisionRequest, state: StateStore, cfg: Settings) 
             take_profit=None,
             risk_pct_used=None,
             position_size_usd=None,
-            signal_score=None,
+            signal_score=signal_score,
             posture=posture_snapshot.posture,
             rationale=rationale,
             raw_input_snapshot=request.model_dump(),
@@ -131,7 +156,7 @@ def _decide_scalper(request: DecisionRequest, state: StateStore, cfg: Settings) 
             take_profit=None,
             risk_pct_used=None,
             position_size_usd=None,
-            signal_score=None,
+            signal_score=signal_score,
             posture=posture_snapshot.posture,
             rationale=rationale,
             raw_input_snapshot=request.model_dump(),
@@ -147,7 +172,7 @@ def _decide_scalper(request: DecisionRequest, state: StateStore, cfg: Settings) 
             take_profit=None,
             risk_pct_used=None,
             position_size_usd=None,
-            signal_score=None,
+            signal_score=signal_score,
             posture=posture_snapshot.posture,
             rationale=rationale,
             raw_input_snapshot=request.model_dump(),
@@ -184,7 +209,7 @@ def _decide_scalper(request: DecisionRequest, state: StateStore, cfg: Settings) 
         take_profit=levels.take_profit,
         risk_pct_used=risk_result.risk_pct_used,
         position_size_usd=risk_result.position_size_usd,
-        signal_score=None,
+        signal_score=signal_score,
         posture=posture_snapshot.posture,
         rationale=rationale,
         raw_input_snapshot=request.model_dump(),

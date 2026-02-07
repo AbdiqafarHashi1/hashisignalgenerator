@@ -71,6 +71,8 @@ No domain is required for the initial deployment. Add a domain + HTTPS later whe
 - `GET /state`
 - `GET /state/today?symbol=BTCUSDT`
 - `GET /test/telegram`
+- `GET /debug/runtime`
+- `POST /debug/force_signal`
 
 ## TradingView webhook payload
 Send a single JSON payload that includes the TradingView structure plus normalized market + bias inputs.
@@ -108,6 +110,10 @@ The engine expects 5m candles for scalper logic. If you omit `candles`, the engi
 
 ## Environment variables
 Modes are strict and can only be `prop_cfd` or `personal_crypto`.
+
+Profiles tune strategy thresholds only (risk gates stay on):
+- `PROFILE=profit` (default) — stricter, real-usage bias
+- `PROFILE=diag` — frequent-signal diagnostics, forced to notification-only mode
 
 Key settings (defaults depend on MODE):
 - `MODE`
@@ -153,6 +159,45 @@ Scalper controls:
 ## Logging
 Every webhook and decision is logged as JSONL in `./data/logs/YYYY-MM-DD.jsonl` with a correlation id.
 
+## DIAG proof-fire workflow
+1. Set DIAG profile and enable debug endpoints in your `.env`:
+   ```bash
+   PROFILE=diag
+   DEBUG_LOOSEN=true
+   TELEGRAM_ENABLED=true
+   TELEGRAM_BOT_TOKEN=...
+   TELEGRAM_CHAT_ID=...
+   ```
+2. Start the stack:
+   ```bash
+   docker compose up -d --build
+   ```
+3. Verify runtime settings:
+   ```bash
+   curl -s http://localhost:8000/debug/runtime | jq
+   ```
+4. Force a diagnostic decision (bypasses soft gates only):
+   ```bash
+   curl -s -X POST http://localhost:8000/debug/force_signal \
+     -H "Content-Type: application/json" \
+     -d '{"symbol":"BTCUSDT","direction":"long","strategy":"scalper","bypass_soft_gates":true}' | jq
+   ```
+5. Confirm the decision was stored:
+   ```bash
+   curl -s "http://localhost:8000/decision/latest?symbol=BTCUSDT" | jq
+   ```
+
+## Switching back to PROFIT
+Update your `.env`:
+```bash
+PROFILE=profit
+DEBUG_LOOSEN=false
+```
+Then restart:
+```bash
+docker compose up -d --build
+```
+
 ## Tests
 ```bash
 pytest -q
@@ -160,3 +205,31 @@ pytest -q
 
 ## Safety disclaimer
 This project is for research and signal generation only. It does not place trades or provide financial advice. Use at your own risk.
+
+## Local verification checklist (docker compose)
+1. Build and start:
+   ```bash
+   docker compose up -d --build
+   ```
+2. Confirm engine status:
+   ```bash
+   curl -s http://localhost:8000/engine/status | jq
+   ```
+3. Inspect runtime settings:
+   ```bash
+   curl -s http://localhost:8000/debug/runtime | jq
+   ```
+4. Force a diagnostic signal:
+   ```bash
+   curl -s -X POST http://localhost:8000/debug/force_signal \
+     -H "Content-Type: application/json" \
+     -d '{"symbol":"BTCUSDT","direction":"long","strategy":"scalper","bypass_soft_gates":true}' | jq
+   ```
+5. Fetch the latest decision:
+   ```bash
+   curl -s "http://localhost:8000/decision/latest?symbol=BTCUSDT" | jq
+   ```
+6. Switch to PROFIT profile and rebuild:
+   ```bash
+   PROFILE=profit docker compose up -d --build
+   ```

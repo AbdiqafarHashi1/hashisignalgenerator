@@ -18,6 +18,7 @@ class Settings(BaseSettings):
     )
 
     MODE: Literal["prop_cfd", "personal_crypto", "paper", "signal_only"] = "prop_cfd"
+    PROFILE: Literal["profit", "diag"] = "profit"
     engine_mode: Literal["paper", "signal_only"] = "signal_only"
     symbols: list[str] = Field(default_factory=lambda: ["BTCUSDT"], validation_alias=AliasChoices("SYMBOLS", "symbols"))
     heartbeat_minutes: int = Field(30, validation_alias=AliasChoices("HEARTBEAT_MINUTES", "heartbeat_minutes"))
@@ -46,8 +47,8 @@ class Settings(BaseSettings):
     leverage_extreme: float = 3.0
     leverage_elevated: float = 2.5
     oi_spike_pct: float = 0.18
-    trend_strength_min: float = 0.6
-    candle_interval: str = "5m"
+    trend_strength_min: float | None = None
+    candle_interval: str | None = None
     candle_history_limit: int = 120
     ema_length: int = 50
     momentum_mode: Literal["adx", "atr"] = "adx"
@@ -83,37 +84,37 @@ class Settings(BaseSettings):
         if self.MODE in {"paper", "signal_only"}:
             self.engine_mode = self.MODE
             self.MODE = "prop_cfd"
+        if self.PROFILE == "diag":
+            self.engine_mode = "signal_only"
         if self.MODE == "prop_cfd":
             defaults = {
                 "account_size": 25000,
                 "base_risk_pct": 0.0025,
                 "max_risk_pct": 0.0025,
-                "max_trades_per_day": 8,
                 "max_daily_loss_pct": 0.02,
-                "min_signal_score": 0,
                 "daily_profit_target_pct": 0.015,
                 "max_consecutive_losses": 3,
-                "cooldown_minutes_after_loss": 20,
             }
         else:
             defaults = {
                 "account_size": 2000,
                 "base_risk_pct": 0.0025,
                 "max_risk_pct": 0.0025,
-                "max_trades_per_day": 8,
                 "max_daily_loss_pct": 0.02,
-                "min_signal_score": 0,
                 "daily_profit_target_pct": 0.015,
                 "max_consecutive_losses": 3,
-                "cooldown_minutes_after_loss": 20,
             }
         for key, value in defaults.items():
+            if getattr(self, key) is None:
+                setattr(self, key, value)
+        profile_defaults = self._profile_defaults()
+        for key, value in profile_defaults.items():
             if getattr(self, key) is None:
                 setattr(self, key, value)
         if self.debug_loosen:
             self.candle_interval = "1m"
             self.min_signal_score = 0
-            self.trend_strength_min = min(self.trend_strength_min, 0.1)
+            self.trend_strength_min = min(self.trend_strength_min or 0.0, 0.1)
             self.engulfing_wick_ratio = max(self.engulfing_wick_ratio, 1.5)
             self.news_blackouts = ""
             self.cooldown_minutes_after_loss = 0
@@ -122,6 +123,23 @@ class Settings(BaseSettings):
             else:
                 self.max_trades_per_day = max(self.max_trades_per_day, 50)
         return self
+
+    def _profile_defaults(self) -> dict[str, object]:
+        if self.PROFILE == "diag":
+            return {
+                "candle_interval": "1m",
+                "min_signal_score": 35,
+                "trend_strength_min": 0.30,
+                "cooldown_minutes_after_loss": 0,
+                "max_trades_per_day": 50,
+            }
+        return {
+            "candle_interval": "1m",
+            "min_signal_score": 60,
+            "trend_strength_min": 0.45,
+            "cooldown_minutes_after_loss": 10,
+            "max_trades_per_day": 8,
+        }
 
     def blackout_windows(self) -> list[tuple[time, time]]:
         windows: list[tuple[time, time]] = []
@@ -147,6 +165,9 @@ class Settings(BaseSettings):
 
     def resolved_settings(self) -> dict[str, object]:
         return {
+            "profile": self.PROFILE,
+            "mode": self.MODE,
+            "engine_mode": self.engine_mode,
             "symbols": list(self.symbols),
             "candle_interval": self.candle_interval,
             "min_signal_score": self.min_signal_score,

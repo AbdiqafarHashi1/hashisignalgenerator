@@ -6,7 +6,7 @@ from app.strategy.posture import compute_posture
 
 
 def test_posture_risk_off_extreme_funding() -> None:
-    cfg = Settings()
+    cfg = Settings(_env_file=None)
     market = MarketSnapshot(
         funding_rate=0.05,
         oi_change_24h=0.01,
@@ -18,7 +18,7 @@ def test_posture_risk_off_extreme_funding() -> None:
 
 
 def test_posture_opportunistic_clean_trend() -> None:
-    cfg = Settings()
+    cfg = Settings(_env_file=None)
     market = MarketSnapshot(
         funding_rate=0.0,
         oi_change_24h=0.01,

@@ -60,7 +60,7 @@ def test_scheduler_skips_open_candle(monkeypatch) -> None:
 
     monkeypatch.setattr(scheduler_module, "fetch_symbol_klines", fake_fetch)
 
-    settings = Settings(telegram_enabled=False)
+    settings = Settings(telegram_enabled=False, _env_file=None)
     state = StateStore()
     scheduler = DecisionScheduler(settings, state)
 
@@ -87,7 +87,7 @@ def test_scheduler_runs_once_per_candle(monkeypatch) -> None:
     monkeypatch.setattr(scheduler_module, "fetch_symbol_klines", fake_fetch)
     monkeypatch.setattr(scheduler_module, "decide", fake_decide)
 
-    settings = Settings(telegram_enabled=False)
+    settings = Settings(telegram_enabled=False, _env_file=None)
     state = StateStore()
     scheduler = DecisionScheduler(settings, state)
 
@@ -126,6 +126,7 @@ def test_scheduler_dedupes_notifications(monkeypatch) -> None:
         telegram_enabled=True,
         telegram_bot_token="token",
         telegram_chat_id="chat",
+        _env_file=None,
     )
     state = StateStore()
     scheduler = DecisionScheduler(settings, state)

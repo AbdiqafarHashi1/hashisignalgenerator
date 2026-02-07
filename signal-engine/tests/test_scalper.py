@@ -18,7 +18,7 @@ from app.strategy.decision import decide
 
 
 def test_engulfing_detection_bullish_and_bearish() -> None:
-    cfg = Settings()
+    cfg = Settings(_env_file=None)
     ema = 100.0
     bullish = [
         Candle(open=101, high=102, low=99.8, close=100.2, volume=100),
@@ -35,7 +35,7 @@ def test_engulfing_detection_bullish_and_bearish() -> None:
 
 
 def test_trend_filter_blocks_opposite_direction() -> None:
-    cfg = Settings(adx_threshold=0)
+    cfg = Settings(adx_threshold=0, candle_interval="5m", min_signal_score=0, _env_file=None)
     candles = [Candle(open=100, high=101, low=99, close=100, volume=100) for _ in range(48)]
     candles.extend(
         [
@@ -74,7 +74,7 @@ def test_trend_filter_blocks_opposite_direction() -> None:
 
 
 def test_risk_gate_blocks_with_reason() -> None:
-    cfg = Settings()
+    cfg = Settings(_env_file=None)
     candles = [Candle(open=100, high=101, low=99, close=100, volume=100) for _ in range(60)]
     request = DecisionRequest(
         tradingview=TradingViewPayload(

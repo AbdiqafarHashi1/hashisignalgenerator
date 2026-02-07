@@ -4,7 +4,7 @@ from app.strategy.scoring import score_signal
 
 
 def test_scoring_meets_prop_threshold() -> None:
-    cfg = Settings(MODE="prop_cfd")
+    cfg = Settings(MODE="prop_cfd", _env_file=None)
     market = MarketSnapshot(
         funding_rate=0.0,
         oi_change_24h=0.01,

@@ -26,6 +26,7 @@ class StateStore:
         self._posture_cache: dict[tuple[str, str], PostureSnapshot] = {}
         self._last_processed_close_time_ms: dict[str, int] = {}
         self._last_notified_key: dict[str, str] = {}
+        self._last_trade_key: dict[str, str] = {}
         self._last_decision_ts: dict[str, datetime] = {}
         self._symbols: list[str] = []
         self._last_heartbeat_ts: datetime | None = None
@@ -83,6 +84,17 @@ class StateStore:
                 self._last_notified_key.pop(symbol, None)
             else:
                 self._last_notified_key[symbol] = value
+
+    def get_last_trade_key(self, symbol: str) -> str | None:
+        with self._lock:
+            return self._last_trade_key.get(symbol)
+
+    def set_last_trade_key(self, symbol: str, value: str | None) -> None:
+        with self._lock:
+            if value is None:
+                self._last_trade_key.pop(symbol, None)
+            else:
+                self._last_trade_key[symbol] = value
 
     def get_symbols(self) -> list[str]:
         with self._lock:

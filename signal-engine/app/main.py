@@ -196,7 +196,7 @@ class DebugForceSignalRequest(BaseModel):
 async def decision_latest(symbol: str = Query(..., min_length=1)) -> dict:
     daily_state = state.get_daily_state(symbol)
     if daily_state.latest_decision is None:
-        raise HTTPException(status_code=404, detail="no_decision")
+        return {"symbol": symbol, "decision": None}
     return {"symbol": symbol, "decision": daily_state.latest_decision}
 
 
@@ -221,6 +221,7 @@ async def debug_runtime() -> dict:
     for symbol in symbols:
         snapshot = scheduler.last_snapshot(symbol)
         latest_candle_ts = snapshot.candle.close_time.isoformat() if snapshot else None
+        last_tick_ts = scheduler.last_symbol_tick_time(symbol)
         last_processed_ms = state.get_last_processed_close_time_ms(symbol)
         last_processed_iso = None
         if last_processed_ms is not None:
@@ -231,6 +232,7 @@ async def debug_runtime() -> dict:
             {
                 "symbol": symbol,
                 "last_candle_ts": latest_candle_ts,
+                "last_tick_time": last_tick_ts.isoformat() if last_tick_ts else None,
                 "candles_fetched_count": scheduler.last_fetch_count(symbol),
                 "last_processed_candle_ts": last_processed_iso,
                 "last_decision_ts": last_decision_ts.isoformat() if last_decision_ts else None,

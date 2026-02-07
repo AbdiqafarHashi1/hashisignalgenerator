@@ -14,6 +14,16 @@ def decide(request: DecisionRequest, state: StateStore, cfg: Settings) -> TradeP
     """
     Test-compatible signature: decide(request, state, cfg)
     """
+    if cfg.strategy == "baseline":
+        return _decide_baseline(request, state, cfg)
+    return _decide_scalper(request, state, cfg)
+
+
+def _decide_baseline(request: DecisionRequest, state: StateStore, cfg: Settings) -> TradePlan:
+    return _decide_scalper(request, state, cfg)
+
+
+def _decide_scalper(request: DecisionRequest, state: StateStore, cfg: Settings) -> TradePlan:
     now = request.timestamp or datetime.now(timezone.utc)
     symbol = request.tradingview.symbol
     rationale: list[str] = []

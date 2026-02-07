@@ -26,6 +26,7 @@ class StateStore:
         self._posture_cache: dict[tuple[str, str], PostureSnapshot] = {}
         self._last_processed_close_time_ms: dict[str, int] = {}
         self._last_notified_key: dict[str, str] = {}
+        self._last_decision_ts: dict[str, datetime] = {}
         self._symbols: list[str] = []
         self._last_heartbeat_ts: datetime | None = None
         self._last_telegram_update_id: int | None = None
@@ -52,8 +53,14 @@ class StateStore:
 
     def set_latest_decision(self, symbol: str, plan: TradePlan) -> None:
         state = self.get_daily_state(symbol)
+        now = datetime.now(timezone.utc)
         with self._lock:
             state.latest_decision = plan
+            self._last_decision_ts[symbol] = now
+
+    def get_last_decision_ts(self, symbol: str) -> datetime | None:
+        with self._lock:
+            return self._last_decision_ts.get(symbol)
 
     def get_last_processed_close_time_ms(self, symbol: str) -> int | None:
         with self._lock:
@@ -123,7 +130,7 @@ class StateStore:
         account_loss_limit = cfg.account_size * cfg.max_daily_loss_pct
         profit_target = cfg.account_size * (cfg.daily_profit_target_pct or 0.0)
 
-        if state.pnl_usd <= -account_loss_limit:
+        if not cfg.debug_disable_hard_risk_gates and state.pnl_usd <= -account_loss_limit:
             rationale.append("daily_loss_limit")
             return False, Status.RISK_OFF, rationale
         if profit_target > 0 and state.pnl_usd >= profit_target:
@@ -132,10 +139,13 @@ class StateStore:
         if cfg.max_consecutive_losses and state.consecutive_losses >= cfg.max_consecutive_losses:
             rationale.append("max_losses")
             return False, Status.RISK_OFF, rationale
+        if not cfg.debug_disable_hard_risk_gates and cfg.max_losses_per_day and state.losses >= cfg.max_losses_per_day:
+            rationale.append("max_losses_per_day")
+            return False, Status.RISK_OFF, rationale
         if state.trades >= cfg.max_trades_per_day:
             rationale.append("max_trades")
             return False, Status.RISK_OFF, rationale
-        if state.last_loss_ts is not None:
+        if not cfg.debug_loosen and state.last_loss_ts is not None:
             minutes_since = (now - state.last_loss_ts).total_seconds() / 60.0
             if minutes_since < cfg.cooldown_minutes_after_loss:
                 rationale.append("cooldown")

@@ -58,16 +58,16 @@ def test_scheduler_skips_open_candle(monkeypatch) -> None:
     async def fake_fetch(*args, **kwargs):
         return snapshot
 
-    monkeypatch.setattr(scheduler_module, "fetch_btcusdt_klines", fake_fetch)
+    monkeypatch.setattr(scheduler_module, "fetch_symbol_klines", fake_fetch)
 
     settings = Settings(telegram_enabled=False)
     state = StateStore()
     scheduler = DecisionScheduler(settings, state)
 
     async def run():
-        plan, reason = await scheduler.run_once()
-        assert plan is None
-        assert reason == "candle_open"
+        results = await scheduler.run_once()
+        assert results[0]["plan"] is None
+        assert results[0]["reason"] == "candle_open"
         assert state.get_last_processed_close_time_ms("BTCUSDT") is None
 
     asyncio.run(run())
@@ -84,7 +84,7 @@ def test_scheduler_runs_once_per_candle(monkeypatch) -> None:
         calls["decide"] += 1
         return _trade_plan()
 
-    monkeypatch.setattr(scheduler_module, "fetch_btcusdt_klines", fake_fetch)
+    monkeypatch.setattr(scheduler_module, "fetch_symbol_klines", fake_fetch)
     monkeypatch.setattr(scheduler_module, "decide", fake_decide)
 
     settings = Settings(telegram_enabled=False)
@@ -92,13 +92,13 @@ def test_scheduler_runs_once_per_candle(monkeypatch) -> None:
     scheduler = DecisionScheduler(settings, state)
 
     async def run():
-        plan, reason = await scheduler.run_once()
-        assert plan is not None
-        assert reason is None
+        results = await scheduler.run_once()
+        assert results[0]["plan"] is not None
+        assert results[0]["reason"] is None
         assert state.get_last_processed_close_time_ms("BTCUSDT") == snapshot.kline_close_time_ms
-        plan, reason = await scheduler.run_once()
-        assert plan is None
-        assert reason == "candle_already_processed"
+        results = await scheduler.run_once()
+        assert results[0]["plan"] is None
+        assert results[0]["reason"] == "candle_already_processed"
         assert calls["decide"] == 1
 
     asyncio.run(run())
@@ -118,7 +118,7 @@ def test_scheduler_dedupes_notifications(monkeypatch) -> None:
         sent["count"] += 1
         return True
 
-    monkeypatch.setattr(scheduler_module, "fetch_btcusdt_klines", fake_fetch)
+    monkeypatch.setattr(scheduler_module, "fetch_symbol_klines", fake_fetch)
     monkeypatch.setattr(scheduler_module, "decide", fake_decide)
     monkeypatch.setattr(scheduler_module, "send_telegram_message", fake_send)
 

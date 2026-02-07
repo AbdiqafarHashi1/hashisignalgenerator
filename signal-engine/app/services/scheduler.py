@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections.abc import Callable
 from datetime import datetime, timezone
 
@@ -16,8 +17,10 @@ from ..models import (
 )
 from ..state import StateStore
 from ..strategy.decision import decide
-from ..providers.binance import BinanceKlineSnapshot, fetch_btcusdt_klines
+from ..providers.binance import BinanceKlineSnapshot, fetch_symbol_klines
 from .notifier import format_trade_message, send_telegram_message
+
+logger = logging.getLogger(__name__)
 
 
 class DecisionScheduler:
@@ -36,6 +39,9 @@ class DecisionScheduler:
         self._paper_trader = paper_trader
         self._interval = interval_seconds
         self._heartbeat_cb = heartbeat_cb
+        self._last_tick_time: datetime | None = None
+        self._last_snapshots: dict[str, BinanceKlineSnapshot] = {}
+        self._last_fetch_counts: dict[str, int] = {}
 
         self._stop_event = asyncio.Event()
         self._task: asyncio.Task | None = None
@@ -44,6 +50,19 @@ class DecisionScheduler:
     @property
     def running(self) -> bool:
         return self._task is not None and not self._task.done()
+
+    @property
+    def tick_interval(self) -> int:
+        return self._interval
+
+    def last_tick_time(self) -> datetime | None:
+        return self._last_tick_time
+
+    def last_snapshot(self, symbol: str) -> BinanceKlineSnapshot | None:
+        return self._last_snapshots.get(symbol)
+
+    def last_fetch_count(self, symbol: str) -> int | None:
+        return self._last_fetch_counts.get(symbol)
 
     async def start(self) -> bool:
         async with self._lock:
@@ -63,31 +82,71 @@ class DecisionScheduler:
             await task
         return True
 
-    async def run_once(self, force: bool = False) -> tuple[TradePlan | None, str | None]:
+    async def run_once(self, force: bool = False) -> list[dict[str, object]]:
         if self._heartbeat_cb is not None:
             self._heartbeat_cb()
-        snapshot = await fetch_btcusdt_klines(
-            interval=self._settings.candle_interval,
-            limit=self._settings.candle_history_limit,
-        )
-        if not force and not snapshot.kline_is_closed:
-            return None, "candle_open"
-        last_processed = self._state.get_last_processed_close_time_ms(snapshot.symbol)
-        if not force and last_processed == snapshot.kline_close_time_ms:
-            return None, "candle_already_processed"
-        request = _build_decision_request(snapshot)
-        plan = decide(request, self._state, self._settings)
-        self._state.set_latest_decision(snapshot.symbol, plan)
-        if snapshot.kline_is_closed:
-            self._state.set_last_processed_close_time_ms(snapshot.symbol, snapshot.kline_close_time_ms)
-        if plan.status == Status.TRADE:
-            dedupe_key = _notification_key(snapshot, plan)
-            last_notified = self._state.get_last_notified_key(snapshot.symbol)
-            if dedupe_key != last_notified:
-                message = format_trade_message(snapshot.symbol, plan)
-                await send_telegram_message(message, self._settings)
-                self._state.set_last_notified_key(snapshot.symbol, dedupe_key)
-        return plan, None
+        symbols = self._state.get_symbols() or list(self._settings.symbols)
+        self._last_tick_time = datetime.now(timezone.utc)
+        logger.info("scheduler_tick_start symbols=%s", ",".join(symbols))
+        results: list[dict[str, object]] = []
+        for symbol in symbols:
+            snapshot = await fetch_symbol_klines(
+                symbol=symbol,
+                interval=self._settings.candle_interval,
+                limit=self._settings.candle_history_limit,
+            )
+            self._last_snapshots[symbol] = snapshot
+            self._last_fetch_counts[symbol] = len(snapshot.candles)
+
+            plan: TradePlan | None = None
+            reason: str | None = None
+            persisted = False
+            if not force and not snapshot.kline_is_closed:
+                reason = "candle_open"
+            else:
+                last_processed = self._state.get_last_processed_close_time_ms(snapshot.symbol)
+                if not force and last_processed == snapshot.kline_close_time_ms:
+                    reason = "candle_already_processed"
+                else:
+                    request = _build_decision_request(snapshot)
+                    plan = decide(request, self._state, self._settings)
+                    self._state.set_latest_decision(snapshot.symbol, plan)
+                    persisted = True
+                    if snapshot.kline_is_closed:
+                        self._state.set_last_processed_close_time_ms(
+                            snapshot.symbol,
+                            snapshot.kline_close_time_ms,
+                        )
+                    if plan.status == Status.TRADE:
+                        dedupe_key = _notification_key(snapshot, plan)
+                        last_notified = self._state.get_last_notified_key(snapshot.symbol)
+                        if dedupe_key != last_notified:
+                            message = format_trade_message(snapshot.symbol, plan)
+                            await send_telegram_message(message, self._settings)
+                            self._state.set_last_notified_key(snapshot.symbol, dedupe_key)
+            outcome = "waiting"
+            reasons: list[str] = []
+            if plan is not None:
+                if plan.status == Status.TRADE:
+                    outcome = "ENTER"
+                elif plan.status == Status.NO_TRADE:
+                    outcome = "waiting"
+                else:
+                    outcome = plan.status.value
+                reasons = list(plan.rationale)
+            elif reason is not None:
+                reasons = [reason]
+            logger.info(
+                "scheduler_tick symbol=%s candles=%s latest=%s outcome=%s reasons=%s persisted=%s",
+                symbol,
+                len(snapshot.candles),
+                snapshot.candle.close_time.isoformat(),
+                outcome,
+                ",".join(reasons),
+                persisted,
+            )
+            results.append({"symbol": symbol, "plan": plan, "reason": reason})
+        return results
 
     async def _run_loop(self) -> None:
         while not self._stop_event.is_set():

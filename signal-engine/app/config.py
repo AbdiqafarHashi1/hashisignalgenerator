@@ -21,6 +21,15 @@ class Settings(BaseSettings):
     engine_mode: Literal["paper", "signal_only"] = "signal_only"
     symbols: list[str] = Field(default_factory=lambda: ["BTCUSDT"], validation_alias=AliasChoices("SYMBOLS", "symbols"))
     heartbeat_minutes: int = Field(30, validation_alias=AliasChoices("HEARTBEAT_MINUTES", "heartbeat_minutes"))
+    strategy: Literal["scalper", "baseline"] = Field(
+        "scalper",
+        validation_alias=AliasChoices("STRATEGY", "strategy"),
+    )
+    debug_loosen: bool = Field(False, validation_alias=AliasChoices("DEBUG_LOOSEN", "debug_loosen"))
+    debug_disable_hard_risk_gates: bool = Field(
+        False,
+        validation_alias=AliasChoices("DEBUG_DISABLE_HARD_RISK_GATES", "debug_disable_hard_risk_gates"),
+    )
 
     account_size: float | None = None
     base_risk_pct: float | None = None
@@ -101,6 +110,17 @@ class Settings(BaseSettings):
         for key, value in defaults.items():
             if getattr(self, key) is None:
                 setattr(self, key, value)
+        if self.debug_loosen:
+            self.candle_interval = "1m"
+            self.min_signal_score = 0
+            self.trend_strength_min = min(self.trend_strength_min, 0.1)
+            self.engulfing_wick_ratio = max(self.engulfing_wick_ratio, 1.5)
+            self.news_blackouts = ""
+            self.cooldown_minutes_after_loss = 0
+            if self.max_trades_per_day is None:
+                self.max_trades_per_day = 50
+            else:
+                self.max_trades_per_day = max(self.max_trades_per_day, 50)
         return self
 
     def blackout_windows(self) -> list[tuple[time, time]]:
@@ -118,10 +138,30 @@ class Settings(BaseSettings):
         return windows
 
     def is_blackout(self, dt: datetime) -> bool:
+        if self.debug_loosen:
+            return False
         for start_t, end_t in self.blackout_windows():
             if start_t <= dt.time() <= end_t:
                 return True
         return False
+
+    def resolved_settings(self) -> dict[str, object]:
+        return {
+            "symbols": list(self.symbols),
+            "candle_interval": self.candle_interval,
+            "min_signal_score": self.min_signal_score,
+            "trend_strength_min": self.trend_strength_min,
+            "cooldown_minutes_after_loss": self.cooldown_minutes_after_loss,
+            "max_trades_per_day": self.max_trades_per_day,
+            "max_losses_per_day": self.max_losses_per_day,
+            "max_daily_loss_pct": self.max_daily_loss_pct,
+            "base_risk_pct": self.base_risk_pct,
+            "max_risk_pct": self.max_risk_pct,
+            "news_blackouts": self.news_blackouts,
+            "debug_loosen": self.debug_loosen,
+            "debug_disable_hard_risk_gates": self.debug_disable_hard_risk_gates,
+            "strategy": self.strategy,
+        }
 
 
 @lru_cache

@@ -1,15 +1,17 @@
 ﻿from __future__ import annotations
 
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel, Field
 
-from .services.notifier import send_telegram_message
+from .services.notifier import format_trade_message, send_telegram_message
 from .config import get_settings
-from .models import DecisionRequest, TradeOutcome, Status
+from .models import DecisionRequest, Direction, Posture, TradeOutcome, TradePlan, Status
 from .state import StateStore
 from .services.database import Database
 from .services.paper_trader import PaperTrader
@@ -36,6 +38,7 @@ paper_trader = PaperTrader(settings, database)
 running = False
 last_heartbeat_ts: datetime | None = None
 last_action: str | None = None
+last_correlation_id: str | None = None
 
 
 def _record_heartbeat() -> None:
@@ -46,6 +49,11 @@ def _record_heartbeat() -> None:
 def _record_action(action_type: str) -> None:
     global last_action
     last_action = action_type
+
+
+def _record_correlation_id(correlation_id: str) -> None:
+    global last_correlation_id
+    last_correlation_id = correlation_id
 
 
 scheduler = DecisionScheduler(settings, state, database, paper_trader, heartbeat_cb=_record_heartbeat)
@@ -165,6 +173,7 @@ async def engine_status() -> dict[str, Any]:
 @app.post("/webhook/tradingview")
 async def tradingview_webhook(request: DecisionRequest) -> dict:
     correlation_id = str(uuid4())
+    _record_correlation_id(correlation_id)
     log_event(settings, "webhook", request.model_dump(), correlation_id)
 
     plan = decide(request, state, settings)
@@ -174,6 +183,11 @@ async def tradingview_webhook(request: DecisionRequest) -> dict:
 
     log_event(settings, "decision", plan.model_dump(), correlation_id)
     return {"correlation_id": correlation_id, "plan": plan}
+
+
+class DebugForceSignalRequest(BaseModel):
+    symbol: str | None = Field(default=None, min_length=1)
+    direction: Direction | None = None
 
 
 @app.get("/decision/latest")
@@ -194,3 +208,131 @@ async def trade_outcome(outcome: TradeOutcome) -> dict:
 async def state_today(symbol: str = Query(..., min_length=1)) -> dict:
     daily_state = state.get_daily_state(symbol)
     return {"symbol": symbol, "state": daily_state}
+
+
+@app.get("/debug/runtime")
+async def debug_runtime() -> dict:
+    now = datetime.now(timezone.utc)
+    symbols = state.get_symbols() or list(settings.symbols)
+    storage_health = _storage_health_check(settings.data_dir)
+    symbol_data = []
+    for symbol in symbols:
+        snapshot = scheduler.last_snapshot(symbol)
+        latest_candle_ts = snapshot.candle.close_time.isoformat() if snapshot else None
+        last_processed_ms = state.get_last_processed_close_time_ms(symbol)
+        last_processed_iso = None
+        if last_processed_ms is not None:
+            last_processed_iso = datetime.fromtimestamp(last_processed_ms / 1000, tz=timezone.utc).isoformat()
+        last_decision_ts = state.get_last_decision_ts(symbol)
+        symbol_data.append(
+            {
+                "symbol": symbol,
+                "last_candle_ts": latest_candle_ts,
+                "candles_fetched_count": scheduler.last_fetch_count(symbol),
+                "last_processed_candle_ts": last_processed_iso,
+                "last_decision_ts": last_decision_ts.isoformat() if last_decision_ts else None,
+                "active_risk_gates": _active_risk_gates(symbol, now),
+            }
+        )
+    return {
+        "settings": {
+            **settings.resolved_settings(),
+            "telegram_bot_token": _mask_secret(settings.telegram_bot_token),
+            "telegram_enabled": settings.telegram_enabled,
+        },
+        "scheduler": {
+            "tick_interval_seconds": scheduler.tick_interval,
+            "last_tick_time": scheduler.last_tick_time().isoformat() if scheduler.last_tick_time() else None,
+        },
+        "symbols": symbol_data,
+        "storage": {
+            "data_dir": settings.data_dir,
+            "last_decision_file": _decision_log_path(settings.data_dir),
+            "last_decision_key": last_correlation_id,
+            "health_check": storage_health,
+        },
+    }
+
+
+@app.post("/debug/force_signal")
+async def debug_force_signal(payload: DebugForceSignalRequest) -> dict:
+    if not settings.debug_loosen:
+        raise HTTPException(status_code=400, detail="debug_loosen_required")
+    symbols = state.get_symbols() or list(settings.symbols)
+    symbol = payload.symbol or (symbols[0] if symbols else None)
+    if symbol is None:
+        raise HTTPException(status_code=400, detail="no_symbol_available")
+    direction = payload.direction or Direction.long
+    snapshot = scheduler.last_snapshot(symbol)
+    if snapshot is None:
+        raise HTTPException(status_code=400, detail="no_recent_market_data")
+    entry = snapshot.candle.close
+    stop_loss = entry * (0.99 if direction == Direction.long else 1.01)
+    take_profit = entry * (1.01 if direction == Direction.long else 0.99)
+    posture = state.get_posture(symbol).posture if state.get_posture(symbol) else Posture.NORMAL
+    plan = TradePlan(
+        status=Status.TRADE,
+        direction=direction,
+        entry_zone=(entry, entry),
+        stop_loss=stop_loss,
+        take_profit=take_profit,
+        risk_pct_used=settings.base_risk_pct,
+        position_size_usd=None,
+        signal_score=None,
+        posture=posture,
+        rationale=["debug_force_signal"],
+        raw_input_snapshot={"symbol": symbol, "direction": direction.value},
+    )
+    state.set_latest_decision(symbol, plan)
+    correlation_id = str(uuid4())
+    _record_correlation_id(correlation_id)
+    log_event(settings, "decision", plan.model_dump(), correlation_id)
+    if settings.telegram_enabled:
+        message = format_trade_message(symbol, plan)
+        await send_telegram_message(message, settings)
+    return {"symbol": symbol, "decision": plan}
+
+
+def _mask_secret(value: str | None) -> str | None:
+    if value is None:
+        return None
+    if len(value) <= 8:
+        return "*" * len(value)
+    return f"{value[:4]}****{value[-4:]}"
+
+
+def _decision_log_path(data_dir: str) -> str:
+    date_key = datetime.now(timezone.utc).date().isoformat()
+    return str(Path(data_dir) / "logs" / f"{date_key}.jsonl")
+
+
+def _storage_health_check(data_dir: str) -> dict[str, str]:
+    path = Path(data_dir) / ".healthcheck"
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        content = datetime.now(timezone.utc).isoformat()
+        path.write_text(content, encoding="utf-8")
+        read_back = path.read_text(encoding="utf-8")
+        return {"status": "ok" if read_back == content else "mismatch", "path": str(path)}
+    except OSError as exc:
+        return {"status": "error", "path": str(path), "error": str(exc)}
+
+
+def _active_risk_gates(symbol: str, now: datetime) -> list[dict[str, str]]:
+    active: list[dict[str, str]] = []
+    daily_state = state.get_daily_state(symbol)
+    account_loss_limit = settings.account_size * settings.max_daily_loss_pct
+    if settings.is_blackout(now):
+        active.append({"gate": "blackout", "reason": "news_blackout"})
+    if not settings.debug_disable_hard_risk_gates and daily_state.pnl_usd <= -account_loss_limit:
+        active.append({"gate": "daily_loss", "reason": "daily_loss_limit"})
+    if not settings.debug_disable_hard_risk_gates and settings.max_losses_per_day:
+        if daily_state.losses >= settings.max_losses_per_day:
+            active.append({"gate": "max_losses", "reason": "max_losses_per_day"})
+    if daily_state.trades >= settings.max_trades_per_day:
+        active.append({"gate": "max_trades", "reason": "max_trades"})
+    if not settings.debug_loosen and daily_state.last_loss_ts is not None:
+        minutes_since = (now - daily_state.last_loss_ts).total_seconds() / 60.0
+        if minutes_since < settings.cooldown_minutes_after_loss:
+            active.append({"gate": "cooldown", "reason": "cooldown"})
+    return active

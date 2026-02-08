@@ -125,6 +125,8 @@ Key settings (defaults depend on MODE):
 - `daily_profit_target_pct`
 - `max_consecutive_losses`
 - `min_signal_score`
+- `TICK_INTERVAL_SECONDS`
+- `SMOKE_TEST_FORCE_TRADE`
 
 Risk environment thresholds:
 - `funding_extreme_abs`
@@ -185,6 +187,35 @@ Every webhook and decision is logged as JSONL in `./data/logs/YYYY-MM-DD.jsonl` 
 5. Confirm the decision was stored:
    ```bash
    curl -s "http://localhost:8000/decision/latest?symbol=BTCUSDT" | jq
+   ```
+
+## Smoke test force-trade workflow (paper)
+Use this to validate the full trade pipeline (decision -> paper trade -> storage) end-to-end.
+
+1. Enable smoke-test forced trading and start the service:
+   ```bash
+   export SMOKE_TEST_FORCE_TRADE=true
+   export MODE=paper
+   uvicorn app.main:app --reload
+   ```
+2. Start the scheduler (optional if you already have snapshots):
+   ```bash
+   curl -s http://localhost:8000/engine/start | jq
+   ```
+3. Force a trade decision and execution:
+   ```bash
+   curl -s -X POST http://localhost:8000/debug/force_signal \
+     -H "Content-Type: application/json" \
+     -d '{"symbol":"ETHUSDT","direction":"long","bypass_soft_gates":true}' | jq
+   ```
+4. Confirm the decision is stored:
+   ```bash
+   curl -s "http://localhost:8000/decision/latest?symbol=ETHUSDT" | jq
+   ```
+5. Confirm the paper position and trade record exist:
+   ```bash
+   curl -s http://localhost:8000/positions | jq
+   curl -s http://localhost:8000/trades | jq
    ```
 
 ## Switching back to PROFIT

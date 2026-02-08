@@ -54,6 +54,7 @@ class Settings(BaseSettings):
     trend_strength_min: float | None = None
     candle_interval: str | None = None
     candle_history_limit: int = 120
+    tick_interval_seconds: int = Field(60, validation_alias=AliasChoices("TICK_INTERVAL_SECONDS", "tick_interval_seconds"))
     ema_length: int = 50
     momentum_mode: Literal["adx", "atr"] = "adx"
     adx_period: int = 14
@@ -75,6 +76,7 @@ class Settings(BaseSettings):
     telegram_enabled: bool = False
     telegram_bot_token: str | None = None
     telegram_chat_id: str | None = None
+    smoke_test_force_trade: bool = Field(False, validation_alias=AliasChoices("SMOKE_TEST_FORCE_TRADE", "smoke_test_force_trade"))
 
     @field_validator("symbols", mode="before")
     @classmethod
@@ -188,6 +190,7 @@ class Settings(BaseSettings):
             "engine_mode": self.engine_mode,
             "symbols": list(self.symbols),
             "candle_interval": self.candle_interval,
+            "tick_interval_seconds": self.tick_interval_seconds,
             "min_signal_score": self.min_signal_score,
             "trend_strength_min": self.trend_strength_min,
             "cooldown_minutes_after_loss": self.cooldown_minutes_after_loss,
@@ -202,6 +205,7 @@ class Settings(BaseSettings):
             "strategy": self.strategy,
             "market_provider": self.market_provider,
             "market_data_enabled": self.market_data_enabled,
+            "smoke_test_force_trade": self.smoke_test_force_trade,
         }
 
 

@@ -1,6 +1,8 @@
 ﻿from __future__ import annotations
 
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
+import logging
 from pathlib import Path
 from typing import Any, Literal
 from uuid import uuid4
@@ -10,7 +12,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 from .services.notifier import format_trade_message, send_telegram_message
-from .config import get_settings
+from .config import Settings, get_settings
 from .models import BiasSignal, DecisionRequest, Direction, MarketSnapshot, Posture, SetupType, Status, TradeOutcome, TradePlan
 from .state import StateStore
 from .services.database import Database
@@ -20,20 +22,13 @@ from .storage.store import log_event
 from .strategy.decision import decide
 from .services.scheduler import DecisionScheduler
 
-app = FastAPI(title="signal-engine", version="1.0.0")
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],  # allow dashboard
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+logger = logging.getLogger(__name__)
 
-settings = get_settings()
-state = StateStore()
-state.set_symbols(settings.symbols)
-database = Database(settings)
-paper_trader = PaperTrader(settings, database)
+settings = None
+state = None
+database = None
+paper_trader = None
+scheduler = None
 
 running = False
 last_heartbeat_ts: datetime | None = None
@@ -56,7 +51,78 @@ def _record_correlation_id(correlation_id: str) -> None:
     last_correlation_id = correlation_id
 
 
-scheduler = DecisionScheduler(settings, state, database, paper_trader, heartbeat_cb=_record_heartbeat)
+def _initialize_engine(app: FastAPI) -> None:
+    global settings, state, database, paper_trader, scheduler
+    global running, last_heartbeat_ts, last_action, last_correlation_id
+
+    settings = get_settings()
+    state = StateStore()
+    state.set_symbols(settings.symbols)
+    database = Database(settings)
+    paper_trader = PaperTrader(settings, database)
+    scheduler = DecisionScheduler(settings, state, database, paper_trader, heartbeat_cb=_record_heartbeat)
+    running = False
+    last_heartbeat_ts = None
+    last_action = None
+    last_correlation_id = None
+
+    app.state.settings = settings
+    app.state.state_store = state
+    app.state.database = database
+    app.state.paper_trader = paper_trader
+    app.state.scheduler = scheduler
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    logging.basicConfig(level=logging.INFO)
+    _initialize_engine(app)
+    if settings is not None:
+        logger.info(
+            "engine_ready symbols=%s mode=%s engine_mode=%s",
+            ",".join(settings.symbols),
+            settings.MODE,
+            settings.engine_mode,
+        )
+    try:
+        yield
+    finally:
+        if scheduler is not None and scheduler.running:
+            await scheduler.stop()
+            logger.info("engine_stopped reason=shutdown")
+
+
+app = FastAPI(title="signal-engine", version="1.0.0", lifespan=lifespan)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # allow dashboard
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+def _require_scheduler() -> DecisionScheduler:
+    if scheduler is None:
+        raise HTTPException(status_code=503, detail="engine_not_ready")
+    return scheduler
+
+
+def _require_state() -> StateStore:
+    if state is None:
+        raise HTTPException(status_code=503, detail="engine_not_ready")
+    return state
+
+
+def _require_settings() -> Settings:
+    if settings is None:
+        raise HTTPException(status_code=503, detail="engine_not_ready")
+    return settings
+
+
+def _require_database() -> Database:
+    if database is None:
+        raise HTTPException(status_code=503, detail="engine_not_ready")
+    return database
 
 
 @app.get("/")
@@ -77,77 +143,94 @@ async def health() -> dict[str, str]:
 @app.get("/run")
 async def run_once(force: bool = Query(False)) -> dict:
     _record_action("run")
+    scheduler = _require_scheduler()
     results = await scheduler.run_once(force=force)
     return {"status": "ok", "results": results}
 
 
 @app.get("/state")
 async def latest_state() -> dict:
-    symbols = state.get_symbols()
+    state_store = _require_state()
+    symbols = state_store.get_symbols()
     decisions = {}
     for symbol in symbols:
-        daily_state = state.get_daily_state(symbol)
+        daily_state = state_store.get_daily_state(symbol)
         decisions[symbol] = daily_state.latest_decision
     return {"decisions": decisions}
 
 
 @app.get("/start")
 async def start_scheduler() -> dict[str, str]:
+    scheduler = _require_scheduler()
     started = await scheduler.start()
     global running
     running = scheduler.running
     _record_action("start")
+    logger.info("engine_start status=%s", "started" if started else "already_running")
     return {"status": "started" if started else "already_running"}
+
+
+@app.get("/engine/start")
+async def engine_start() -> dict[str, str]:
+    return await start_scheduler()
 
 
 @app.get("/stop")
 async def stop_scheduler() -> dict[str, str]:
+    scheduler = _require_scheduler()
     stopped = await scheduler.stop()
     global running
     running = scheduler.running
     _record_action("stop")
+    logger.info("engine_stop status=%s", "stopped" if stopped else "already_stopped")
     return {"status": "stopped" if stopped else "already_stopped"}
+
+
+@app.get("/engine/stop")
+async def engine_stop() -> dict[str, str]:
+    return await stop_scheduler()
 
 
 @app.get("/stats")
 async def stats() -> dict:
-    summary = compute_stats(database.fetch_trades())
+    summary = compute_stats(_require_database().fetch_trades())
     return summary.__dict__
 
 
 @app.get("/trades")
 async def trades() -> dict:
-    return {"trades": [trade.__dict__ for trade in database.fetch_trades()]}
+    return {"trades": [trade.__dict__ for trade in _require_database().fetch_trades()]}
 
 
 @app.get("/equity")
 async def equity() -> dict:
-    summary = compute_stats(database.fetch_trades())
+    summary = compute_stats(_require_database().fetch_trades())
     return {"equity_curve": summary.equity_curve}
 
 
 @app.get("/positions")
 async def positions() -> dict:
-    return {"positions": [trade.__dict__ for trade in database.fetch_open_trades()]}
+    return {"positions": [trade.__dict__ for trade in _require_database().fetch_open_trades()]}
 
 
 @app.get("/symbols")
 async def symbols() -> dict:
-    return {"symbols": state.get_symbols()}
+    return {"symbols": _require_state().get_symbols()}
 
 
 @app.post("/symbols")
 async def update_symbols(payload: dict) -> dict:
+    state_store = _require_state()
     symbols = payload.get("symbols", [])
     if not isinstance(symbols, list) or not all(isinstance(item, str) for item in symbols):
         raise HTTPException(status_code=400, detail="invalid_symbols")
-    state.set_symbols(symbols)
-    return {"symbols": state.get_symbols()}
+    state_store.set_symbols(symbols)
+    return {"symbols": state_store.get_symbols()}
 
 
 @app.get("/paper/reset")
 async def reset_paper() -> dict:
-    database.reset_trades()
+    _require_database().reset_trades()
     return {"status": "reset"}
 
 
@@ -162,24 +245,28 @@ async def heartbeat():
 @app.get("/engine/status")
 async def engine_status() -> dict[str, Any]:
     global running
+    scheduler = _require_scheduler()
     running = scheduler.running
     return {
         "status": "RUNNING" if running else "STOPPED",
-        "mode": settings.MODE,
+        "mode": _require_settings().MODE,
         "last_heartbeat_ts": last_heartbeat_ts.isoformat() if last_heartbeat_ts else None,
         "last_action": last_action,
+        "last_tick_time": scheduler.last_tick_time().isoformat() if scheduler.last_tick_time() else None,
     }
 
 @app.post("/webhook/tradingview")
 async def tradingview_webhook(request: DecisionRequest) -> dict:
     correlation_id = str(uuid4())
     _record_correlation_id(correlation_id)
+    settings = _require_settings()
+    state_store = _require_state()
     log_event(settings, "webhook", request.model_dump(), correlation_id)
 
-    plan = decide(request, state, settings)
+    plan = decide(request, state_store, settings)
     if plan.status == Status.TRADE:
-        state.record_trade(request.tradingview.symbol)
-    state.set_latest_decision(request.tradingview.symbol, plan)
+        state_store.record_trade(request.tradingview.symbol)
+    state_store.set_latest_decision(request.tradingview.symbol, plan)
 
     log_event(settings, "decision", plan.model_dump(), correlation_id)
     return {"correlation_id": correlation_id, "plan": plan}
@@ -194,40 +281,56 @@ class DebugForceSignalRequest(BaseModel):
 
 @app.get("/decision/latest")
 async def decision_latest(symbol: str = Query(..., min_length=1)) -> dict:
-    daily_state = state.get_daily_state(symbol)
+    state_store = _require_state()
+    scheduler = _require_scheduler()
+    daily_state = state_store.get_daily_state(symbol)
     if daily_state.latest_decision is None:
-        return {"symbol": symbol, "decision": None}
+        if scheduler.last_tick_time() is None:
+            return {"symbol": symbol, "decision": None}
+        return {"symbol": symbol, "decision": _fallback_decision(symbol)}
     return {"symbol": symbol, "decision": daily_state.latest_decision}
+
+
+@app.get("/engine/run_once")
+async def engine_run_once(force: bool = Query(True)) -> dict:
+    _record_action("run_once")
+    scheduler = _require_scheduler()
+    logger.info("engine_run_once force=%s", force)
+    results = await scheduler.run_once(force=force)
+    return {"status": "ok", "results": results}
 
 
 @app.post("/trade_outcome")
 async def trade_outcome(outcome: TradeOutcome) -> dict:
-    state.record_outcome(outcome.symbol, outcome.pnl_usd, outcome.win, outcome.timestamp)
+    _require_state().record_outcome(outcome.symbol, outcome.pnl_usd, outcome.win, outcome.timestamp)
     return {"status": "recorded"}
 
 
 @app.get("/state/today")
 async def state_today(symbol: str = Query(..., min_length=1)) -> dict:
-    daily_state = state.get_daily_state(symbol)
+    daily_state = _require_state().get_daily_state(symbol)
     return {"symbol": symbol, "state": daily_state}
 
 
 @app.get("/debug/runtime")
 async def debug_runtime() -> dict:
     now = datetime.now(timezone.utc)
-    symbols = state.get_symbols() or list(settings.symbols)
+    settings = _require_settings()
+    state_store = _require_state()
+    scheduler = _require_scheduler()
+    symbols = state_store.get_symbols() or list(settings.symbols)
     storage_health = _storage_health_check(settings.data_dir)
     symbol_data = []
     for symbol in symbols:
         snapshot = scheduler.last_snapshot(symbol)
         latest_candle_ts = snapshot.candle.close_time.isoformat() if snapshot else None
         last_tick_ts = scheduler.last_symbol_tick_time(symbol)
-        last_processed_ms = state.get_last_processed_close_time_ms(symbol)
+        last_processed_ms = state_store.get_last_processed_close_time_ms(symbol)
         last_processed_iso = None
         if last_processed_ms is not None:
             last_processed_iso = datetime.fromtimestamp(last_processed_ms / 1000, tz=timezone.utc).isoformat()
-        last_decision_ts = state.get_last_decision_ts(symbol)
-        latest_decision = state.get_daily_state(symbol).latest_decision
+        last_decision_ts = state_store.get_last_decision_ts(symbol)
+        latest_decision = state_store.get_daily_state(symbol).latest_decision
         symbol_data.append(
             {
                 "symbol": symbol,
@@ -263,9 +366,12 @@ async def debug_runtime() -> dict:
 
 @app.post("/debug/force_signal")
 async def debug_force_signal(payload: DebugForceSignalRequest) -> dict:
+    settings = _require_settings()
+    state_store = _require_state()
+    scheduler = _require_scheduler()
     if not settings.debug_loosen:
         raise HTTPException(status_code=400, detail="debug_loosen_required")
-    symbols = state.get_symbols() or list(settings.symbols)
+    symbols = state_store.get_symbols() or list(settings.symbols)
     symbol = payload.symbol or (symbols[0] if symbols else None)
     if symbol is None:
         raise HTTPException(status_code=400, detail="no_symbol_available")
@@ -283,7 +389,7 @@ async def debug_force_signal(payload: DebugForceSignalRequest) -> dict:
         snapshot=snapshot,
         effective_settings=effective_settings,
     )
-    state.set_latest_decision(symbol, plan)
+    state_store.set_latest_decision(symbol, plan)
     correlation_id = str(uuid4())
     _record_correlation_id(correlation_id)
     log_event(settings, "decision", plan.model_dump(), correlation_id)
@@ -320,7 +426,8 @@ def _storage_health_check(data_dir: str) -> dict[str, str]:
 
 def _active_risk_gates(symbol: str, now: datetime) -> list[dict[str, str]]:
     active: list[dict[str, str]] = []
-    daily_state = state.get_daily_state(symbol)
+    settings = _require_settings()
+    daily_state = _require_state().get_daily_state(symbol)
     account_loss_limit = settings.account_size * settings.max_daily_loss_pct
     if settings.is_blackout(now):
         active.append({"gate": "blackout", "reason": "news_blackout"})
@@ -447,7 +554,8 @@ def _forced_trade_plan(
 
 
 def _hard_risk_gate_reasons(symbol: str, now: datetime) -> list[str]:
-    daily_state = state.get_daily_state(symbol)
+    settings = _require_settings()
+    daily_state = _require_state().get_daily_state(symbol)
     account_loss_limit = settings.account_size * settings.max_daily_loss_pct
     reasons: list[str] = []
     for start_t, end_t in settings.blackout_windows():
@@ -465,6 +573,22 @@ def _hard_risk_gate_reasons(symbol: str, now: datetime) -> list[str]:
         if minutes_since < settings.cooldown_minutes_after_loss:
             reasons.append("cooldown")
     return reasons
+
+
+def _fallback_decision(symbol: str) -> TradePlan:
+    return TradePlan(
+        status=Status.RISK_OFF,
+        direction=Direction.none,
+        entry_zone=None,
+        stop_loss=None,
+        take_profit=None,
+        risk_pct_used=None,
+        position_size_usd=None,
+        signal_score=None,
+        posture=Posture.RISK_OFF,
+        rationale=["no_decision_yet"],
+        raw_input_snapshot={"symbol": symbol},
+    )
 
 
 def _contains_hard_gate(rationale: list[str]) -> bool:

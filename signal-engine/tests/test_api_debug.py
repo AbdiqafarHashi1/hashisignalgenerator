@@ -64,15 +64,15 @@ def test_decision_persists_after_run_force(monkeypatch) -> None:
     monkeypatch.setattr(scheduler_module, "fetch_symbol_klines", fake_fetch)
     monkeypatch.setattr(scheduler_module, "decide", fake_decide)
 
-    client = TestClient(main_module.app)
-    response = client.get("/run", params={"force": "true"})
-    assert response.status_code == 200
+    with TestClient(main_module.app) as client:
+        response = client.get("/run", params={"force": "true"})
+        assert response.status_code == 200
 
-    decision_response = client.get("/decision/latest", params={"symbol": "BTCUSDT"})
-    assert decision_response.status_code == 200
-    payload = decision_response.json()
-    assert payload["symbol"] == "BTCUSDT"
-    assert payload["decision"]["status"] in {"NO_TRADE", "RISK_OFF", "TRADE"}
+        decision_response = client.get("/decision/latest", params={"symbol": "BTCUSDT"})
+        assert decision_response.status_code == 200
+        payload = decision_response.json()
+        assert payload["symbol"] == "BTCUSDT"
+        assert payload["decision"]["status"] in {"NO_TRADE", "RISK_OFF", "TRADE"}
 
 
 def test_telegram_test_endpoint(monkeypatch) -> None:
@@ -82,10 +82,10 @@ def test_telegram_test_endpoint(monkeypatch) -> None:
         return True
 
     monkeypatch.setattr(main_module, "send_telegram_message", fake_send)
-    client = TestClient(main_module.app)
-    response = client.get("/test/telegram")
-    assert response.status_code == 200
-    assert response.json()["status"] == "sent"
+    with TestClient(main_module.app) as client:
+        response = client.get("/test/telegram")
+        assert response.status_code == 200
+        assert response.json()["status"] == "sent"
 
 
 def _fresh_main(monkeypatch, env: dict[str, str]):
@@ -102,12 +102,12 @@ def _fresh_main(monkeypatch, env: dict[str, str]):
 
 def test_debug_runtime_includes_profile(monkeypatch) -> None:
     main_module = _fresh_main(monkeypatch, {"PROFILE": "diag", "MIN_SIGNAL_SCORE": "35"})
-    client = TestClient(main_module.app)
-    response = client.get("/debug/runtime")
-    assert response.status_code == 200
-    payload = response.json()
-    assert payload["settings"]["profile"] == "diag"
-    assert payload["settings"]["min_signal_score"] == 35
+    with TestClient(main_module.app) as client:
+        response = client.get("/debug/runtime")
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["settings"]["profile"] == "diag"
+        assert payload["settings"]["min_signal_score"] == 35
 
 
 def test_force_signal_respects_hard_gates(monkeypatch) -> None:
@@ -116,16 +116,45 @@ def test_force_signal_respects_hard_gates(monkeypatch) -> None:
         {"DEBUG_LOOSEN": "true", "ACCOUNT_SIZE": "1000", "MAX_DAILY_LOSS_PCT": "0.01"},
     )
     snapshot = _build_snapshot(close_time_ms=2_000_000, closed=True)
-    monkeypatch.setattr(main_module.scheduler, "last_snapshot", lambda symbol: snapshot)
-    daily_state = main_module.state.get_daily_state("BTCUSDT")
-    daily_state.pnl_usd = -20.0
 
-    client = TestClient(main_module.app)
-    response = client.post(
-        "/debug/force_signal",
-        json={"symbol": "BTCUSDT", "direction": "long", "bypass_soft_gates": True},
-    )
-    assert response.status_code == 200
-    decision = response.json()["decision"]
-    assert decision["status"] == "RISK_OFF"
-    assert "daily_loss_limit" in decision["rationale"]
+    with TestClient(main_module.app) as client:
+        scheduler = client.app.state.scheduler
+        state_store = client.app.state.state_store
+        monkeypatch.setattr(scheduler, "last_snapshot", lambda symbol: snapshot)
+        daily_state = state_store.get_daily_state("BTCUSDT")
+        daily_state.pnl_usd = -20.0
+
+        response = client.post(
+            "/debug/force_signal",
+            json={"symbol": "BTCUSDT", "direction": "long", "bypass_soft_gates": True},
+        )
+        assert response.status_code == 200
+        decision = response.json()["decision"]
+        assert decision["status"] == "RISK_OFF"
+        assert "daily_loss_limit" in decision["rationale"]
+
+
+def test_scheduler_state_persists_across_requests(monkeypatch) -> None:
+    from app import main as main_module
+
+    snapshot = _build_snapshot(close_time_ms=5_000_000, closed=True)
+
+    async def fake_fetch(*args, **kwargs):
+        return snapshot
+
+    def fake_decide(*args, **kwargs):
+        return _trade_plan()
+
+    monkeypatch.setattr(scheduler_module, "fetch_symbol_klines", fake_fetch)
+    monkeypatch.setattr(scheduler_module, "decide", fake_decide)
+
+    with TestClient(main_module.app) as client:
+        response = client.get("/engine/run_once", params={"force": "true"})
+        assert response.status_code == 200
+
+        debug = client.get("/debug/runtime")
+        assert debug.status_code == 200
+        payload = debug.json()
+        assert payload["scheduler"]["last_tick_time"] is not None
+        symbol = payload["symbols"][0]
+        assert symbol["candles_fetched_count"] == len(snapshot.candles)

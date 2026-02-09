@@ -64,6 +64,10 @@ class Settings(BaseSettings):
         0,
         validation_alias=AliasChoices("FORCE_TRADE_COOLDOWN_SECONDS", "force_trade_cooldown_seconds"),
     )
+    force_trade_auto_close_seconds: int = Field(
+        0,
+        validation_alias=AliasChoices("FORCE_TRADE_AUTO_CLOSE_SECONDS", "force_trade_auto_close_seconds"),
+    )
     force_trade_random_direction: bool = Field(
         True,
         validation_alias=AliasChoices("FORCE_TRADE_RANDOM_DIRECTION", "force_trade_random_direction"),
@@ -207,6 +211,7 @@ class Settings(BaseSettings):
             "force_trade_mode": self.force_trade_mode,
             "force_trade_every_seconds": self.force_trade_every_seconds,
             "force_trade_cooldown_seconds": self.force_trade_cooldown_seconds,
+            "force_trade_auto_close_seconds": self.force_trade_auto_close_seconds,
             "force_trade_random_direction": self.force_trade_random_direction,
             "min_signal_score": self.min_signal_score,
             "trend_strength_min": self.trend_strength_min,

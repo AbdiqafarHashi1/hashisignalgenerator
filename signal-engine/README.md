@@ -130,6 +130,7 @@ Key settings (defaults depend on MODE):
 - `FORCE_TRADE_MODE`
 - `FORCE_TRADE_EVERY_SECONDS`
 - `FORCE_TRADE_COOLDOWN_SECONDS`
+- `FORCE_TRADE_AUTO_CLOSE_SECONDS`
 - `FORCE_TRADE_RANDOM_DIRECTION`
 
 Risk environment thresholds:
@@ -223,7 +224,19 @@ Use this to validate the full trade pipeline (decision -> paper trade -> storage
    ```
 
 ## Force-trade mode (firehose) workflow
-Use this mode to spam paper trades on a short interval for end-to-end validation.
+Use this mode to spam paper trades on a short interval for end-to-end validation. Set
+`FORCE_TRADE_AUTO_CLOSE_SECONDS` to close any open paper trades after that many seconds;
+leave it as `0` to allow multiple concurrent forced trades.
+
+Example `.env`:
+```bash
+MODE=paper
+FORCE_TRADE_MODE=true
+FORCE_TRADE_EVERY_SECONDS=5
+FORCE_TRADE_COOLDOWN_SECONDS=0
+FORCE_TRADE_AUTO_CLOSE_SECONDS=0
+FORCE_TRADE_RANDOM_DIRECTION=true
+```
 
 1. Enable force-trade mode and start the service:
    ```bash
@@ -231,6 +244,7 @@ Use this mode to spam paper trades on a short interval for end-to-end validation
    export FORCE_TRADE_MODE=true
    export FORCE_TRADE_EVERY_SECONDS=5
    export FORCE_TRADE_COOLDOWN_SECONDS=0
+   export FORCE_TRADE_AUTO_CLOSE_SECONDS=0
    export FORCE_TRADE_RANDOM_DIRECTION=true
    uvicorn app.main:app --reload
    ```

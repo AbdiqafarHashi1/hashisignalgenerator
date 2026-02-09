@@ -100,7 +100,10 @@ class DecisionScheduler:
             self._heartbeat_cb()
         symbols = list(self._settings.symbols)
         self._last_tick_time = datetime.now(timezone.utc)
-        logger.info("scheduler_tick_start symbols=%s force=%s", ",".join(symbols), force)
+        force_mode = force or self._settings.smoke_test_force_trade or self._settings.force_trade_mode
+        logger.info("scheduler_tick_start symbols=%s force=%s", ",".join(symbols), force_mode)
+        if force_mode:
+            logger.info("FORCE MODE ACTIVE")
         results: list[dict[str, object]] = []
         if not self._settings.market_data_enabled:
             logger.warning("scheduler_tick_skipped reason=market_data_disabled")
@@ -131,7 +134,7 @@ class DecisionScheduler:
             )
             self._last_snapshots[symbol] = snapshot
             self._last_fetch_counts[symbol] = len(snapshot.candles)
-            if self._settings.force_trade_mode:
+            if self._settings.force_trade_mode or self._settings.smoke_test_force_trade:
                 self._auto_close_forced_trades(symbol, snapshot, tick_ts)
             logger.info(
                 "candle_fetch symbol=%s candles=%s latest=%s closed=%s",
@@ -149,19 +152,18 @@ class DecisionScheduler:
             telegram_sent = False
             trade_opened = False
             trade_id: str | None = None
-            if not force and not snapshot.kline_is_closed and not self._settings.force_trade_mode:
+            if not force_mode and not snapshot.kline_is_closed:
                 reason = "candle_open"
             else:
                 last_processed = self._state.get_last_processed_close_time_ms(snapshot.symbol)
                 if (
-                    not force
+                    not force_mode
                     and last_processed == snapshot.kline_close_time_ms
-                    and not self._settings.force_trade_mode
                 ):
                     reason = "candle_already_processed"
                 else:
                     forced_trade = False
-                    if self._settings.force_trade_mode and self._force_trade_due(snapshot.symbol, tick_ts):
+                    if force_mode and self._force_trade_due(snapshot.symbol, tick_ts):
                         plan = _build_forced_trade_plan(snapshot, self._settings)
                         self._last_force_trade_ts[snapshot.symbol] = tick_ts
                         forced_trade = True

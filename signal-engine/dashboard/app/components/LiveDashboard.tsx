@@ -165,15 +165,6 @@ export default function LiveDashboard() {
       const apiError = err as ApiError;
       setSummaryError(formatApiError("Account summary", apiError));
     }
-
-    try {
-      const summaryPayload = await apiFetch<AccountSummary>("/account/summary");
-      setAccountSummary(summaryPayload);
-      setSummaryError("");
-    } catch (err) {
-      const apiError = err as ApiError;
-      setSummaryError(formatApiError("Account summary", apiError));
-    }
   }, [formatApiError, selectedSymbol]);
 
   const loadSlow = useCallback(async () => {
@@ -425,63 +416,6 @@ export default function LiveDashboard() {
             </div>
           </div>
         </header>
-
-        <section className="grid gap-4 rounded-2xl border border-binance-border bg-binance-card p-6 shadow-panel">
-          <div className="flex flex-wrap items-center justify-between gap-3">
-            <div>
-              <h2 className="text-xl font-semibold text-white">Account Summary</h2>
-              <p className="text-sm text-slate-400">Last update: {summaryUpdatedAt}</p>
-            </div>
-            {summaryError ? (
-              <span className="rounded-full border border-yellow-400/60 px-3 py-1 text-xs font-semibold uppercase tracking-[0.2em] text-yellow-300">
-                API error
-              </span>
-            ) : null}
-          </div>
-          <div className="grid gap-6 lg:grid-cols-2">
-            <div className="space-y-3">
-              <p className="text-xs uppercase tracking-[0.2em] text-slate-400">Account</p>
-              <div className="grid gap-4 sm:grid-cols-2">
-                {accountKpis.map((item) => (
-                  <div
-                    key={item.label}
-                    className="rounded-xl border border-binance-border bg-binance-dark/60 p-4"
-                  >
-                    <p className="text-xs uppercase tracking-[0.2em] text-slate-400">
-                      {item.label}
-                    </p>
-                    <p className={`mt-2 text-2xl font-semibold ${item.tone}`}>{item.value}</p>
-                  </div>
-                ))}
-              </div>
-            </div>
-            <div className="space-y-3">
-              <p className="text-xs uppercase tracking-[0.2em] text-slate-400">Trading</p>
-              <div className="grid gap-4 sm:grid-cols-2">
-                {tradingKpis.map((item) => (
-                  <div
-                    key={item.label}
-                    className="rounded-xl border border-binance-border bg-binance-dark/60 p-4"
-                  >
-                    <p className="text-xs uppercase tracking-[0.2em] text-slate-400">
-                      {item.label}
-                    </p>
-                    <p className="mt-2 text-2xl font-semibold text-slate-200">
-                      {item.format(item.value)}
-                    </p>
-                  </div>
-                ))}
-              </div>
-            </div>
-          </div>
-          <div className="rounded-xl border border-binance-border bg-binance-dark/60 p-4">
-            <div className="mb-3 flex items-center justify-between">
-              <p className="text-xs uppercase tracking-[0.2em] text-slate-400">Equity Curve</p>
-              <span className="text-xs text-slate-500">Auto-refreshing</span>
-            </div>
-            <EquityChart data={equityData} />
-          </div>
-        </section>
 
         <section className="grid gap-4 rounded-2xl border border-binance-border bg-binance-card p-6 shadow-panel">
           <div className="flex flex-wrap items-center justify-between gap-3">

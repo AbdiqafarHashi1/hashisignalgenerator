@@ -1,5 +1,6 @@
 ﻿from __future__ import annotations
-
+from datetime import datetime, timezone
+from typing import Any, Optional
 from contextlib import asynccontextmanager
 import asyncio
 from datetime import datetime, timezone
@@ -22,7 +23,33 @@ from .services.stats import compute_stats
 from .storage.store import log_event
 from .strategy.decision import decide
 from .services.scheduler import DecisionScheduler
+def _as_datetime_utc(value: Any) -> Optional[datetime]:
+    """
+    Normalize DB timestamps to timezone-aware UTC datetimes.
+    Accepts:
+      - datetime
+      - ISO string
+      - None
+    """
+    if value is None:
+        return None
 
+    if isinstance(value, datetime):
+        return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+
+    if isinstance(value, str):
+        s = value.strip()
+        if not s:
+            return None
+        if s.endswith("Z"):
+            s = s[:-1] + "+00:00"
+        try:
+            dt = datetime.fromisoformat(s)
+        except ValueError:
+            return None
+        return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+
+    return None
 class AccountSummary(BaseModel):
     starting_balance_usd: float
     balance_usd: float
@@ -274,15 +301,35 @@ async def account_summary() -> AccountSummary:
     elif equity != 0:
         pnl_pct = (total_pnl / abs(equity)) * 100
 
-    symbols = state_store.get_symbols() or list(settings.symbols)
+    # --- TODAY METRICS from DB (correct, not state_store) ---
+    start_of_day = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+
     trades_today = 0
+    wins_today = 0
     losses_today = 0
-    for symbol in symbols:
-        daily_state = state_store.get_daily_state(symbol)
-        trades_today += daily_state.trades
-        losses_today += daily_state.losses
-    wins_today = max(0, trades_today - losses_today)
-    win_rate_today = wins_today / trades_today if trades_today else 0.0
+
+    all_trades = database.fetch_trades()
+
+    for t in all_trades:
+        closed_at_dt = _as_datetime_utc(getattr(t, "closed_at", None))
+        if closed_at_dt is None:
+            continue
+        if closed_at_dt < start_of_day:
+            continue
+
+        # 🚫 ignore forced / debug closes
+        result = (getattr(t, "result", None) or "").lower()
+        if "force" in result or "debug" in result:
+            continue        
+        pnl = float(getattr(t, "pnl_usd", None) or 0.0)
+
+        trades_today += 1
+        if pnl > 0:
+            wins_today += 1
+        elif pnl < 0:
+            losses_today += 1
+
+    win_rate_today = (wins_today / trades_today) if trades_today else 0.0
     max_drawdown_pct = (summary.max_drawdown / starting_balance) * 100 if starting_balance else 0.0
     equity_curve = [starting_balance + point for point in summary.equity_curve]
 
@@ -416,9 +463,73 @@ async def trade_outcome(outcome: TradeOutcome) -> dict:
 
 @app.get("/state/today")
 async def state_today(symbol: str = Query(..., min_length=1)) -> dict:
-    daily_state = _require_state().get_daily_state(symbol)
-    return {"symbol": symbol, "state": daily_state}
+    state_store = _require_state()
+    db = _require_database()
 
+    # Keep latest_decision from state store (UI uses it)
+    daily_state = state_store.get_daily_state(symbol)
+    latest_decision = getattr(daily_state, "latest_decision", None)
+
+    # Compute today metrics from DB trades (source of truth)
+    start_of_day = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+
+    trades = db.fetch_trades()
+
+    # Only trades for this symbol, CLOSED today (so pnl is final)
+    closed_today = []
+    for t in trades:
+        if getattr(t, "symbol", None) != symbol:
+            continue
+
+        closed_at_dt = _as_datetime_utc(getattr(t, "closed_at", None))
+        if closed_at_dt is None:
+            continue
+
+        if closed_at_dt >= start_of_day:
+            closed_today.append(t)
+
+    pnl_list = [(getattr(t, "pnl_usd", None) or 0.0) for t in closed_today]
+    trades_count = len(closed_today)
+
+    losses_count = sum(1 for p in pnl_list if p < 0)
+    wins_count = sum(1 for p in pnl_list if p > 0)
+    breakeven_count = sum(1 for p in pnl_list if p == 0)
+
+    pnl_today = float(sum(pnl_list))
+
+    def _closed_key(tr):
+        return _as_datetime_utc(getattr(tr, "closed_at", None)) or datetime.min.replace(tzinfo=timezone.utc)
+
+    # consecutive_losses (from most recent closed trade going backwards)
+    consecutive_losses = 0
+    for t in sorted(closed_today, key=_closed_key, reverse=True):
+        p = (getattr(t, "pnl_usd", None) or 0.0)
+        if p < 0:
+            consecutive_losses += 1
+        else:
+            break
+
+    # last_loss_ts
+    last_loss_ts = None
+    for t in sorted(closed_today, key=_closed_key, reverse=True):
+        p = (getattr(t, "pnl_usd", None) or 0.0)
+        if p < 0:
+            last_loss_ts = _as_datetime_utc(getattr(t, "closed_at", None))
+            break
+
+    state = {
+        "date": start_of_day.date().isoformat(),
+        "trades": trades_count,
+        "wins": wins_count,
+        "losses": losses_count,
+        "breakeven": breakeven_count,
+        "consecutive_losses": consecutive_losses,
+        "pnl_usd": pnl_today,
+        "last_loss_ts": last_loss_ts.isoformat() if last_loss_ts else None,
+        "latest_decision": latest_decision,
+    }
+
+    return {"symbol": symbol, "state": state}
 
 @app.get("/debug/runtime")
 async def debug_runtime() -> dict:

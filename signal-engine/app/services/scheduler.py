@@ -40,8 +40,14 @@ class DecisionScheduler:
         self._database = database
         self._paper_trader = paper_trader
         self._interval = interval_seconds
-        if settings.force_trade_mode:
+        if settings.smoke_test_force_trade or settings.force_trade_mode:
             self._interval = min(self._interval, settings.force_trade_every_seconds)
+            if interval_seconds > settings.force_trade_every_seconds:
+                logger.warning(
+                    "force_trade_interval_adjusted tick_interval=%s force_every=%s",
+                    interval_seconds,
+                    settings.force_trade_every_seconds,
+                )
         self._heartbeat_cb = heartbeat_cb
         self._last_tick_time: datetime | None = None
         self._last_snapshots: dict[str, BinanceKlineSnapshot] = {}
@@ -104,6 +110,12 @@ class DecisionScheduler:
         logger.info("scheduler_tick_start symbols=%s force=%s", ",".join(symbols), force_mode)
         if force_mode:
             logger.info("FORCE MODE ACTIVE")
+            logger.info(
+                "force_tick ts=%s force=%s symbols=%s",
+                self._last_tick_time.isoformat(),
+                force_mode,
+                ",".join(symbols),
+            )
         results: list[dict[str, object]] = []
         if not self._settings.market_data_enabled:
             logger.warning("scheduler_tick_skipped reason=market_data_disabled")
@@ -223,8 +235,7 @@ class DecisionScheduler:
                                 )
                             if self._settings.engine_mode in {"paper", "live"} and self._paper_trader is not None:
                                 allow_multiple = (
-                                    self._settings.force_trade_mode
-                                    and self._settings.force_trade_auto_close_seconds == 0
+                                    force_mode and self._settings.force_trade_auto_close_seconds == 0
                                 )
                                 trade_id = self._paper_trader.maybe_open_trade(
                                     snapshot.symbol,

@@ -54,7 +54,14 @@ class Settings(BaseSettings):
     trend_strength_min: float | None = None
     candle_interval: str | None = None
     candle_history_limit: int = 120
-    tick_interval_seconds: int = Field(60, validation_alias=AliasChoices("TICK_INTERVAL_SECONDS", "tick_interval_seconds"))
+    tick_interval_seconds: int = Field(
+        60,
+        validation_alias=AliasChoices(
+            "TICK_INTERVAL_SECONDS",
+            "SCHEDULER_TICK_INTERVAL_SECONDS",
+            "tick_interval_seconds",
+        ),
+    )
     force_trade_mode: bool = Field(False, validation_alias=AliasChoices("FORCE_TRADE_MODE", "force_trade_mode"))
     force_trade_every_seconds: int = Field(
         5,

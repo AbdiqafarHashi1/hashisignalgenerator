@@ -73,6 +73,8 @@ No domain is required for the initial deployment. Add a domain + HTTPS later whe
 - `GET /test/telegram`
 - `GET /debug/runtime`
 - `POST /debug/force_signal`
+- `POST /debug/smoke/run_full_cycle`
+- `POST /debug/storage/reset`
 
 ## TradingView webhook payload
 Send a single JSON payload that includes the TradingView structure plus normalized market + bias inputs.
@@ -126,6 +128,7 @@ Key settings (defaults depend on MODE):
 - `max_consecutive_losses`
 - `min_signal_score`
 - `TICK_INTERVAL_SECONDS`
+- `SCHEDULER_TICK_INTERVAL_SECONDS`
 - `SMOKE_TEST_FORCE_TRADE`
 - `FORCE_TRADE_MODE`
 - `FORCE_TRADE_EVERY_SECONDS`
@@ -261,6 +264,25 @@ FORCE_TRADE_RANDOM_DIRECTION=true
    Or run:
    ```bash
    ./scripts/force_trade_smoke_test.sh
+   ```
+
+## Deterministic full-cycle smoke test (no market data required)
+Use this endpoint to force a full open → close → PnL cycle in one call.
+
+1. Reset stored state (clears `./data` logs and trade rows):
+   ```bash
+   curl -s -X POST http://localhost:8000/debug/storage/reset | jq
+   ```
+2. Run the full cycle:
+   ```bash
+   curl -s -X POST http://localhost:8000/debug/smoke/run_full_cycle \
+     -H "Content-Type: application/json" \
+     -d '{"symbol":"ETHUSDT","direction":"long","hold_seconds":2,"entry_price":100.0}' | jq
+   ```
+3. Verify trades and stats reflect the closed trade:
+   ```bash
+   curl -s http://localhost:8000/trades | jq
+   curl -s http://localhost:8000/stats | jq
    ```
 
 ## Switching back to PROFIT

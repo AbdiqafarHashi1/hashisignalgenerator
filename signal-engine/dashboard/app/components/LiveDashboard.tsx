@@ -25,11 +25,29 @@ type PositionsResponse = { positions: Array<Record<string, unknown>> };
 
 type TradesResponse = { trades: Array<Record<string, unknown>> };
 
-type EquityResponse = { equity_curve: Array<Record<string, unknown>> };
-
 type StatsResponse = Record<string, unknown>;
 
 type SymbolsResponse = { symbols: string[] };
+
+type AccountSummary = {
+  starting_balance_usd: number | null;
+  balance_usd: number | null;
+  equity_usd: number | null;
+  realized_pnl_usd: number | null;
+  unrealized_pnl_usd: number | null;
+  total_pnl_usd: number | null;
+  pnl_pct: number | null;
+  open_positions: number | null;
+  trades_today: number | null;
+  wins_today: number | null;
+  losses_today: number | null;
+  win_rate_today: number | null;
+  profit_factor: number | null;
+  expectancy: number | null;
+  max_drawdown_pct: number | null;
+  last_updated_ts: string | null;
+  equity_curve?: number[];
+};
 
 export default function LiveDashboard() {
   const [symbols, setSymbols] = useState<string[]>([]);
@@ -38,9 +56,10 @@ export default function LiveDashboard() {
   const [decisionError, setDecisionError] = useState<string>("");
   const [positions, setPositions] = useState<Array<Record<string, unknown>>>([]);
   const [trades, setTrades] = useState<Array<Record<string, unknown>>>([]);
-  const [equityCurve, setEquityCurve] = useState<Array<Record<string, unknown>>>([]);
   const [stats, setStats] = useState<StatsResponse | null>(null);
   const [todayState, setTodayState] = useState<Record<string, unknown> | null>(null);
+  const [accountSummary, setAccountSummary] = useState<AccountSummary | null>(null);
+  const [summaryError, setSummaryError] = useState<string>("");
   const [error, setError] = useState<string>("");
   const [engineStatus, setEngineStatus] = useState<EngineStatus | null>(null);
   const [statusError, setStatusError] = useState<string>("");
@@ -136,6 +155,15 @@ export default function LiveDashboard() {
       const apiError = err as ApiError;
       setError(formatApiError("State today", apiError));
     }
+
+    try {
+      const summaryPayload = await apiFetch<AccountSummary>("/account/summary");
+      setAccountSummary(summaryPayload);
+      setSummaryError("");
+    } catch (err) {
+      const apiError = err as ApiError;
+      setSummaryError(formatApiError("Account summary", apiError));
+    }
   }, [formatApiError, selectedSymbol]);
 
   const loadSlow = useCallback(async () => {
@@ -155,13 +183,6 @@ export default function LiveDashboard() {
       setError(formatApiError("Stats", apiError));
     }
 
-    try {
-      const equityPayload = await apiFetch<EquityResponse>("/equity");
-      setEquityCurve(equityPayload.equity_curve ?? []);
-    } catch (err) {
-      const apiError = err as ApiError;
-      setError(formatApiError("Equity", apiError));
-    }
   }, [formatApiError]);
 
   const loadEngineStatus = useCallback(async () => {
@@ -260,6 +281,101 @@ export default function LiveDashboard() {
     return `${type} • ${ts}${detail}`;
   }, [engineStatus?.last_action]);
 
+  const summaryUpdatedAt = useMemo(() => {
+    if (!accountSummary?.last_updated_ts) {
+      return "--";
+    }
+    const ts = new Date(accountSummary.last_updated_ts);
+    if (Number.isNaN(ts.getTime())) {
+      return accountSummary.last_updated_ts;
+    }
+    return ts.toLocaleTimeString();
+  }, [accountSummary?.last_updated_ts]);
+
+  const formatCurrency = useCallback((value: number | null | undefined) => {
+    if (value === null || value === undefined) {
+      return "--";
+    }
+    return value.toFixed(2);
+  }, []);
+
+  const formatPercent = useCallback((value: number | null | undefined) => {
+    if (value === null || value === undefined) {
+      return "--";
+    }
+    return `${value.toFixed(2)}%`;
+  }, []);
+
+  const toneForValue = (value: number | null | undefined) => {
+    if (value === null || value === undefined) {
+      return "text-slate-300";
+    }
+    if (value > 0) {
+      return "text-emerald-400";
+    }
+    if (value < 0) {
+      return "text-red-400";
+    }
+    return "text-slate-200";
+  };
+
+  const accountKpis = [
+    { label: "Balance (USD)", value: formatCurrency(accountSummary?.balance_usd), tone: toneForValue(accountSummary?.balance_usd) },
+    { label: "Equity (USD)", value: formatCurrency(accountSummary?.equity_usd), tone: toneForValue(accountSummary?.equity_usd) },
+    { label: "PnL", value: formatCurrency(accountSummary?.total_pnl_usd), tone: toneForValue(accountSummary?.total_pnl_usd) },
+    { label: "Realized PnL", value: formatCurrency(accountSummary?.realized_pnl_usd), tone: toneForValue(accountSummary?.realized_pnl_usd) },
+    { label: "Unrealized PnL", value: formatCurrency(accountSummary?.unrealized_pnl_usd), tone: toneForValue(accountSummary?.unrealized_pnl_usd) },
+    { label: "Total PnL", value: formatCurrency(accountSummary?.total_pnl_usd), tone: toneForValue(accountSummary?.total_pnl_usd) },
+    { label: "PnL %", value: formatPercent(accountSummary?.pnl_pct), tone: toneForValue(accountSummary?.pnl_pct) },
+  ];
+
+  const tradingKpis = [
+    {
+      label: "Open Positions",
+      value: accountSummary?.open_positions,
+      format: (value: number | null | undefined) => (value ?? value === 0 ? String(value) : "--"),
+    },
+    {
+      label: "Trades Today",
+      value: accountSummary?.trades_today,
+      format: (value: number | null | undefined) => (value ?? value === 0 ? String(value) : "--"),
+    },
+    {
+      label: "Wins",
+      value: accountSummary?.wins_today,
+      format: (value: number | null | undefined) => (value ?? value === 0 ? String(value) : "--"),
+    },
+    {
+      label: "Losses",
+      value: accountSummary?.losses_today,
+      format: (value: number | null | undefined) => (value ?? value === 0 ? String(value) : "--"),
+    },
+    {
+      label: "Win Rate %",
+      value: accountSummary?.win_rate_today != null ? accountSummary.win_rate_today * 100 : null,
+      format: formatPercent,
+    },
+    {
+      label: "Profit Factor",
+      value: accountSummary?.profit_factor,
+      format: (value: number | null | undefined) =>
+        value === null || value === undefined ? "--" : value.toFixed(2),
+    },
+    {
+      label: "Expectancy",
+      value: accountSummary?.expectancy,
+      format: (value: number | null | undefined) =>
+        value === null || value === undefined ? "--" : value.toFixed(2),
+    },
+    {
+      label: "Max Drawdown %",
+      value: accountSummary?.max_drawdown_pct,
+      format: formatPercent,
+    },
+  ];
+
+  const equityData = accountSummary?.equity_curve ?? [];
+
   return (
     <div className="min-h-screen px-6 py-8">
       <div className="mx-auto flex max-w-6xl flex-col gap-6">
@@ -299,6 +415,63 @@ export default function LiveDashboard() {
             </div>
           </div>
         </header>
+
+        <section className="grid gap-4 rounded-2xl border border-binance-border bg-binance-card p-6 shadow-panel">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <h2 className="text-xl font-semibold text-white">Account Summary</h2>
+              <p className="text-sm text-slate-400">Last update: {summaryUpdatedAt}</p>
+            </div>
+            {summaryError ? (
+              <span className="rounded-full border border-yellow-400/60 px-3 py-1 text-xs font-semibold uppercase tracking-[0.2em] text-yellow-300">
+                API error
+              </span>
+            ) : null}
+          </div>
+          <div className="grid gap-6 lg:grid-cols-2">
+            <div className="space-y-3">
+              <p className="text-xs uppercase tracking-[0.2em] text-slate-400">Account</p>
+              <div className="grid gap-4 sm:grid-cols-2">
+                {accountKpis.map((item) => (
+                  <div
+                    key={item.label}
+                    className="rounded-xl border border-binance-border bg-binance-dark/60 p-4"
+                  >
+                    <p className="text-xs uppercase tracking-[0.2em] text-slate-400">
+                      {item.label}
+                    </p>
+                    <p className={`mt-2 text-2xl font-semibold ${item.tone}`}>{item.value}</p>
+                  </div>
+                ))}
+              </div>
+            </div>
+            <div className="space-y-3">
+              <p className="text-xs uppercase tracking-[0.2em] text-slate-400">Trading</p>
+              <div className="grid gap-4 sm:grid-cols-2">
+                {tradingKpis.map((item) => (
+                  <div
+                    key={item.label}
+                    className="rounded-xl border border-binance-border bg-binance-dark/60 p-4"
+                  >
+                    <p className="text-xs uppercase tracking-[0.2em] text-slate-400">
+                      {item.label}
+                    </p>
+                    <p className="mt-2 text-2xl font-semibold text-slate-200">
+                      {item.format(item.value)}
+                    </p>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+          <div className="rounded-xl border border-binance-border bg-binance-dark/60 p-4">
+            <div className="mb-3 flex items-center justify-between">
+              <p className="text-xs uppercase tracking-[0.2em] text-slate-400">Equity Curve</p>
+              <span className="text-xs text-slate-500">Auto-refreshing</span>
+            </div>
+            <EquityChart data={equityData} />
+          </div>
+        </section>
 
         <section className="grid gap-4 rounded-2xl border border-binance-border bg-binance-card p-6 shadow-panel">
           <div className="flex flex-wrap items-center justify-between gap-4">
@@ -387,9 +560,6 @@ export default function LiveDashboard() {
             <Panel title="Trades">
               <TableBlock rows={trades} emptyLabel="No trades yet" />
             </Panel>
-            <Panel title="Equity Curve">
-              <TableBlock rows={equityCurve} emptyLabel="No equity points" />
-            </Panel>
           </div>
         </section>
       </div>
@@ -470,4 +640,39 @@ function Cell({ value }: { value: unknown }) {
     );
   }
   return <span>{String(value)}</span>;
+}
+
+function EquityChart({ data }: { data: number[] }) {
+  if (!data.length) {
+    return <p className="text-sm text-slate-400">No equity data yet.</p>;
+  }
+
+  const min = Math.min(...data);
+  const max = Math.max(...data);
+  const range = max - min || 1;
+  const points = data
+    .map((value, index) => {
+      const x = (index / Math.max(1, data.length - 1)) * 100;
+      const y = 100 - ((value - min) / range) * 100;
+      return `${x},${y}`;
+    })
+    .join(" ");
+
+  return (
+    <div className="h-40 w-full">
+      <svg viewBox="0 0 100 100" className="h-full w-full" preserveAspectRatio="none">
+        <polyline
+          points={points}
+          fill="none"
+          stroke="#22c55e"
+          strokeWidth="2"
+          vectorEffect="non-scaling-stroke"
+        />
+      </svg>
+      <div className="mt-2 flex justify-between text-xs text-slate-500">
+        <span>{min.toFixed(2)}</span>
+        <span>{max.toFixed(2)}</span>
+      </div>
+    </div>
+  );
 }

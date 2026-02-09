@@ -234,6 +234,59 @@ async def equity() -> dict:
     return {"equity_curve": summary.equity_curve}
 
 
+@app.get("/account/summary", response_model=AccountSummary)
+async def account_summary() -> AccountSummary:
+    settings = _require_settings()
+    state_store = _require_state()
+    database = _require_database()
+    summary = compute_stats(database.fetch_trades())
+    open_positions = database.fetch_open_trades()
+
+    starting_balance = settings.account_size or 0.0
+    realized_pnl = summary.total_pnl
+    unrealized_pnl = 0.0
+    balance = starting_balance + realized_pnl
+    equity = balance + unrealized_pnl
+    total_pnl = realized_pnl + unrealized_pnl
+    pnl_pct = None
+    if starting_balance > 0:
+        pnl_pct = ((equity - starting_balance) / starting_balance) * 100
+    elif equity != 0:
+        pnl_pct = (total_pnl / abs(equity)) * 100
+
+    symbols = state_store.get_symbols() or list(settings.symbols)
+    trades_today = 0
+    losses_today = 0
+    for symbol in symbols:
+        daily_state = state_store.get_daily_state(symbol)
+        trades_today += daily_state.trades
+        losses_today += daily_state.losses
+    wins_today = max(0, trades_today - losses_today)
+    win_rate_today = wins_today / trades_today if trades_today else 0.0
+    max_drawdown_pct = (summary.max_drawdown / starting_balance) * 100 if starting_balance else 0.0
+    equity_curve = [starting_balance + point for point in summary.equity_curve]
+
+    return AccountSummary(
+        starting_balance_usd=starting_balance,
+        balance_usd=balance,
+        equity_usd=equity,
+        realized_pnl_usd=realized_pnl,
+        unrealized_pnl_usd=unrealized_pnl,
+        total_pnl_usd=total_pnl,
+        pnl_pct=pnl_pct,
+        open_positions=len(open_positions),
+        trades_today=trades_today,
+        wins_today=wins_today,
+        losses_today=losses_today,
+        win_rate_today=win_rate_today,
+        profit_factor=summary.profit_factor,
+        expectancy=summary.expectancy,
+        max_drawdown_pct=max_drawdown_pct,
+        last_updated_ts=datetime.now(timezone.utc).isoformat(),
+        equity_curve=equity_curve,
+    )
+
+
 @app.get("/positions")
 async def positions() -> dict:
     return {"positions": [trade.__dict__ for trade in _require_database().fetch_open_trades()]}
@@ -310,6 +363,26 @@ class DebugSmokeCycleRequest(BaseModel):
     direction: Direction | None = None
     hold_seconds: int = Field(2, ge=0)
     entry_price: float = Field(100.0, gt=0)
+
+
+class AccountSummary(BaseModel):
+    starting_balance_usd: float
+    balance_usd: float
+    equity_usd: float
+    realized_pnl_usd: float
+    unrealized_pnl_usd: float
+    total_pnl_usd: float
+    pnl_pct: float | None
+    open_positions: int
+    trades_today: int
+    wins_today: int
+    losses_today: int
+    win_rate_today: float
+    profit_factor: float
+    expectancy: float
+    max_drawdown_pct: float
+    last_updated_ts: str
+    equity_curve: list[float] = Field(default_factory=list)
 
 
 @app.get("/decision/latest")

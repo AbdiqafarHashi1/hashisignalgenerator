@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import random
 from collections.abc import Callable
 from datetime import datetime, timezone
 
@@ -11,6 +12,7 @@ from ..models import (
     DecisionRequest,
     Direction,
     MarketSnapshot,
+    Posture,
     SetupType,
     Status,
     TradePlan,
@@ -38,11 +40,14 @@ class DecisionScheduler:
         self._database = database
         self._paper_trader = paper_trader
         self._interval = interval_seconds
+        if settings.force_trade_mode:
+            self._interval = min(self._interval, settings.force_trade_every_seconds)
         self._heartbeat_cb = heartbeat_cb
         self._last_tick_time: datetime | None = None
         self._last_snapshots: dict[str, BinanceKlineSnapshot] = {}
         self._last_fetch_counts: dict[str, int] = {}
         self._last_symbol_tick_time: dict[str, datetime] = {}
+        self._last_force_trade_ts: dict[str, datetime] = {}
 
         self._stop_event = asyncio.Event()
         self._task: asyncio.Task | None = None
@@ -142,24 +147,42 @@ class DecisionScheduler:
             telegram_sent = False
             trade_opened = False
             trade_id: str | None = None
-            if not force and not snapshot.kline_is_closed:
+            if not force and not snapshot.kline_is_closed and not self._settings.force_trade_mode:
                 reason = "candle_open"
             else:
                 last_processed = self._state.get_last_processed_close_time_ms(snapshot.symbol)
-                if not force and last_processed == snapshot.kline_close_time_ms:
+                if (
+                    not force
+                    and last_processed == snapshot.kline_close_time_ms
+                    and not self._settings.force_trade_mode
+                ):
                     reason = "candle_already_processed"
                 else:
-                    request = _build_decision_request(snapshot)
-                    plan = decide(request, self._state, self._settings)
+                    forced_trade = False
+                    if self._settings.force_trade_mode and self._force_trade_due(snapshot.symbol, tick_ts):
+                        plan = _build_forced_trade_plan(snapshot, self._settings)
+                        self._last_force_trade_ts[snapshot.symbol] = tick_ts
+                        forced_trade = True
+                    else:
+                        request = _build_decision_request(snapshot)
+                        plan = decide(request, self._state, self._settings)
                     decision_status = plan.status.value
                     self._state.set_latest_decision(snapshot.symbol, plan)
                     persisted = True
-                    logger.info(
-                        "decision_computed symbol=%s status=%s rationale=%s",
-                        snapshot.symbol,
-                        plan.status.value,
-                        ",".join(plan.rationale),
-                    )
+                    if forced_trade:
+                        logger.info(
+                            "force_trade_decision symbol=%s status=%s rationale=%s",
+                            snapshot.symbol,
+                            plan.status.value,
+                            ",".join(plan.rationale),
+                        )
+                    else:
+                        logger.info(
+                            "decision_computed symbol=%s status=%s rationale=%s",
+                            snapshot.symbol,
+                            plan.status.value,
+                            ",".join(plan.rationale),
+                        )
                     if self._database is not None:
                         entry = None
                         if plan.entry_zone is not None:
@@ -255,6 +278,13 @@ class DecisionScheduler:
             )
         return results
 
+    def _force_trade_due(self, symbol: str, now: datetime) -> bool:
+        last_forced = self._last_force_trade_ts.get(symbol)
+        if last_forced is None:
+            return True
+        elapsed = (now - last_forced).total_seconds()
+        return elapsed >= max(self._settings.force_trade_every_seconds, self._settings.force_trade_cooldown_seconds)
+
     async def _run_loop(self) -> None:
         while not self._stop_event.is_set():
             await self.run_once()
@@ -262,6 +292,38 @@ class DecisionScheduler:
                 await asyncio.wait_for(self._stop_event.wait(), timeout=self._interval)
             except asyncio.TimeoutError:
                 continue
+
+
+def _build_forced_trade_plan(snapshot: BinanceKlineSnapshot, settings: Settings) -> TradePlan:
+    entry = snapshot.candle.close
+    entry_low = entry * (1 - 0.0002)
+    entry_high = entry * (1 + 0.0002)
+    direction = _pick_direction(settings, snapshot)
+    stop_loss = entry * (0.999 if direction == Direction.long else 1.001)
+    take_profit = entry * (1.001 if direction == Direction.long else 0.999)
+    return TradePlan(
+        status=Status.TRADE,
+        direction=direction,
+        entry_zone=(entry_low, entry_high),
+        stop_loss=stop_loss,
+        take_profit=take_profit,
+        risk_pct_used=0.001,
+        position_size_usd=10.0,
+        signal_score=None,
+        posture=Posture.NORMAL,
+        rationale=["force_trade_mode", "debug_force_trade"],
+        raw_input_snapshot={
+            "symbol": snapshot.symbol,
+            "direction": direction.value,
+            "strategy": settings.strategy,
+        },
+    )
+
+
+def _pick_direction(settings: Settings, snapshot: BinanceKlineSnapshot) -> Direction:
+    if settings.force_trade_random_direction:
+        return random.choice([Direction.long, Direction.short])
+    return Direction.long if snapshot.candle.close >= snapshot.candle.open else Direction.short
 
 
 def _trend_strength(candle: BinanceKlineSnapshot) -> float:

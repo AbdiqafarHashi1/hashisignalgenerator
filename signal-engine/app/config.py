@@ -55,6 +55,19 @@ class Settings(BaseSettings):
     candle_interval: str | None = None
     candle_history_limit: int = 120
     tick_interval_seconds: int = Field(60, validation_alias=AliasChoices("TICK_INTERVAL_SECONDS", "tick_interval_seconds"))
+    force_trade_mode: bool = Field(False, validation_alias=AliasChoices("FORCE_TRADE_MODE", "force_trade_mode"))
+    force_trade_every_seconds: int = Field(
+        5,
+        validation_alias=AliasChoices("FORCE_TRADE_EVERY_SECONDS", "force_trade_every_seconds"),
+    )
+    force_trade_cooldown_seconds: int = Field(
+        0,
+        validation_alias=AliasChoices("FORCE_TRADE_COOLDOWN_SECONDS", "force_trade_cooldown_seconds"),
+    )
+    force_trade_random_direction: bool = Field(
+        True,
+        validation_alias=AliasChoices("FORCE_TRADE_RANDOM_DIRECTION", "force_trade_random_direction"),
+    )
     ema_length: int = 50
     momentum_mode: Literal["adx", "atr"] = "adx"
     adx_period: int = 14
@@ -191,6 +204,10 @@ class Settings(BaseSettings):
             "symbols": list(self.symbols),
             "candle_interval": self.candle_interval,
             "tick_interval_seconds": self.tick_interval_seconds,
+            "force_trade_mode": self.force_trade_mode,
+            "force_trade_every_seconds": self.force_trade_every_seconds,
+            "force_trade_cooldown_seconds": self.force_trade_cooldown_seconds,
+            "force_trade_random_direction": self.force_trade_random_direction,
             "min_signal_score": self.min_signal_score,
             "trend_strength_min": self.trend_strength_min,
             "cooldown_minutes_after_loss": self.cooldown_minutes_after_loss,

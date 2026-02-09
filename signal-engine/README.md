@@ -127,6 +127,10 @@ Key settings (defaults depend on MODE):
 - `min_signal_score`
 - `TICK_INTERVAL_SECONDS`
 - `SMOKE_TEST_FORCE_TRADE`
+- `FORCE_TRADE_MODE`
+- `FORCE_TRADE_EVERY_SECONDS`
+- `FORCE_TRADE_COOLDOWN_SECONDS`
+- `FORCE_TRADE_RANDOM_DIRECTION`
 
 Risk environment thresholds:
 - `funding_extreme_abs`
@@ -216,6 +220,33 @@ Use this to validate the full trade pipeline (decision -> paper trade -> storage
    ```bash
    curl -s http://localhost:8000/positions | jq
    curl -s http://localhost:8000/trades | jq
+   ```
+
+## Force-trade mode (firehose) workflow
+Use this mode to spam paper trades on a short interval for end-to-end validation.
+
+1. Enable force-trade mode and start the service:
+   ```bash
+   export MODE=paper
+   export FORCE_TRADE_MODE=true
+   export FORCE_TRADE_EVERY_SECONDS=5
+   export FORCE_TRADE_COOLDOWN_SECONDS=0
+   export FORCE_TRADE_RANDOM_DIRECTION=true
+   uvicorn app.main:app --reload
+   ```
+2. Start the scheduler:
+   ```bash
+   curl -s http://localhost:8000/engine/start | jq
+   ```
+3. Verify trade count increases within 30 seconds:
+   ```bash
+   curl -s http://localhost:8000/trades | jq
+   sleep 30
+   curl -s http://localhost:8000/trades | jq
+   ```
+   Or run:
+   ```bash
+   ./scripts/force_trade_smoke_test.sh
    ```
 
 ## Switching back to PROFIT

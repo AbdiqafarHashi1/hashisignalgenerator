@@ -73,6 +73,8 @@ No domain is required for the initial deployment. Add a domain + HTTPS later whe
 - `GET /test/telegram`
 - `GET /debug/runtime`
 - `POST /debug/force_signal`
+- `POST /debug/smoke/run_full_cycle`
+- `POST /debug/storage/reset`
 
 ## TradingView webhook payload
 Send a single JSON payload that includes the TradingView structure plus normalized market + bias inputs.
@@ -125,6 +127,14 @@ Key settings (defaults depend on MODE):
 - `daily_profit_target_pct`
 - `max_consecutive_losses`
 - `min_signal_score`
+- `TICK_INTERVAL_SECONDS`
+- `SCHEDULER_TICK_INTERVAL_SECONDS`
+- `SMOKE_TEST_FORCE_TRADE`
+- `FORCE_TRADE_MODE`
+- `FORCE_TRADE_EVERY_SECONDS`
+- `FORCE_TRADE_COOLDOWN_SECONDS`
+- `FORCE_TRADE_AUTO_CLOSE_SECONDS`
+- `FORCE_TRADE_RANDOM_DIRECTION`
 
 Risk environment thresholds:
 - `funding_extreme_abs`
@@ -185,6 +195,94 @@ Every webhook and decision is logged as JSONL in `./data/logs/YYYY-MM-DD.jsonl` 
 5. Confirm the decision was stored:
    ```bash
    curl -s "http://localhost:8000/decision/latest?symbol=BTCUSDT" | jq
+   ```
+
+## Smoke test force-trade workflow (paper)
+Use this to validate the full trade pipeline (decision -> paper trade -> storage) end-to-end.
+
+1. Enable smoke-test forced trading and start the service:
+   ```bash
+   export SMOKE_TEST_FORCE_TRADE=true
+   export MODE=paper
+   uvicorn app.main:app --reload
+   ```
+2. Start the scheduler (optional if you already have snapshots):
+   ```bash
+   curl -s http://localhost:8000/engine/start | jq
+   ```
+3. Force a trade decision and execution:
+   ```bash
+   curl -s -X POST http://localhost:8000/debug/force_signal \
+     -H "Content-Type: application/json" \
+     -d '{"symbol":"ETHUSDT","direction":"long","bypass_soft_gates":true}' | jq
+   ```
+4. Confirm the decision is stored:
+   ```bash
+   curl -s "http://localhost:8000/decision/latest?symbol=ETHUSDT" | jq
+   ```
+5. Confirm the paper position and trade record exist:
+   ```bash
+   curl -s http://localhost:8000/positions | jq
+   curl -s http://localhost:8000/trades | jq
+   ```
+
+## Force-trade mode (firehose) workflow
+Use this mode to spam paper trades on a short interval for end-to-end validation. Set
+`FORCE_TRADE_AUTO_CLOSE_SECONDS` to close any open paper trades after that many seconds;
+leave it as `0` to allow multiple concurrent forced trades.
+
+Example `.env`:
+```bash
+MODE=paper
+FORCE_TRADE_MODE=true
+FORCE_TRADE_EVERY_SECONDS=5
+FORCE_TRADE_COOLDOWN_SECONDS=0
+FORCE_TRADE_AUTO_CLOSE_SECONDS=0
+FORCE_TRADE_RANDOM_DIRECTION=true
+```
+
+1. Enable force-trade mode and start the service:
+   ```bash
+   export MODE=paper
+   export FORCE_TRADE_MODE=true
+   export FORCE_TRADE_EVERY_SECONDS=5
+   export FORCE_TRADE_COOLDOWN_SECONDS=0
+   export FORCE_TRADE_AUTO_CLOSE_SECONDS=0
+   export FORCE_TRADE_RANDOM_DIRECTION=true
+   uvicorn app.main:app --reload
+   ```
+2. Start the scheduler:
+   ```bash
+   curl -s http://localhost:8000/engine/start | jq
+   ```
+3. Verify trade count increases within 30 seconds:
+   ```bash
+   curl -s http://localhost:8000/trades | jq
+   sleep 30
+   curl -s http://localhost:8000/trades | jq
+   ```
+   Or run:
+   ```bash
+   ./scripts/force_trade_smoke_test.sh
+   ```
+
+## Deterministic full-cycle smoke test (no market data required)
+Use this endpoint to force a full open → close → PnL cycle in one call.
+
+1. Reset stored state (clears `./data` logs and trade rows):
+   ```bash
+   curl -s -X POST http://localhost:8000/debug/storage/reset | jq
+   ```
+2. Run the full cycle:
+   ```bash
+   curl -s -X POST http://localhost:8000/debug/smoke/run_full_cycle \
+     -H "Content-Type: application/json" \
+     -d '{"symbol":"ETHUSDT","direction":"long","hold_seconds":2,"entry_price":100.0}' | jq
+   ```
+3. Verify trades and stats reflect the closed trade:
+   ```bash
+   curl -s http://localhost:8000/trades | jq
+   curl -s http://localhost:8000/stats | jq
    ```
 
 ## Switching back to PROFIT

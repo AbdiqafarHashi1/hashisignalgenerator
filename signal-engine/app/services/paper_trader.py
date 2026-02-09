@@ -23,8 +23,8 @@ class PaperTrader:
         self._settings = settings
         self._db = database
 
-    def maybe_open_trade(self, symbol: str, plan: TradePlan) -> int | None:
-        if self._db.fetch_open_trades(symbol):
+    def maybe_open_trade(self, symbol: str, plan: TradePlan, allow_multiple: bool = False) -> int | None:
+        if not allow_multiple and self._db.fetch_open_trades(symbol):
             return None
         if plan.entry_zone is None or plan.stop_loss is None or plan.take_profit is None:
             return None
@@ -40,6 +40,21 @@ class PaperTrader:
             side=side,
             opened_at=datetime.now(timezone.utc),
         )
+
+    def force_close_trades(self, symbol: str, price: float, reason: str = "force_close") -> list[PaperTradeResult]:
+        results: list[PaperTradeResult] = []
+        for trade in self._db.fetch_open_trades(symbol):
+            pnl_usd, pnl_r = self._calculate_pnl(trade.side, trade.entry, price, trade.stop, trade.size)
+            self._db.close_trade(
+                trade_id=trade.id,
+                exit_price=price,
+                pnl_usd=pnl_usd,
+                pnl_r=pnl_r,
+                closed_at=datetime.now(timezone.utc),
+                result=reason,
+            )
+            results.append(PaperTradeResult(trade.id, trade.symbol, price, pnl_usd, pnl_r, reason))
+        return results
 
     def evaluate_open_trades(self, symbol: str, price: float) -> list[PaperTradeResult]:
         results: list[PaperTradeResult] = []

@@ -1,6 +1,7 @@
 ﻿from __future__ import annotations
 
 from contextlib import asynccontextmanager
+import asyncio
 from datetime import datetime, timezone
 import logging
 from pathlib import Path
@@ -60,7 +61,14 @@ def _initialize_engine(app: FastAPI) -> None:
     state.set_symbols(settings.symbols)
     database = Database(settings)
     paper_trader = PaperTrader(settings, database)
-    scheduler = DecisionScheduler(settings, state, database, paper_trader, heartbeat_cb=_record_heartbeat)
+    scheduler = DecisionScheduler(
+        settings,
+        state,
+        database,
+        paper_trader,
+        interval_seconds=settings.tick_interval_seconds,
+        heartbeat_cb=_record_heartbeat,
+    )
     running = False
     last_heartbeat_ts = None
     last_action = None
@@ -83,6 +91,18 @@ async def lifespan(app: FastAPI):
             ",".join(settings.symbols),
             settings.MODE,
             settings.engine_mode,
+        )
+        logger.info(
+            "engine_config tick_interval_seconds=%s force_trade_mode=%s smoke_test_force_trade=%s "
+            "force_trade_every_seconds=%s force_trade_cooldown_seconds=%s force_trade_auto_close_seconds=%s "
+            "force_trade_random_direction=%s",
+            settings.tick_interval_seconds,
+            settings.force_trade_mode,
+            settings.smoke_test_force_trade,
+            settings.force_trade_every_seconds,
+            settings.force_trade_cooldown_seconds,
+            settings.force_trade_auto_close_seconds,
+            settings.force_trade_random_direction,
         )
     try:
         yield
@@ -123,6 +143,12 @@ def _require_database() -> Database:
     if database is None:
         raise HTTPException(status_code=503, detail="engine_not_ready")
     return database
+
+
+def _require_paper_trader() -> PaperTrader:
+    if paper_trader is None:
+        raise HTTPException(status_code=503, detail="engine_not_ready")
+    return paper_trader
 
 
 @app.get("/")
@@ -279,6 +305,13 @@ class DebugForceSignalRequest(BaseModel):
     bypass_soft_gates: bool = False
 
 
+class DebugSmokeCycleRequest(BaseModel):
+    symbol: str | None = Field(default=None, min_length=1)
+    direction: Direction | None = None
+    hold_seconds: int = Field(2, ge=0)
+    entry_price: float = Field(100.0, gt=0)
+
+
 @app.get("/decision/latest")
 async def decision_latest(symbol: str = Query(..., min_length=1)) -> dict:
     state_store = _require_state()
@@ -369,7 +402,13 @@ async def debug_force_signal(payload: DebugForceSignalRequest) -> dict:
     settings = _require_settings()
     state_store = _require_state()
     scheduler = _require_scheduler()
-    if not settings.debug_loosen:
+    force_reasons: list[str] = []
+    if settings.smoke_test_force_trade:
+        force_reasons.append("smoke_test_force_trade")
+    if payload.bypass_soft_gates:
+        force_reasons.append("bypass_soft_gates")
+    force_trade = bool(force_reasons)
+    if not settings.debug_loosen and not force_trade:
         raise HTTPException(status_code=400, detail="debug_loosen_required")
     symbols = state_store.get_symbols() or list(settings.symbols)
     symbol = payload.symbol or (symbols[0] if symbols else None)
@@ -388,6 +427,8 @@ async def debug_force_signal(payload: DebugForceSignalRequest) -> dict:
         direction=direction,
         snapshot=snapshot,
         effective_settings=effective_settings,
+        force_trade=force_trade,
+        force_reasons=force_reasons,
     )
     state_store.set_latest_decision(symbol, plan)
     correlation_id = str(uuid4())
@@ -396,7 +437,95 @@ async def debug_force_signal(payload: DebugForceSignalRequest) -> dict:
     if plan.status == Status.TRADE and settings.telegram_enabled:
         message = format_trade_message(symbol, plan)
         await send_telegram_message(message, settings)
-    return {"symbol": symbol, "decision": plan}
+    executed, trade_id = _execute_trade_plan(symbol, plan)
+    return {
+        "correlation_id": correlation_id,
+        "symbol": symbol,
+        "plan": plan,
+        "executed": executed,
+        "trade_id": trade_id,
+    }
+
+
+@app.post("/debug/smoke/run_full_cycle")
+async def debug_smoke_run_full_cycle(payload: DebugSmokeCycleRequest) -> dict:
+    settings = _require_settings()
+    state_store = _require_state()
+    database = _require_database()
+    trader = _require_paper_trader()
+    symbols = state_store.get_symbols() or list(settings.symbols)
+    symbol = payload.symbol or (symbols[0] if symbols else None)
+    if symbol is None:
+        raise HTTPException(status_code=400, detail="no_symbol_available")
+    direction = payload.direction or Direction.long
+    entry = payload.entry_price
+    entry_low = entry * (1 - 0.0002)
+    entry_high = entry * (1 + 0.0002)
+    stop_loss = entry * (0.999 if direction == Direction.long else 1.001)
+    take_profit = entry * (1.001 if direction == Direction.long else 0.999)
+    plan = TradePlan(
+        status=Status.TRADE,
+        direction=direction,
+        entry_zone=(entry_low, entry_high),
+        stop_loss=stop_loss,
+        take_profit=take_profit,
+        risk_pct_used=0.001,
+        position_size_usd=10.0,
+        signal_score=None,
+        posture=Posture.NORMAL,
+        rationale=["debug_smoke_cycle"],
+        raw_input_snapshot={"symbol": symbol, "direction": direction.value},
+    )
+    correlation_id = str(uuid4())
+    _record_correlation_id(correlation_id)
+    log_event(settings, "decision", plan.model_dump(), correlation_id)
+    state_store.set_latest_decision(symbol, plan)
+    before_stats = compute_stats(database.fetch_trades())
+    trade_id = trader.maybe_open_trade(symbol, plan, allow_multiple=True)
+    opened_at = datetime.now(timezone.utc)
+    if trade_id is None:
+        return {
+            "status": "failed",
+            "reason": "trade_not_opened",
+            "symbol": symbol,
+            "correlation_id": correlation_id,
+        }
+    state_store.record_trade(symbol)
+    await asyncio.sleep(payload.hold_seconds)
+    close_price = entry * (1.001 if direction == Direction.long else 0.999)
+    close_results = trader.force_close_trades(symbol, close_price, reason="debug_smoke_cycle")
+    closed_at = datetime.now(timezone.utc)
+    pnl_usd = next((result.pnl_usd for result in close_results if result.trade_id == trade_id), 0.0)
+    win = pnl_usd > 0
+    state_store.record_outcome(symbol, pnl_usd, win, closed_at)
+    after_stats = compute_stats(database.fetch_trades())
+    return {
+        "status": "ok",
+        "symbol": symbol,
+        "correlation_id": correlation_id,
+        "trade_id": trade_id,
+        "open_ts": opened_at.isoformat(),
+        "close_ts": closed_at.isoformat(),
+        "pnl_usd": pnl_usd,
+        "equity_delta": after_stats.total_pnl - before_stats.total_pnl,
+        "assertions": {
+            "opened": trade_id is not None,
+            "closed": any(result.trade_id == trade_id for result in close_results),
+            "pnl_recorded": pnl_usd != 0.0,
+        },
+    }
+
+
+@app.post("/debug/storage/reset")
+async def debug_storage_reset() -> dict:
+    settings = _require_settings()
+    _require_database().reset_all()
+    _require_state().reset()
+    logs_dir = Path(settings.data_dir) / "logs"
+    if logs_dir.exists():
+        for path in logs_dir.glob("*.jsonl"):
+            path.unlink()
+    return {"status": "reset"}
 
 
 def _mask_secret(value: str | None) -> str | None:
@@ -459,8 +588,12 @@ def _build_force_plan(
     direction: Direction,
     snapshot,
     effective_settings,
+    force_trade: bool,
+    force_reasons: list[str],
 ) -> TradePlan:
     now = datetime.now(timezone.utc)
+    if force_trade:
+        return _forced_trade_plan(symbol, direction, snapshot, effective_settings, force_reasons)
     hard_gate_reasons = _hard_risk_gate_reasons(symbol, now)
     if hard_gate_reasons:
         return TradePlan(
@@ -480,7 +613,13 @@ def _build_force_plan(
     plan = decide(request, state, effective_settings)
     if payload.bypass_soft_gates and plan.status in {Status.RISK_OFF, Status.NO_TRADE}:
         if not _contains_hard_gate(plan.rationale):
-            return _forced_trade_plan(symbol, direction, snapshot, plan, effective_settings)
+            return _forced_trade_plan(
+                symbol,
+                direction,
+                snapshot,
+                effective_settings,
+                list(plan.rationale) + ["bypass_soft_gates"],
+            )
     return plan
 
 
@@ -528,29 +667,44 @@ def _forced_trade_plan(
     symbol: str,
     direction: Direction,
     snapshot,
-    prior_plan: TradePlan,
     effective_settings,
+    extra_rationale: list[str] | None = None,
 ) -> TradePlan:
     entry = snapshot.candle.close
-    stop_loss = entry * (0.99 if direction == Direction.long else 1.01)
-    take_profit = entry * (1.01 if direction == Direction.long else 0.99)
+    entry_low = entry * (1 - 0.0002)
+    entry_high = entry * (1 + 0.0002)
+    stop_loss = entry * (0.999 if direction == Direction.long else 1.001)
+    take_profit = entry * (1.001 if direction == Direction.long else 0.999)
     return TradePlan(
         status=Status.TRADE,
         direction=direction,
-        entry_zone=(entry, entry),
+        entry_zone=(entry_low, entry_high),
         stop_loss=stop_loss,
         take_profit=take_profit,
-        risk_pct_used=effective_settings.base_risk_pct,
-        position_size_usd=None,
-        signal_score=prior_plan.signal_score,
-        posture=prior_plan.posture,
-        rationale=list(prior_plan.rationale) + ["debug_force_signal", "bypass_soft_gates"],
+        risk_pct_used=0.001,
+        position_size_usd=10.0,
+        signal_score=None,
+        posture=Posture.NORMAL,
+        rationale=["debug_force_signal", *(extra_rationale or [])],
         raw_input_snapshot={
             "symbol": symbol,
             "direction": direction.value,
             "strategy": effective_settings.strategy,
         },
     )
+
+
+def _execute_trade_plan(symbol: str, plan: TradePlan) -> tuple[bool, int | None]:
+    if plan.status != Status.TRADE:
+        return False, None
+    settings = _require_settings()
+    if settings.engine_mode not in {"paper", "live"} or paper_trader is None:
+        return False, None
+    trade_id = paper_trader.maybe_open_trade(symbol, plan)
+    if trade_id is None:
+        return False, None
+    _require_state().record_trade(symbol)
+    return True, trade_id
 
 
 def _hard_risk_gate_reasons(symbol: str, now: datetime) -> list[str]:

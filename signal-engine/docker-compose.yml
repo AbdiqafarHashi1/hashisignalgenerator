@@ -6,8 +6,21 @@
     env_file:
       - .env
     environment:
+      # Market data
       MARKET_PROVIDER: "binance_public"
       MARKET_DATA_ENABLED: "true"
+
+      # Scheduler tick speed (THIS is the key)
+      TICK_INTERVAL_SECONDS: "5"
+
+      # Force-trade smoke mode (fast full-cycle testing)
+      SMOKE_TEST_FORCE_TRADE: "true"
+      FORCE_TRADE_MODE: "true"
+      FORCE_TRADE_EVERY_SECONDS: "5"
+      FORCE_TRADE_AUTO_CLOSE_SECONDS: "5"
+      FORCE_TRADE_COOLDOWN_SECONDS: "0"
+      FORCE_TRADE_RANDOM_DIRECTION: "true"
+
     volumes:
       - ./data:/app/data
     restart: unless-stopped

@@ -176,6 +176,11 @@ class Database:
         with self._conn:
             self._conn.execute("DELETE FROM trades")
 
+    def reset_all(self) -> None:
+        with self._conn:
+            self._conn.execute("DELETE FROM trades")
+            self._conn.execute("DELETE FROM signals")
+
     def _row_to_trade(self, row: sqlite3.Row) -> TradeRecord:
         return TradeRecord(
             id=row["id"],

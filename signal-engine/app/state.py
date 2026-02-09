@@ -136,6 +136,17 @@ class StateStore:
             else:
                 state.consecutive_losses = 0
 
+    def reset(self) -> None:
+        with self._lock:
+            self._daily.clear()
+            self._posture_cache.clear()
+            self._last_processed_close_time_ms.clear()
+            self._last_notified_key.clear()
+            self._last_trade_key.clear()
+            self._last_decision_ts.clear()
+            self._last_heartbeat_ts = None
+            self._last_telegram_update_id = None
+
     def check_limits(self, symbol: str, cfg: Settings, now: datetime) -> tuple[bool, Status, list[str]]:
         state = self.get_daily_state(symbol)
         rationale: list[str] = []

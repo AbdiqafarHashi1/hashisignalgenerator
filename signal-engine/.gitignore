@@ -21,3 +21,10 @@ venv/
 # runtime / local data
 data/trades.db
 data/*.db
+
+# runtime / local data (engine generated)
+data/
+data/**
+*.jsonl
+*.log
+*.db

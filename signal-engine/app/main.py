@@ -23,6 +23,26 @@ from .storage.store import log_event
 from .strategy.decision import decide
 from .services.scheduler import DecisionScheduler
 
+class AccountSummary(BaseModel):
+    starting_balance_usd: float
+    balance_usd: float
+    equity_usd: float
+    realized_pnl_usd: float
+    unrealized_pnl_usd: float
+    total_pnl_usd: float
+    pnl_pct: float | None
+    open_positions: int
+    trades_today: int
+    wins_today: int
+    losses_today: int
+    win_rate_today: float
+    profit_factor: float
+    expectancy: float
+    max_drawdown_pct: float
+    last_updated_ts: str
+    equity_curve: list[float] = Field(default_factory=list)
+
+
 logger = logging.getLogger(__name__)
 
 settings = None
@@ -365,24 +385,6 @@ class DebugSmokeCycleRequest(BaseModel):
     entry_price: float = Field(100.0, gt=0)
 
 
-class AccountSummary(BaseModel):
-    starting_balance_usd: float
-    balance_usd: float
-    equity_usd: float
-    realized_pnl_usd: float
-    unrealized_pnl_usd: float
-    total_pnl_usd: float
-    pnl_pct: float | None
-    open_positions: int
-    trades_today: int
-    wins_today: int
-    losses_today: int
-    win_rate_today: float
-    profit_factor: float
-    expectancy: float
-    max_drawdown_pct: float
-    last_updated_ts: str
-    equity_curve: list[float] = Field(default_factory=list)
 
 
 @app.get("/decision/latest")

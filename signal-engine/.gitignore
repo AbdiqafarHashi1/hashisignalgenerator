@@ -28,3 +28,7 @@ data/**
 *.jsonl
 *.log
 *.db
+
+# Dashboard
+dashboard/node_modules/
+dashboard/.next/

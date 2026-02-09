@@ -62,6 +62,7 @@ No domain is required for the initial deployment. Add a domain + HTTPS later whe
 - `GET /trades`
 - `GET /positions`
 - `GET /equity`
+- `GET /account/summary`
 - `GET /symbols`
 - `POST /symbols`
 - `GET /paper/reset`
@@ -75,6 +76,23 @@ No domain is required for the initial deployment. Add a domain + HTTPS later whe
 - `POST /debug/force_signal`
 - `POST /debug/smoke/run_full_cycle`
 - `POST /debug/storage/reset`
+
+## Account summary + dashboard KPIs
+The dashboard polls the account summary every ~2 seconds to keep KPIs and the equity curve current.
+
+### `GET /account/summary`
+Returns aggregated account metrics for the dashboard:
+- `starting_balance_usd`: account size from settings.
+- `realized_pnl_usd`: sum of closed trade PnL.
+- `unrealized_pnl_usd`: current unrealized PnL for open positions (0.0 if unavailable).
+- `balance_usd`: starting balance + realized PnL.
+- `equity_usd`: balance + unrealized PnL.
+- `total_pnl_usd`: realized + unrealized PnL.
+- `pnl_pct`: percentage change vs. starting balance (or vs. equity if starting balance is zero).
+- `trades_today`, `wins_today`, `losses_today`, `win_rate_today`: aggregated daily stats from the in-memory state.
+- `profit_factor`, `expectancy`, `max_drawdown_pct`: derived from historical trade stats.
+- `equity_curve`: array of equity values used for the dashboard chart.
+- `last_updated_ts`: server timestamp for the snapshot.
 
 ## TradingView webhook payload
 Send a single JSON payload that includes the TradingView structure plus normalized market + bias inputs.

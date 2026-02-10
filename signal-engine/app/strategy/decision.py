@@ -112,7 +112,7 @@ def _decide_scalper(request: DecisionRequest, state: StateStore, cfg: Settings) 
             rationale=rationale,
             raw_input_snapshot=request.model_dump(),
         )
-    min_candles = max(cfg.ema_length, cfg.adx_period + 1, cfg.atr_period + cfg.atr_sma_period)
+    min_candles = max(cfg.ema_length, cfg.atr_period + cfg.atr_sma_period + 2)
     if len(candles) < min_candles:
         rationale.append("no_candles")
         return TradePlan(
@@ -146,8 +146,15 @@ def _decide_scalper(request: DecisionRequest, state: StateStore, cfg: Settings) 
             raw_input_snapshot=request.model_dump(),
         )
 
-    if not scalper_engine.momentum_ok(candles, cfg):
-        rationale.append("no_momentum")
+    setup_name: str | None = None
+    if scalper_engine.pullback_continuation_trigger(candles, trend_direction, ema, cfg):
+        setup_name = "pullback_continuation"
+        rationale.append("setup_pullback_continuation")
+    elif scalper_engine.breakout_expansion_trigger(candles, trend_direction, cfg):
+        setup_name = "breakout_expansion"
+        rationale.append("setup_breakout_expansion")
+    else:
+        rationale.append("no_valid_setup")
         return TradePlan(
             status=Status.RISK_OFF,
             direction=trend_direction,
@@ -162,10 +169,13 @@ def _decide_scalper(request: DecisionRequest, state: StateStore, cfg: Settings) 
             raw_input_snapshot=request.model_dump(),
         )
 
-    if not scalper_engine.engulfing_trigger(candles, trend_direction, ema, cfg):
-        rationale.append("no_trigger")
+    levels = scalper_engine.build_trade_levels(candles, trend_direction, cfg, setup_name)
+
+    expected_profit_after_costs = scalper_engine.expected_pnl_after_costs(levels, trend_direction, cfg)
+    if expected_profit_after_costs <= 0:
+        rationale.append("cost_model_reject")
         return TradePlan(
-            status=Status.RISK_OFF,
+            status=Status.NO_TRADE,
             direction=trend_direction,
             entry_zone=None,
             stop_loss=None,
@@ -177,8 +187,6 @@ def _decide_scalper(request: DecisionRequest, state: StateStore, cfg: Settings) 
             rationale=rationale,
             raw_input_snapshot=request.model_dump(),
         )
-
-    levels = scalper_engine.build_trade_levels(candles, trend_direction, cfg)
 
     risk_pct = risk_engine.choose_risk_pct(posture_snapshot.posture, 0, cfg)
     risk_result = risk_engine.position_size(levels.entry, levels.stop_loss, risk_pct, cfg)
@@ -200,6 +208,7 @@ def _decide_scalper(request: DecisionRequest, state: StateStore, cfg: Settings) 
             raw_input_snapshot=request.model_dump(),
         )
 
+    rationale.append("maker_first" if setup_name == "pullback_continuation" else "taker_allowed")
     rationale.append("qualified_trade")
     return TradePlan(
         status=Status.TRADE,

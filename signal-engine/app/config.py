@@ -33,8 +33,14 @@ class Settings(BaseSettings):
         False,
         validation_alias=AliasChoices("DEBUG_DISABLE_HARD_RISK_GATES", "debug_disable_hard_risk_gates"),
     )
-    market_provider: str = Field("binance_public", validation_alias=AliasChoices("MARKET_PROVIDER", "market_provider"))
+    market_provider: str = Field("bybit_testnet", validation_alias=AliasChoices("MARKET_PROVIDER", "market_provider"))
     market_data_enabled: bool = Field(True, validation_alias=AliasChoices("MARKET_DATA_ENABLED", "market_data_enabled"))
+
+    bybit_testnet: bool = Field(True, validation_alias=AliasChoices("BYBIT_TESTNET", "bybit_testnet"))
+    bybit_api_key: str = Field("", validation_alias=AliasChoices("BYBIT_API_KEY", "bybit_api_key"))
+    bybit_api_secret: str = Field("", validation_alias=AliasChoices("BYBIT_API_SECRET", "bybit_api_secret"))
+    bybit_rest_base: str = Field("https://api-testnet.bybit.com", validation_alias=AliasChoices("BYBIT_REST_BASE", "bybit_rest_base"))
+    bybit_ws_public_linear: str = Field("wss://stream-testnet.bybit.com/v5/public/linear", validation_alias=AliasChoices("BYBIT_WS_PUBLIC_LINEAR", "bybit_ws_public_linear"))
 
     account_size: float | None = None
     base_risk_pct: float | None = None
@@ -92,6 +98,15 @@ class Settings(BaseSettings):
     volume_confirm_multiplier: float = 1.0
     max_stop_pct: float = 0.0025
     take_profit_pct: float = 0.003
+    fee_rate_bps: float = 5.5
+    spread_bps: float = 1.5
+    slippage_bps: float = 1.5
+    breakout_volume_multiplier: float = 1.5
+    breakout_atr_multiplier: float = 1.2
+    time_stop_minutes: int = 20
+    funding_block_before_minutes: int = 10
+    funding_close_before_minutes: int = 2
+    funding_interval_minutes: int = 480
 
     max_losses_per_day: int = 3
 
@@ -101,6 +116,8 @@ class Settings(BaseSettings):
     telegram_bot_token: str | None = None
     telegram_chat_id: str | None = None
     smoke_test_force_trade: bool = Field(False, validation_alias=AliasChoices("SMOKE_TEST_FORCE_TRADE", "smoke_test_force_trade"))
+    next_public_api_base: str | None = Field(None, validation_alias=AliasChoices("NEXT_PUBLIC_API_BASE", "next_public_api_base"))
+    internal_api_base_url: str | None = Field(None, validation_alias=AliasChoices("INTERNAL_API_BASE_URL", "internal_api_base_url"))
 
     @field_validator("symbols", mode="before")
     @classmethod
@@ -127,18 +144,18 @@ class Settings(BaseSettings):
                 "account_size": 25000,
                 "base_risk_pct": 0.0025,
                 "max_risk_pct": 0.0025,
-                "max_daily_loss_pct": 0.02,
+                "max_daily_loss_pct": 0.015,
                 "daily_profit_target_pct": 0.015,
-                "max_consecutive_losses": 3,
+                "max_consecutive_losses": 2,
             }
         else:
             defaults = {
                 "account_size": 2000,
                 "base_risk_pct": 0.0025,
                 "max_risk_pct": 0.0025,
-                "max_daily_loss_pct": 0.02,
+                "max_daily_loss_pct": 0.015,
                 "daily_profit_target_pct": 0.015,
-                "max_consecutive_losses": 3,
+                "max_consecutive_losses": 2,
             }
         for key, value in defaults.items():
             if getattr(self, key) is None:
@@ -171,18 +188,18 @@ class Settings(BaseSettings):
     def _profile_defaults(self) -> dict[str, object]:
         if self.PROFILE == "diag":
             return {
-                "candle_interval": "1m",
+                "candle_interval": "5m",
                 "min_signal_score": 35,
                 "trend_strength_min": 0.30,
                 "cooldown_minutes_after_loss": 0,
                 "max_trades_per_day": 50,
             }
         return {
-            "candle_interval": "1m",
+            "candle_interval": "5m",
             "min_signal_score": 60,
             "trend_strength_min": 0.45,
-            "cooldown_minutes_after_loss": 10,
-            "max_trades_per_day": 8,
+            "cooldown_minutes_after_loss": 60,
+            "max_trades_per_day": 30,
         }
 
     def blackout_windows(self) -> list[tuple[time, time]]:
@@ -234,6 +251,9 @@ class Settings(BaseSettings):
             "strategy": self.strategy,
             "market_provider": self.market_provider,
             "market_data_enabled": self.market_data_enabled,
+            "bybit_testnet": self.bybit_testnet,
+            "bybit_rest_base": self.bybit_rest_base,
+            "bybit_ws_public_linear": self.bybit_ws_public_linear,
             "smoke_test_force_trade": self.smoke_test_force_trade,
         }
 

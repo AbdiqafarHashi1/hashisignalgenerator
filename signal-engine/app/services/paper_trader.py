@@ -39,6 +39,7 @@ class PaperTrader:
             size=size,
             side=side,
             opened_at=datetime.now(timezone.utc),
+            trade_mode=self._settings.engine_mode if self._settings.engine_mode in {"paper", "live"} else "paper",
         )
 
     def force_close_trades(self, symbol: str, price: float, reason: str = "force_close") -> list[PaperTradeResult]:

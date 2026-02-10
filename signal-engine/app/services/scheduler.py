@@ -19,7 +19,7 @@ from ..models import (
 )
 from ..state import StateStore
 from ..strategy.decision import decide
-from ..providers.binance import BinanceKlineSnapshot, fetch_symbol_klines
+from ..providers.bybit import BybitKlineSnapshot, fetch_symbol_klines
 from .notifier import format_trade_message, send_telegram_message
 
 logger = logging.getLogger(__name__)
@@ -50,7 +50,7 @@ class DecisionScheduler:
                 )
         self._heartbeat_cb = heartbeat_cb
         self._last_tick_time: datetime | None = None
-        self._last_snapshots: dict[str, BinanceKlineSnapshot] = {}
+        self._last_snapshots: dict[str, BybitKlineSnapshot] = {}
         self._last_fetch_counts: dict[str, int] = {}
         self._last_symbol_tick_time: dict[str, datetime] = {}
         self._last_force_trade_ts: dict[str, datetime] = {}
@@ -70,7 +70,7 @@ class DecisionScheduler:
     def last_tick_time(self) -> datetime | None:
         return self._last_tick_time
 
-    def last_snapshot(self, symbol: str) -> BinanceKlineSnapshot | None:
+    def last_snapshot(self, symbol: str) -> BybitKlineSnapshot | None:
         return self._last_snapshots.get(symbol)
 
     def last_fetch_count(self, symbol: str) -> int | None:
@@ -143,11 +143,15 @@ class DecisionScheduler:
                 symbol=symbol,
                 interval=self._settings.candle_interval,
                 limit=self._settings.candle_history_limit,
+                rest_base=self._settings.bybit_rest_base,
             )
             self._last_snapshots[symbol] = snapshot
             self._last_fetch_counts[symbol] = len(snapshot.candles)
             if self._settings.force_trade_mode or self._settings.smoke_test_force_trade:
                 self._auto_close_forced_trades(symbol, snapshot, tick_ts)
+            if self._paper_trader is not None:
+                self._paper_trader.evaluate_open_trades(symbol, snapshot.candle.close)
+                self._close_time_stop_trades(symbol, snapshot.candle.close, tick_ts)
             logger.info(
                 "candle_fetch symbol=%s candles=%s latest=%s closed=%s",
                 snapshot.symbol,
@@ -155,6 +159,10 @@ class DecisionScheduler:
                 snapshot.candle.close_time.isoformat(),
                 snapshot.kline_is_closed,
             )
+
+            funding_state = _funding_blackout_state(tick_ts, self._settings)
+            if funding_state["close_positions"] and self._paper_trader is not None:
+                self._paper_trader.force_close_trades(symbol, snapshot.candle.close, reason="funding_blackout_close")
 
             plan: TradePlan | None = None
             reason: str | None = None
@@ -164,7 +172,9 @@ class DecisionScheduler:
             telegram_sent = False
             trade_opened = False
             trade_id: str | None = None
-            if not force_mode and not snapshot.kline_is_closed:
+            if funding_state["block_new_entries"]:
+                reason = "funding_blackout_active"
+            elif not force_mode and not snapshot.kline_is_closed:
                 reason = "candle_open"
             else:
                 last_processed = self._state.get_last_processed_close_time_ms(snapshot.symbol)
@@ -235,7 +245,8 @@ class DecisionScheduler:
                                 )
                             if self._settings.engine_mode in {"paper", "live"} and self._paper_trader is not None:
                                 allow_multiple = (
-                                    force_mode and self._settings.force_trade_auto_close_seconds == 0
+                                    (self._settings.force_trade_mode or self._settings.smoke_test_force_trade)
+                                    and self._settings.force_trade_auto_close_seconds == 0
                                 )
                                 trade_id = self._paper_trader.maybe_open_trade(
                                     snapshot.symbol,
@@ -314,7 +325,7 @@ class DecisionScheduler:
     def _auto_close_forced_trades(
         self,
         symbol: str,
-        snapshot: BinanceKlineSnapshot,
+        snapshot: BybitKlineSnapshot,
         now: datetime,
     ) -> None:
         if self._settings.force_trade_auto_close_seconds <= 0:
@@ -336,6 +347,18 @@ class DecisionScheduler:
                 )
                 break
 
+    def _close_time_stop_trades(self, symbol: str, price: float, now: datetime) -> None:
+        if self._database is None or self._paper_trader is None:
+            return
+        if self._settings.time_stop_minutes <= 0:
+            return
+        for trade in self._database.fetch_open_trades(symbol):
+            opened_at = datetime.fromisoformat(trade.opened_at)
+            elapsed_minutes = (now - opened_at).total_seconds() / 60.0
+            if elapsed_minutes >= self._settings.time_stop_minutes:
+                self._paper_trader.force_close_trades(symbol, price, reason="time_stop")
+                break
+
     async def _run_loop(self) -> None:
         while not self._stop_event.is_set():
             await self.run_once()
@@ -345,7 +368,7 @@ class DecisionScheduler:
                 continue
 
 
-def _build_forced_trade_plan(snapshot: BinanceKlineSnapshot, settings: Settings) -> TradePlan:
+def _build_forced_trade_plan(snapshot: BybitKlineSnapshot, settings: Settings) -> TradePlan:
     entry = snapshot.candle.close
     entry_low = entry * (1 - 0.0002)
     entry_high = entry * (1 + 0.0002)
@@ -371,13 +394,13 @@ def _build_forced_trade_plan(snapshot: BinanceKlineSnapshot, settings: Settings)
     )
 
 
-def _pick_direction(settings: Settings, snapshot: BinanceKlineSnapshot) -> Direction:
+def _pick_direction(settings: Settings, snapshot: BybitKlineSnapshot) -> Direction:
     if settings.force_trade_random_direction:
         return random.choice([Direction.long, Direction.short])
     return Direction.long if snapshot.candle.close >= snapshot.candle.open else Direction.short
 
 
-def _trend_strength(candle: BinanceKlineSnapshot) -> float:
+def _trend_strength(candle: BybitKlineSnapshot) -> float:
     price_move = abs(candle.candle.close - candle.candle.open)
     if candle.candle.open == 0:
         return 0.0
@@ -385,7 +408,7 @@ def _trend_strength(candle: BinanceKlineSnapshot) -> float:
     return min(1.0, strength)
 
 
-def _build_decision_request(snapshot: BinanceKlineSnapshot) -> DecisionRequest:
+def _build_decision_request(snapshot: BybitKlineSnapshot) -> DecisionRequest:
     candle = snapshot.candle
     direction = Direction.long if candle.close >= candle.open else Direction.short
     entry_low = min(candle.open, candle.close)
@@ -406,6 +429,7 @@ def _build_decision_request(snapshot: BinanceKlineSnapshot) -> DecisionRequest:
         "sl_hint": sl_hint,
         "setup_type": SetupType.break_retest,
         "tf_entry": snapshot.interval,
+        "tf_bias": "1h",
     }
     return DecisionRequest(
         tradingview=tradingview_payload,
@@ -426,11 +450,22 @@ def _build_decision_request(snapshot: BinanceKlineSnapshot) -> DecisionRequest:
     )
 
 
-def _trade_key(snapshot: BinanceKlineSnapshot, plan: TradePlan) -> str:
+def _trade_key(snapshot: BybitKlineSnapshot, plan: TradePlan) -> str:
     return (
         f"{snapshot.symbol}:{snapshot.kline_close_time_ms}:"
         f"{plan.direction.value}"
     )
+
+
+def _funding_blackout_state(now: datetime, settings: Settings) -> dict[str, bool]:
+    minutes = int(now.timestamp() // 60)
+    interval = max(1, settings.funding_interval_minutes)
+    minute_in_window = minutes % interval
+    block_start = max(0, interval - settings.funding_block_before_minutes)
+    close_start = max(0, interval - settings.funding_close_before_minutes)
+    block_new_entries = minute_in_window >= block_start or minute_in_window <= 1
+    close_positions = minute_in_window >= close_start
+    return {"block_new_entries": block_new_entries, "close_positions": close_positions}
 
 
 def _force_trade_key(symbol: str, plan: TradePlan, now: datetime) -> str:

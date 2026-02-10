@@ -24,6 +24,7 @@ class TradeRecord:
     opened_at: str
     closed_at: str | None
     result: str | None
+    trade_mode: str
 
 
 class Database:
@@ -66,10 +67,16 @@ class Database:
                     side TEXT NOT NULL,
                     opened_at TEXT NOT NULL,
                     closed_at TEXT,
-                    result TEXT
+                    result TEXT,
+                    trade_mode TEXT NOT NULL DEFAULT "paper"
                 )
                 """
             )
+
+        with self._conn:
+            cols = {row[1] for row in self._conn.execute("PRAGMA table_info(trades)").fetchall()}
+            if "trade_mode" not in cols:
+                self._conn.execute('ALTER TABLE trades ADD COLUMN trade_mode TEXT NOT NULL DEFAULT "paper"')
 
     def add_signal(
         self,
@@ -109,12 +116,13 @@ class Database:
         size: float,
         side: str,
         opened_at: datetime,
+        trade_mode: str = "paper",
     ) -> int:
         with self._conn:
             cursor = self._conn.execute(
                 """
-                INSERT INTO trades (symbol, entry, stop, take_profit, size, side, opened_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO trades (symbol, entry, stop, take_profit, size, side, opened_at, trade_mode)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     symbol,
@@ -124,6 +132,7 @@ class Database:
                     size,
                     side,
                     opened_at.isoformat(),
+                    trade_mode,
                 ),
             )
         return int(cursor.lastrowid)
@@ -196,4 +205,5 @@ class Database:
             opened_at=row["opened_at"],
             closed_at=row["closed_at"],
             result=row["result"],
+            trade_mode=row["trade_mode"] if "trade_mode" in row.keys() else "paper",
         )

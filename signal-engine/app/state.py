@@ -147,6 +147,28 @@ class StateStore:
             self._last_heartbeat_ts = None
             self._last_telegram_update_id = None
 
+    def risk_snapshot(self, symbol: str, cfg: Settings, now: datetime) -> dict[str, object]:
+        state = self.get_daily_state(symbol)
+        account_loss_limit = cfg.account_size * cfg.max_daily_loss_pct
+        cooldown_active = False
+        cooldown_remaining_minutes = 0
+        if state.last_loss_ts is not None:
+            minutes_since = (now - state.last_loss_ts).total_seconds() / 60.0
+            if minutes_since < cfg.cooldown_minutes_after_loss:
+                cooldown_active = True
+                cooldown_remaining_minutes = int(cfg.cooldown_minutes_after_loss - minutes_since)
+        daily_loss_remaining = max(0.0, account_loss_limit + state.pnl_usd)
+        return {
+            "trades_today": state.trades,
+            "trades_remaining": max(0, cfg.max_trades_per_day - state.trades),
+            "consecutive_losses": state.consecutive_losses,
+            "cooldown_active": cooldown_active,
+            "cooldown_remaining_minutes": cooldown_remaining_minutes,
+            "daily_loss_remaining_usd": daily_loss_remaining,
+            "daily_loss_limit_usd": account_loss_limit,
+            "daily_loss_cap_hit": state.pnl_usd <= -account_loss_limit,
+        }
+
     def check_limits(self, symbol: str, cfg: Settings, now: datetime) -> tuple[bool, Status, list[str]]:
         state = self.get_daily_state(symbol)
         rationale: list[str] = []

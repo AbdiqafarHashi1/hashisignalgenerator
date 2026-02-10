@@ -37,7 +37,11 @@ def _pnl_value(trade: TradeRecord) -> float:
 
 def compute_stats(trades: list[TradeRecord], *, debug: bool = False) -> StatsSummary:
     # Closed trades only
-    closed = [t for t in trades if getattr(t, "closed_at", None)]
+    closed = [
+        t
+        for t in trades
+        if getattr(t, "closed_at", None) and getattr(t, "trade_mode", "paper") != "test"
+    ]
 
     pnls = [_pnl_value(t) for t in closed]
     total_trades = len(closed)

@@ -7,8 +7,13 @@
       - .env
     environment:
       # Market data
-      MARKET_PROVIDER: "binance_public"
+      MARKET_PROVIDER: "bybit_testnet"
       MARKET_DATA_ENABLED: "true"
+      BYBIT_API_SECRET: ""
+      BYBIT_API_KEY: ""
+      BYBIT_WS_PUBLIC_LINEAR: "wss://stream-testnet.bybit.com/v5/public/linear"
+      BYBIT_REST_BASE: "https://api-testnet.bybit.com"
+      BYBIT_TESTNET: "true"
 
       # Scheduler tick speed (THIS is the key)
       TICK_INTERVAL_SECONDS: "5"

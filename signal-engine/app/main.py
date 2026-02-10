@@ -66,6 +66,11 @@ class AccountSummary(BaseModel):
     profit_factor: float
     expectancy: float
     max_drawdown_pct: float
+    realized_pnl_today_usd: float
+    daily_pct: float
+    last_trade_ts: str | None
+    engine_status: str
+    pnl_curve: list[float] = Field(default_factory=list)
     last_updated_ts: str
     equity_curve: list[float] = Field(default_factory=list)
 
@@ -309,6 +314,8 @@ async def account_summary() -> AccountSummary:
     losses_today = 0
 
     all_trades = database.fetch_trades()
+    last_trade_ts: str | None = None
+    realized_pnl_today = 0.0
 
     for t in all_trades:
         closed_at_dt = _as_datetime_utc(getattr(t, "closed_at", None))
@@ -317,17 +324,27 @@ async def account_summary() -> AccountSummary:
         if closed_at_dt < start_of_day:
             continue
 
+        if getattr(t, "trade_mode", "paper") == "test":
+            continue
         # 🚫 ignore forced / debug closes
         result = (getattr(t, "result", None) or "").lower()
         if "force" in result or "debug" in result:
-            continue        
+            continue
         pnl = float(getattr(t, "pnl_usd", None) or 0.0)
+        realized_pnl_today += pnl
 
         trades_today += 1
         if pnl > 0:
             wins_today += 1
         elif pnl < 0:
             losses_today += 1
+
+    for t in all_trades:
+        closed_at_dt = _as_datetime_utc(getattr(t, "closed_at", None))
+        if closed_at_dt is None or getattr(t, "trade_mode", "paper") == "test":
+            continue
+        last_trade_ts = closed_at_dt.isoformat()
+        break
 
     win_rate_today = (wins_today / trades_today) if trades_today else 0.0
     max_drawdown_pct = (summary.max_drawdown / starting_balance) * 100 if starting_balance else 0.0
@@ -349,11 +366,32 @@ async def account_summary() -> AccountSummary:
         profit_factor=summary.profit_factor,
         expectancy=summary.expectancy,
         max_drawdown_pct=max_drawdown_pct,
+        realized_pnl_today_usd=realized_pnl_today,
+        daily_pct=((realized_pnl_today / starting_balance) * 100) if starting_balance else 0.0,
+        last_trade_ts=last_trade_ts,
+        engine_status="RUNNING" if _require_scheduler().running else "STOPPED",
+        pnl_curve=summary.equity_curve,
         last_updated_ts=datetime.now(timezone.utc).isoformat(),
         equity_curve=equity_curve,
     )
 
 
+
+
+@app.get("/risk/summary")
+async def risk_summary(symbol: str = Query(None)) -> dict[str, Any]:
+    settings = _require_settings()
+    state_store = _require_state()
+    now = datetime.now(timezone.utc)
+    use_symbol = symbol or (settings.symbols[0] if settings.symbols else "BTCUSDT")
+    snapshot = state_store.risk_snapshot(use_symbol, settings, now)
+    minutes = int(now.timestamp() // 60)
+    interval = max(1, settings.funding_interval_minutes)
+    minute_in_window = minutes % interval
+    block_start = max(0, interval - settings.funding_block_before_minutes)
+    snapshot["funding_blackout_active"] = minute_in_window >= block_start or minute_in_window <= 1
+    snapshot["symbol"] = use_symbol
+    return snapshot
 @app.get("/positions")
 async def positions() -> dict:
     return {"positions": [trade.__dict__ for trade in _require_database().fetch_open_trades()]}

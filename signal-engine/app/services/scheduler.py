@@ -192,6 +192,14 @@ class DecisionScheduler:
                     snapshot.candle.close_time.isoformat(),
                     snapshot.kline_is_closed,
                 )
+                logger.info(
+                    "candle_selected symbol=%s start=%s end=%s now=%s closed=%s",
+                    snapshot.symbol,
+                    datetime.fromtimestamp(snapshot.kline_open_time_ms / 1000, tz=timezone.utc).isoformat(),
+                    datetime.fromtimestamp(snapshot.kline_close_time_ms / 1000, tz=timezone.utc).isoformat(),
+                    tick_ts.isoformat(),
+                    snapshot.kline_is_closed,
+                )
             except Exception as exc:
                 logger.exception("scheduler_symbol_error symbol=%s error=%s", symbol, exc)
                 results.append(

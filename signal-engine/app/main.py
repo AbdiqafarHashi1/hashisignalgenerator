@@ -3,6 +3,7 @@ from datetime import datetime, timezone
 from typing import Any, Optional
 from contextlib import asynccontextmanager
 import asyncio
+import time
 from datetime import datetime, timezone
 import logging
 from pathlib import Path
@@ -437,12 +438,18 @@ async def engine_status() -> dict[str, Any]:
     global running
     scheduler = _require_scheduler()
     running = scheduler.running
+    uptime_seconds = 0
+    if running and scheduler.started_ts is not None:
+        uptime_seconds = max(0, int(time.time() - scheduler.started_ts))
     return {
+        "running": running,
         "status": "RUNNING" if running else "STOPPED",
         "mode": _require_settings().MODE,
         "last_heartbeat_ts": last_heartbeat_ts.isoformat() if last_heartbeat_ts else None,
         "last_action": last_action,
         "last_tick_time": scheduler.last_tick_time().isoformat() if scheduler.last_tick_time() else None,
+        "last_tick_ts": scheduler.last_tick_ts,
+        "uptime_seconds": uptime_seconds,
         "sweet8_enabled": _require_settings().sweet8_enabled,
         "sweet8_current_mode": _require_state().get_last_notified_key("__sweet8_current_mode__") or _require_settings().sweet8_current_mode,
     }

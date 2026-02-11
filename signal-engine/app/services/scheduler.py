@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import random
+import time
 from collections.abc import Callable
 from datetime import datetime, timezone
 
@@ -50,6 +51,8 @@ class DecisionScheduler:
                 )
         self._heartbeat_cb = heartbeat_cb
         self._last_tick_time: datetime | None = None
+        self.last_tick_ts: float | None = None
+        self.started_ts: float | None = None
         self._last_snapshots: dict[str, BybitKlineSnapshot] = {}
         self._last_fetch_counts: dict[str, int] = {}
         self._last_symbol_tick_time: dict[str, datetime] = {}
@@ -85,6 +88,7 @@ class DecisionScheduler:
                 logger.info("scheduler_start skipped=already_running")
                 return False
             self._stop_event = asyncio.Event()
+            self.started_ts = time.time()
             self._task = asyncio.create_task(self._run_loop())
             logger.info("scheduler_start status=started interval=%s", self._interval)
             return True
@@ -102,6 +106,7 @@ class DecisionScheduler:
         return True
 
     async def run_once(self, force: bool = False) -> list[dict[str, object]]:
+        self.last_tick_ts = time.time()
         if self._heartbeat_cb is not None:
             self._heartbeat_cb()
         symbols = list(self._settings.symbols)
@@ -176,10 +181,10 @@ class DecisionScheduler:
             telegram_sent = False
             trade_opened = False
             trade_id: str | None = None
-            if funding_state["block_new_entries"]:
-                reason = "funding_blackout_active"
-            elif not force_mode and not snapshot.kline_is_closed:
+            if not snapshot.kline_is_closed:
                 reason = "candle_open"
+            elif funding_state["block_new_entries"]:
+                reason = "funding_blackout_active"
             else:
                 last_processed = self._state.get_last_processed_close_time_ms(snapshot.symbol)
                 if (

@@ -60,18 +60,16 @@ export default function LiveDashboard() {
 
   const load = useCallback(async () => {
     try {
-      const [summaryPayload, riskPayload, positionsPayload, tradesPayload, statusPayload] = await Promise.all([
+      const [summaryPayload, riskPayload, positionsPayload, tradesPayload] = await Promise.all([
         apiFetch<AccountSummary>("/account/summary"),
         apiFetch<RiskSummary>("/risk/summary"),
         apiFetch<PositionsResponse>("/positions"),
         apiFetch<TradesResponse>("/trades"),
-        fetchEngineStatus(),
       ]);
       setSummary(summaryPayload);
       setRisk(riskPayload);
       setPositions(positionsPayload.positions || []);
       setTrades((tradesPayload.trades || []).slice(0, 50));
-      setEngineStatus(statusPayload);
       setError("");
     } catch (err) {
       setError(formatApiError("Dashboard", err as ApiError));
@@ -84,6 +82,22 @@ export default function LiveDashboard() {
     return () => clearInterval(timer);
   }, [load]);
 
+
+  useEffect(() => {
+    const fetchStatus = async () => {
+      try {
+        const statusPayload = await fetchEngineStatus();
+        setEngineStatus(statusPayload);
+      } catch (err) {
+        setError(formatApiError("Engine status", err as ApiError));
+      }
+    };
+
+    fetchStatus();
+    const id = setInterval(fetchStatus, 5000);
+    return () => clearInterval(id);
+  }, [formatApiError]);
+
   const handleAction = async (path: string) => {
     try {
       await apiFetch(path);
@@ -94,12 +108,19 @@ export default function LiveDashboard() {
   };
 
   const statusBadge = useMemo(() => {
-    const status = summary?.engine_status || engineStatus?.status || "STOPPED";
-    const classes = status === "RUNNING" ? "bg-emerald-600" : "bg-red-600";
+    const isRunning = Boolean(engineStatus?.running);
+    const status = isRunning ? "RUNNING" : "STOPPED";
+    const classes = isRunning ? "bg-emerald-600" : "bg-red-600";
     return <span className={`rounded-full px-3 py-1 text-xs font-semibold ${classes}`}>{status}</span>;
-  }, [summary?.engine_status, engineStatus?.status]);
+  }, [engineStatus?.running]);
 
   const fmt = (v: number | undefined | null) => (v === undefined || v === null ? "--" : v.toFixed(2));
+
+  const lastTickAgeSeconds =
+    typeof engineStatus?.last_tick_ts === "number"
+      ? Math.max(0, Math.floor(Date.now() / 1000 - engineStatus.last_tick_ts))
+      : null;
+  const engineStale = lastTickAgeSeconds !== null && lastTickAgeSeconds > 30;
 
   return (
     <div className="min-h-screen bg-slate-950 px-5 py-6 text-slate-100">
@@ -109,6 +130,8 @@ export default function LiveDashboard() {
             <div>
               <h1 className="text-2xl font-semibold">Professional Trading Dashboard</h1>
               <p className="text-xs text-slate-400">API: {API_BASE}</p>
+              <p className="text-xs text-slate-400">Last tick: {lastTickAgeSeconds === null ? "--" : `${lastTickAgeSeconds} seconds ago`}</p>
+              {engineStale ? <p className="text-xs font-semibold text-amber-400">Engine stale</p> : null}
             </div>
             {statusBadge}
           </div>

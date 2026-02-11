@@ -25,6 +25,7 @@ export type ApiError = {
 };
 
 export type EngineStatus = {
+  running?: boolean;
   status: string;
   mode?: string | null;
   symbols?: string[];
@@ -37,6 +38,8 @@ export type EngineStatus = {
       }
     | string
     | null;
+  last_tick_ts?: number | null;
+  uptime_seconds?: number;
 };
 
 export async function apiFetch<T>(

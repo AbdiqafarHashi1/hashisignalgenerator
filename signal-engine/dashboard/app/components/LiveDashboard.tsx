@@ -34,6 +34,12 @@ type RiskSummary = {
   consecutive_losses: number;
   cooldown_active: boolean;
   funding_blackout_active: boolean;
+  sweet8_enabled?: boolean;
+  sweet8_current_mode?: string;
+  open_positions?: number;
+  blocked_premature_exits?: number;
+  daily_loss_pct?: number;
+  risk_per_trade_pct?: number;
 };
 
 type PositionsResponse = { positions: Array<Record<string, unknown>> };
@@ -136,6 +142,12 @@ export default function LiveDashboard() {
           <Kpi label="Consecutive Losses" value={String(risk?.consecutive_losses ?? "--")} />
           <Kpi label="Cooldown Active" value={risk?.cooldown_active ? "YES" : "NO"} />
           <Kpi label="Funding Blackout" value={risk?.funding_blackout_active ? "YES" : "NO"} />
+          <Kpi label="Sweet8 Enabled" value={risk?.sweet8_enabled ? "YES" : "NO"} />
+          <Kpi label="Current Mode" value={risk?.sweet8_current_mode?.toUpperCase() ?? ((engineStatus as any)?.sweet8_current_mode?.toUpperCase?.() || "--")} />
+          <Kpi label="Open Positions" value={String(risk?.open_positions ?? positions.length)} />
+          <Kpi label="Blocked Premature Exits" value={String(risk?.blocked_premature_exits ?? "--")} />
+          <Kpi label="Daily Loss %" value={`${fmt((risk?.daily_loss_pct ?? 0) * 100)}%`} />
+          <Kpi label="Risk per Trade" value={`${fmt((risk?.risk_per_trade_pct ?? 0) * 100)}%`} />
         </section>
 
         <section className="rounded-xl border border-binance-border bg-binance-card p-4">

@@ -391,6 +391,12 @@ async def risk_summary(symbol: str = Query(None)) -> dict[str, Any]:
     block_start = max(0, interval - settings.funding_block_before_minutes)
     snapshot["funding_blackout_active"] = minute_in_window >= block_start or minute_in_window <= 1
     snapshot["symbol"] = use_symbol
+    snapshot["sweet8_enabled"] = settings.sweet8_enabled
+    snapshot["sweet8_current_mode"] = state_store.get_last_notified_key("__sweet8_current_mode__") or settings.sweet8_current_mode
+    snapshot["open_positions"] = len(_require_database().fetch_open_trades())
+    snapshot["blocked_premature_exits"] = settings.sweet8_blocked_close_total
+    snapshot["daily_loss_pct"] = float(settings.max_daily_loss_pct or 0.0)
+    snapshot["risk_per_trade_pct"] = float(settings.base_risk_pct or 0.0)
     return snapshot
 @app.get("/positions")
 async def positions() -> dict:
@@ -437,6 +443,8 @@ async def engine_status() -> dict[str, Any]:
         "last_heartbeat_ts": last_heartbeat_ts.isoformat() if last_heartbeat_ts else None,
         "last_action": last_action,
         "last_tick_time": scheduler.last_tick_time().isoformat() if scheduler.last_tick_time() else None,
+        "sweet8_enabled": _require_settings().sweet8_enabled,
+        "sweet8_current_mode": _require_state().get_last_notified_key("__sweet8_current_mode__") or _require_settings().sweet8_current_mode,
     }
 
 @app.post("/webhook/tradingview")

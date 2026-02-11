@@ -85,6 +85,70 @@ class Settings(BaseSettings):
         True,
         validation_alias=AliasChoices("FORCE_TRADE_RANDOM_DIRECTION", "force_trade_random_direction"),
     )
+    sweet8_enabled: bool = Field(False, validation_alias=AliasChoices("SWEET8_ENABLED", "sweet8_enabled"))
+    sweet8_mode: Literal["auto", "scalper", "swing"] = Field(
+        "auto",
+        validation_alias=AliasChoices("SWEET8_MODE", "sweet8_mode"),
+    )
+    sweet8_base_risk_pct: float = Field(0.0025, validation_alias=AliasChoices("SWEET8_BASE_RISK_PCT", "sweet8_base_risk_pct"))
+    sweet8_max_risk_pct: float = Field(0.005, validation_alias=AliasChoices("SWEET8_MAX_RISK_PCT", "sweet8_max_risk_pct"))
+    sweet8_max_daily_loss_pct: float = Field(
+        0.015,
+        validation_alias=AliasChoices("SWEET8_MAX_DAILY_LOSS_PCT", "sweet8_max_daily_loss_pct"),
+    )
+    sweet8_disable_premature_exits: bool = Field(
+        True,
+        validation_alias=AliasChoices("SWEET8_DISABLE_PREMATURE_EXITS", "sweet8_disable_premature_exits"),
+    )
+    sweet8_disable_time_stop: bool = Field(True, validation_alias=AliasChoices("SWEET8_DISABLE_TIME_STOP", "sweet8_disable_time_stop"))
+    sweet8_disable_force_auto_close: bool = Field(
+        True,
+        validation_alias=AliasChoices("SWEET8_DISABLE_FORCE_AUTO_CLOSE", "sweet8_disable_force_auto_close"),
+    )
+    sweet8_max_open_positions_total: int = Field(
+        1,
+        validation_alias=AliasChoices("SWEET8_MAX_OPEN_POSITIONS_TOTAL", "sweet8_max_open_positions_total"),
+    )
+    sweet8_max_open_positions_per_symbol: int = Field(
+        1,
+        validation_alias=AliasChoices("SWEET8_MAX_OPEN_POSITIONS_PER_SYMBOL", "sweet8_max_open_positions_per_symbol"),
+    )
+    sweet8_scalp_atr_sl_mult: float = Field(
+        1.0,
+        validation_alias=AliasChoices("SWEET8_SCALP_ATR_SL_MULT", "sweet8_scalp_atr_sl_mult"),
+    )
+    sweet8_scalp_atr_tp_mult: float = Field(
+        1.4,
+        validation_alias=AliasChoices("SWEET8_SCALP_ATR_TP_MULT", "sweet8_scalp_atr_tp_mult"),
+    )
+    sweet8_scalp_min_score: int = Field(
+        75,
+        validation_alias=AliasChoices("SWEET8_SCALP_MIN_SCORE", "sweet8_scalp_min_score"),
+    )
+    sweet8_swing_atr_sl_mult: float = Field(
+        1.5,
+        validation_alias=AliasChoices("SWEET8_SWING_ATR_SL_MULT", "sweet8_swing_atr_sl_mult"),
+    )
+    sweet8_swing_atr_tp_mult: float = Field(
+        2.5,
+        validation_alias=AliasChoices("SWEET8_SWING_ATR_TP_MULT", "sweet8_swing_atr_tp_mult"),
+    )
+    sweet8_swing_min_score: int = Field(
+        85,
+        validation_alias=AliasChoices("SWEET8_SWING_MIN_SCORE", "sweet8_swing_min_score"),
+    )
+    sweet8_regime_adx_threshold: int = Field(
+        25,
+        validation_alias=AliasChoices("SWEET8_REGIME_ADX_THRESHOLD", "sweet8_regime_adx_threshold"),
+    )
+    sweet8_regime_vol_threshold: float = Field(
+        1.2,
+        validation_alias=AliasChoices("SWEET8_REGIME_VOL_THRESHOLD", "sweet8_regime_vol_threshold"),
+    )
+    sweet8_blocked_close_total: int = 0
+    sweet8_blocked_close_time_stop: int = 0
+    sweet8_blocked_close_force: int = 0
+    sweet8_current_mode: Literal["auto", "scalper", "swing"] = "auto"
     ema_length: int = 50
     momentum_mode: Literal["adx", "atr"] = "adx"
     adx_period: int = 14
@@ -164,6 +228,12 @@ class Settings(BaseSettings):
         for key, value in profile_defaults.items():
             if getattr(self, key) is None:
                 setattr(self, key, value)
+        if self.sweet8_enabled:
+            self.debug_loosen = False
+            self.debug_disable_hard_risk_gates = False
+            self.base_risk_pct = self.sweet8_base_risk_pct
+            self.max_risk_pct = self.sweet8_max_risk_pct
+            self.max_daily_loss_pct = self.sweet8_max_daily_loss_pct
         if self.debug_loosen:
             changes: list[str] = []
             if self.min_signal_score is not None:
@@ -255,6 +325,12 @@ class Settings(BaseSettings):
             "bybit_rest_base": self.bybit_rest_base,
             "bybit_ws_public_linear": self.bybit_ws_public_linear,
             "smoke_test_force_trade": self.smoke_test_force_trade,
+            "sweet8_enabled": self.sweet8_enabled,
+            "sweet8_mode": self.sweet8_mode,
+            "sweet8_current_mode": self.sweet8_current_mode,
+            "sweet8_blocked_close_total": self.sweet8_blocked_close_total,
+            "sweet8_blocked_close_time_stop": self.sweet8_blocked_close_time_stop,
+            "sweet8_blocked_close_force": self.sweet8_blocked_close_force,
         }
 
 

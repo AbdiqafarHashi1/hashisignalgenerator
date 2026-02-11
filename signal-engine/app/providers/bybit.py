@@ -105,21 +105,23 @@ class BybitClient:
         rows = data.get("result", {}).get("list", [])
         if not rows:
             raise ValueError("No kline data returned from Bybit")
-        # Bybit returns reverse chronological order.
-        rows = list(reversed(rows))
-        candles = [_parse_kline(raw, interval) for raw in rows]
-        candle = candles[-1]
-        open_time_ms = int(rows[-1][0])
-        close_time_ms = open_time_ms + _interval_to_ms(interval)
         now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+        rows = _sort_rows_oldest_first(rows)
+        selected_row, selected_closed = _select_latest_closed_row(rows, interval, now_ms)
+        selected_open_time_ms = _kline_start_time_ms(selected_row)
+        selected_close_time_ms = selected_open_time_ms + _interval_to_ms(interval)
+        candles = [_parse_kline(raw, interval) for raw in rows if _is_row_closed(raw, interval, now_ms)]
+        if not candles:
+            candles = [_parse_kline(selected_row, interval)]
+        candle = _parse_kline(selected_row, interval)
         return BybitKlineSnapshot(
             symbol=symbol,
             interval=interval,
             price=candle.close,
             volume=candle.volume,
-            kline_open_time_ms=open_time_ms,
-            kline_close_time_ms=close_time_ms,
-            kline_is_closed=now_ms >= close_time_ms,
+            kline_open_time_ms=selected_open_time_ms,
+            kline_close_time_ms=selected_close_time_ms,
+            kline_is_closed=selected_closed,
             candle=candle,
             candles=candles,
         )
@@ -207,8 +209,8 @@ class BybitClient:
         )
 
 
-def _parse_kline(raw: list[str], interval: str) -> BybitCandle:
-    open_time_ms = int(raw[0])
+def _parse_kline(raw: Any, interval: str) -> BybitCandle:
+    open_time_ms = _kline_start_time_ms(raw)
     close_time_ms = open_time_ms + _interval_to_ms(interval)
     return BybitCandle(
         open_time=datetime.fromtimestamp(open_time_ms / 1000, tz=timezone.utc),
@@ -239,6 +241,51 @@ def _interval_to_ms(interval: str) -> int:
         "1d": 86_400_000,
     }
     return mapping.get(interval.lower(), 300_000)
+
+
+def _sort_rows_oldest_first(rows: list[Any]) -> list[Any]:
+    return sorted(rows, key=_kline_start_time_ms)
+
+
+def _select_latest_closed_row(rows: list[Any], interval: str, now_ms: int) -> tuple[Any, bool]:
+    for row in reversed(rows):
+        if _is_row_closed(row, interval, now_ms):
+            return row, True
+    return rows[-1], False
+
+
+def _is_row_closed(raw: Any, interval: str, now_ms: int) -> bool:
+    confirm = _kline_confirm(raw)
+    if confirm is not None:
+        return confirm
+    close_time_ms = _kline_start_time_ms(raw) + _interval_to_ms(interval)
+    return now_ms >= close_time_ms
+
+
+def _kline_start_time_ms(raw: Any) -> int:
+    if isinstance(raw, dict):
+        return int(raw.get("startTime", 0))
+    return int(raw[0])
+
+
+def _kline_confirm(raw: Any) -> bool | None:
+    value = None
+    if isinstance(raw, dict):
+        value = raw.get("confirm")
+    elif isinstance(raw, (list, tuple)) and len(raw) >= 9:
+        value = raw[8]
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    text = str(value).strip().lower()
+    if text in {"1", "true", "t", "yes", "y"}:
+        return True
+    if text in {"0", "false", "f", "no", "n"}:
+        return False
+    return None
 
 
 async def fetch_symbol_klines(symbol: str, interval: str = "5m", limit: int = 120, rest_base: str = DEFAULT_REST_BASE) -> BybitKlineSnapshot:

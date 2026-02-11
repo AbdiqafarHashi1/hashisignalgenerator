@@ -4,6 +4,7 @@ import asyncio
 import logging
 import random
 import time
+import traceback
 from collections.abc import Callable
 from datetime import datetime, timezone
 
@@ -61,6 +62,9 @@ class DecisionScheduler:
         self._stop_event = asyncio.Event()
         self._task: asyncio.Task | None = None
         self._lock = asyncio.Lock()
+        self._stop_reason: str | None = None
+        self._consecutive_failures = 0
+        self._stopping_requested = False
 
     @property
     def running(self) -> bool:
@@ -69,6 +73,10 @@ class DecisionScheduler:
     @property
     def tick_interval(self) -> int:
         return self._interval
+
+    @property
+    def stop_reason(self) -> str | None:
+        return self._stop_reason
 
     def last_tick_time(self) -> datetime | None:
         return self._last_tick_time
@@ -88,8 +96,20 @@ class DecisionScheduler:
                 logger.info("scheduler_start skipped=already_running")
                 return False
             self._stop_event = asyncio.Event()
+            self._stopping_requested = False
+            self._stop_reason = None
+            self._consecutive_failures = 0
             self.started_ts = time.time()
-            self._task = asyncio.create_task(self._run_loop())
+            self._task = asyncio.create_task(self._run_loop(), name="decision_scheduler")
+            self._task.add_done_callback(self._on_task_done)
+        await asyncio.sleep(0)
+        if self._task is None or self._task.done():
+            error = self._task.exception() if self._task is not None else RuntimeError("scheduler_task_not_created")
+            reason = f"{type(error).__name__}: {error}" if error is not None else "scheduler_task_exited_early"
+            self._stop_reason = reason
+            logger.error("scheduler_start status=failed reason=%s", reason)
+            return False
+        async with self._lock:
             logger.info("scheduler_start status=started interval=%s", self._interval)
             return True
 
@@ -98,10 +118,13 @@ class DecisionScheduler:
             if not self.running:
                 logger.info("scheduler_stop skipped=already_stopped")
                 return False
+            self._stopping_requested = True
+            self._stop_reason = "stopped_by_user"
             self._stop_event.set()
             task = self._task
         if task is not None:
             await task
+        self._task = None
         logger.info("scheduler_stop status=stopped")
         return True
 
@@ -144,30 +167,49 @@ class DecisionScheduler:
         for symbol in symbols:
             tick_ts = datetime.now(timezone.utc)
             self._last_symbol_tick_time[symbol] = tick_ts
-            snapshot = await fetch_symbol_klines(
-                symbol=symbol,
-                interval=self._settings.candle_interval,
-                limit=self._settings.candle_history_limit,
-                rest_base=self._settings.bybit_rest_base,
-            )
-            self._last_snapshots[symbol] = snapshot
-            self._last_fetch_counts[symbol] = len(snapshot.candles)
-            if self._settings.force_trade_mode or self._settings.smoke_test_force_trade:
-                self._auto_close_forced_trades(symbol, snapshot, tick_ts)
-            if self._paper_trader is not None:
-                self._paper_trader.evaluate_open_trades(symbol, snapshot.candle.close)
-                self._close_time_stop_trades(symbol, snapshot.candle.close, tick_ts)
-            active_mode = self.detect_regime(snapshot)
-            if self._settings.sweet8_enabled:
-                self._settings.sweet8_current_mode = active_mode
-                self._state.set_last_notified_key("__sweet8_current_mode__", active_mode)
-            logger.info(
-                "candle_fetch symbol=%s candles=%s latest=%s closed=%s",
-                snapshot.symbol,
-                len(snapshot.candles),
-                snapshot.candle.close_time.isoformat(),
-                snapshot.kline_is_closed,
-            )
+            try:
+                snapshot = await fetch_symbol_klines(
+                    symbol=symbol,
+                    interval=self._settings.candle_interval,
+                    limit=self._settings.candle_history_limit,
+                    rest_base=self._settings.bybit_rest_base,
+                )
+                self._last_snapshots[symbol] = snapshot
+                self._last_fetch_counts[symbol] = len(snapshot.candles)
+                if self._settings.force_trade_mode or self._settings.smoke_test_force_trade:
+                    self._auto_close_forced_trades(symbol, snapshot, tick_ts)
+                if self._paper_trader is not None:
+                    self._paper_trader.evaluate_open_trades(symbol, snapshot.candle.close)
+                    self._close_time_stop_trades(symbol, snapshot.candle.close, tick_ts)
+                active_mode = self.detect_regime(snapshot)
+                if self._settings.sweet8_enabled:
+                    self._settings.sweet8_current_mode = active_mode
+                    self._state.set_last_notified_key("__sweet8_current_mode__", active_mode)
+                logger.info(
+                    "candle_fetch symbol=%s candles=%s latest=%s closed=%s",
+                    snapshot.symbol,
+                    len(snapshot.candles),
+                    snapshot.candle.close_time.isoformat(),
+                    snapshot.kline_is_closed,
+                )
+            except Exception as exc:
+                logger.exception("scheduler_symbol_error symbol=%s error=%s", symbol, exc)
+                results.append(
+                    {
+                        "symbol": symbol,
+                        "plan": None,
+                        "reason": f"symbol_error:{type(exc).__name__}",
+                        "candles_fetched": 0,
+                        "latest_candle_ts": None,
+                        "decision_status": None,
+                        "persisted": False,
+                        "dedupe_key": None,
+                        "telegram_sent": False,
+                        "trade_opened": False,
+                        "trade_id": None,
+                    }
+                )
+                continue
 
             funding_state = _funding_blackout_state(tick_ts, self._settings)
             if funding_state["close_positions"] and self._paper_trader is not None:
@@ -392,12 +434,75 @@ class DecisionScheduler:
         return "swing"
 
     async def _run_loop(self) -> None:
+        logger.info("scheduler_loop_start")
         while not self._stop_event.is_set():
-            await self.run_once()
+            logger.info("scheduler_loop_tick_start")
+            try:
+                await self.run_once()
+                self._consecutive_failures = 0
+                logger.info("scheduler_loop_tick_end status=ok")
+            except Exception as exc:
+                self._consecutive_failures += 1
+                backoff_seconds = self._compute_backoff_seconds(self._consecutive_failures)
+                self._stop_reason = f"{type(exc).__name__}: {exc}"
+                logger.exception(
+                    "scheduler_loop_tick_end status=error failures=%s backoff=%ss reason=%s",
+                    self._consecutive_failures,
+                    backoff_seconds,
+                    self._stop_reason,
+                )
+                try:
+                    await asyncio.wait_for(self._stop_event.wait(), timeout=backoff_seconds)
+                except asyncio.TimeoutError:
+                    continue
+                break
             try:
                 await asyncio.wait_for(self._stop_event.wait(), timeout=self._interval)
             except asyncio.TimeoutError:
                 continue
+        logger.info("scheduler_loop_end stop_requested=%s reason=%s", self._stopping_requested, self._stop_reason)
+
+    def _compute_backoff_seconds(self, failures: int) -> int:
+        schedule = [1, 2, 5, 10, 20, 30]
+        return schedule[min(max(failures - 1, 0), len(schedule) - 1)]
+
+    def _on_task_done(self, task: asyncio.Task) -> None:
+        if task.cancelled():
+            if self._stop_reason is None:
+                self._stop_reason = "scheduler_task_cancelled"
+            logger.warning("scheduler_task_done status=cancelled reason=%s", self._stop_reason)
+            self._task = None
+            return
+
+        error = task.exception()
+        if error is None:
+            logger.info("scheduler_task_done status=completed stop_requested=%s", self._stopping_requested)
+            if self._stopping_requested:
+                self._task = None
+                return
+            self._stop_reason = self._stop_reason or "scheduler_task_completed_unexpectedly"
+            logger.warning("scheduler_task_done status=unexpected_completion reason=%s", self._stop_reason)
+        else:
+            formatted_tb = "".join(traceback.format_exception(type(error), error, error.__traceback__))
+            self._stop_reason = f"{type(error).__name__}: {error}"
+            logger.error(
+                "scheduler_task_done status=crashed reason=%s traceback=%s",
+                self._stop_reason,
+                formatted_tb,
+            )
+
+        if self._stopping_requested:
+            self._task = None
+            return
+
+        try:
+            loop = asyncio.get_running_loop()
+            self._task = loop.create_task(self._run_loop(), name="decision_scheduler_restart")
+            self._task.add_done_callback(self._on_task_done)
+            logger.warning("scheduler_task_restart reason=%s", self._stop_reason)
+        except RuntimeError:
+            self._task = None
+            logger.exception("scheduler_task_restart_failed reason=no_running_loop")
 
 
 def _build_forced_trade_plan(snapshot: BybitKlineSnapshot, settings: Settings) -> TradePlan:

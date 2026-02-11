@@ -88,6 +88,7 @@ running = False
 last_heartbeat_ts: datetime | None = None
 last_action: str | None = None
 last_correlation_id: str | None = None
+last_status_reason_logged: str | None = None
 
 
 def _record_heartbeat() -> None:
@@ -107,7 +108,7 @@ def _record_correlation_id(correlation_id: str) -> None:
 
 def _initialize_engine(app: FastAPI) -> None:
     global settings, state, database, paper_trader, scheduler
-    global running, last_heartbeat_ts, last_action, last_correlation_id
+    global running, last_heartbeat_ts, last_action, last_correlation_id, last_status_reason_logged
 
     settings = get_settings()
     state = StateStore()
@@ -126,6 +127,7 @@ def _initialize_engine(app: FastAPI) -> None:
     last_heartbeat_ts = None
     last_action = None
     last_correlation_id = None
+    last_status_reason_logged = None
 
     app.state.settings = settings
     app.state.state_store = state
@@ -245,8 +247,13 @@ async def start_scheduler() -> dict[str, str]:
     global running
     running = scheduler.running
     _record_action("start")
-    logger.info("engine_start status=%s", "started" if started else "already_running")
-    return {"status": "started" if started else "already_running"}
+    status = "started" if started else "already_running"
+    if not started and scheduler.stop_reason:
+        status = "failed"
+        logger.error("engine_start status=failed reason=%s", scheduler.stop_reason)
+    else:
+        logger.info("engine_start status=%s", status)
+    return {"status": status}
 
 
 @app.get("/engine/start")
@@ -435,15 +442,22 @@ async def heartbeat():
 
 @app.get("/engine/status")
 async def engine_status() -> dict[str, Any]:
-    global running
+    global running, last_status_reason_logged
     scheduler = _require_scheduler()
     running = scheduler.running
+    stop_reason = scheduler.stop_reason
+    if not running and stop_reason and stop_reason != last_status_reason_logged:
+        logger.warning("engine_state_change status=STOPPED reason=%s", stop_reason)
+        last_status_reason_logged = stop_reason
+    if running:
+        last_status_reason_logged = None
     uptime_seconds = 0
     if running and scheduler.started_ts is not None:
         uptime_seconds = max(0, int(time.time() - scheduler.started_ts))
     return {
         "running": running,
         "status": "RUNNING" if running else "STOPPED",
+        "stop_reason": stop_reason,
         "mode": _require_settings().MODE,
         "last_heartbeat_ts": last_heartbeat_ts.isoformat() if last_heartbeat_ts else None,
         "last_action": last_action,

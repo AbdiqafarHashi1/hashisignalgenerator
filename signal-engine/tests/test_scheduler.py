@@ -209,3 +209,51 @@ def test_scheduler_dedupes_trades_per_candle(monkeypatch, tmp_path) -> None:
         assert len(database.fetch_trades()) == 1
 
     asyncio.run(run())
+
+
+def test_scheduler_symbol_error_isolated(monkeypatch) -> None:
+    snapshot = _build_snapshot(close_time_ms=6_000_000, closed=True)
+
+    async def fake_fetch(*args, **kwargs):
+        if kwargs.get("symbol") == "BTCUSDT":
+            raise RuntimeError("temporary_data_source_failure")
+        return snapshot.model_copy(update={"symbol": "ETHUSDT"})
+
+    monkeypatch.setattr(scheduler_module, "fetch_symbol_klines", fake_fetch)
+
+    settings = Settings(symbols=["BTCUSDT", "ETHUSDT"], telegram_enabled=False, _env_file=None)
+    state = StateStore()
+    scheduler = DecisionScheduler(settings, state)
+
+    async def run():
+        results = await scheduler.run_once()
+        by_symbol = {item["symbol"]: item for item in results}
+        assert by_symbol["BTCUSDT"]["reason"] == "symbol_error:RuntimeError"
+        assert by_symbol["ETHUSDT"]["reason"] in {"candle_already_processed", None}
+
+    asyncio.run(run())
+
+
+def test_scheduler_loop_survives_tick_exception(monkeypatch) -> None:
+    settings = Settings(telegram_enabled=False, _env_file=None)
+    state = StateStore()
+    scheduler = DecisionScheduler(settings, state, interval_seconds=1)
+    calls = {"count": 0}
+
+    async def fake_run_once(*args, **kwargs):
+        calls["count"] += 1
+        if calls["count"] == 1:
+            raise TimeoutError("network_timeout")
+        scheduler._stop_event.set()
+        return []
+
+    monkeypatch.setattr(scheduler, "run_once", fake_run_once)
+
+    async def run():
+        started = await scheduler.start()
+        assert started is True
+        await asyncio.wait_for(scheduler._task, timeout=3)
+        assert calls["count"] >= 2
+        assert scheduler.stop_reason == "TimeoutError: network_timeout"
+
+    asyncio.run(run())

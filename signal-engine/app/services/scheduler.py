@@ -152,6 +152,10 @@ class DecisionScheduler:
             if self._paper_trader is not None:
                 self._paper_trader.evaluate_open_trades(symbol, snapshot.candle.close)
                 self._close_time_stop_trades(symbol, snapshot.candle.close, tick_ts)
+            active_mode = self.detect_regime(snapshot)
+            if self._settings.sweet8_enabled:
+                self._settings.sweet8_current_mode = active_mode
+                self._state.set_last_notified_key("__sweet8_current_mode__", active_mode)
             logger.info(
                 "candle_fetch symbol=%s candles=%s latest=%s closed=%s",
                 snapshot.symbol,
@@ -191,7 +195,12 @@ class DecisionScheduler:
                         forced_trade = True
                     else:
                         request = _build_decision_request(snapshot)
-                        plan = decide(request, self._state, self._settings)
+                        settings_for_decision = self._settings
+                        if self._settings.sweet8_enabled:
+                            settings_for_decision = self._settings.model_copy(
+                                update={"strategy": "scalper" if active_mode == "scalper" else "baseline"}
+                            )
+                        plan = decide(request, self._state, settings_for_decision)
                     decision_status = plan.status.value
                     self._state.set_latest_decision(snapshot.symbol, plan)
                     persisted = True
@@ -252,6 +261,8 @@ class DecisionScheduler:
                                     snapshot.symbol,
                                     plan,
                                     allow_multiple=allow_multiple,
+                                    snapshot=snapshot,
+                                    regime=active_mode,
                                 )
                                 if trade_id is not None:
                                     trade_opened = True
@@ -328,6 +339,8 @@ class DecisionScheduler:
         snapshot: BybitKlineSnapshot,
         now: datetime,
     ) -> None:
+        if self._settings.sweet8_enabled:
+            return
         if self._settings.force_trade_auto_close_seconds <= 0:
             return
         if self._database is None or self._paper_trader is None:
@@ -345,9 +358,10 @@ class DecisionScheduler:
                     symbol,
                     elapsed,
                 )
-                break
 
     def _close_time_stop_trades(self, symbol: str, price: float, now: datetime) -> None:
+        if self._settings.sweet8_enabled:
+            return
         if self._database is None or self._paper_trader is None:
             return
         if self._settings.time_stop_minutes <= 0:
@@ -357,7 +371,20 @@ class DecisionScheduler:
             elapsed_minutes = (now - opened_at).total_seconds() / 60.0
             if elapsed_minutes >= self._settings.time_stop_minutes:
                 self._paper_trader.force_close_trades(symbol, price, reason="time_stop")
-                break
+
+    def detect_regime(self, snapshot: BybitKlineSnapshot) -> str:
+        if self._settings.sweet8_mode != "auto":
+            return self._settings.sweet8_mode
+        adx = _compute_adx(snapshot, period=max(2, self._settings.adx_period))
+        atr_values = _compute_atr_values(snapshot, period=max(2, self._settings.atr_period))
+        if adx is None or len(atr_values) < 2:
+            return "swing"
+        atr = atr_values[-1]
+        atr_avg = sum(atr_values[:-1]) / max(1, len(atr_values) - 1)
+        vol_ratio = (atr / atr_avg) if atr_avg > 0 else 0.0
+        if adx >= float(self._settings.sweet8_regime_adx_threshold) and vol_ratio >= self._settings.sweet8_regime_vol_threshold:
+            return "scalper"
+        return "swing"
 
     async def _run_loop(self) -> None:
         while not self._stop_event.is_set():
@@ -470,3 +497,61 @@ def _funding_blackout_state(now: datetime, settings: Settings) -> dict[str, bool
 
 def _force_trade_key(symbol: str, plan: TradePlan, now: datetime) -> str:
     return f"{symbol}:{int(now.timestamp() * 1000)}:{plan.direction.value}"
+
+
+def _compute_atr_values(snapshot: BybitKlineSnapshot, period: int) -> list[float]:
+    candles = snapshot.candles
+    if period <= 0 or len(candles) < period + 1:
+        return []
+    true_ranges: list[float] = []
+    for i in range(1, len(candles)):
+        current = candles[i]
+        prev_close = candles[i - 1].close
+        true_ranges.append(max(current.high - current.low, abs(current.high - prev_close), abs(current.low - prev_close)))
+    if len(true_ranges) < period:
+        return []
+    atr_values: list[float] = []
+    atr = sum(true_ranges[:period]) / period
+    atr_values.append(atr)
+    for tr in true_ranges[period:]:
+        atr = ((atr * (period - 1)) + tr) / period
+        atr_values.append(atr)
+    return atr_values
+
+
+def _compute_adx(snapshot: BybitKlineSnapshot, period: int) -> float | None:
+    candles = snapshot.candles
+    if period <= 1 or len(candles) < (period * 2) + 1:
+        return None
+    trs: list[float] = []
+    plus_dm: list[float] = []
+    minus_dm: list[float] = []
+    for i in range(1, len(candles)):
+        cur = candles[i]
+        prev = candles[i - 1]
+        up_move = cur.high - prev.high
+        down_move = prev.low - cur.low
+        plus_dm.append(up_move if up_move > down_move and up_move > 0 else 0.0)
+        minus_dm.append(down_move if down_move > up_move and down_move > 0 else 0.0)
+        trs.append(max(cur.high - cur.low, abs(cur.high - prev.close), abs(cur.low - prev.close)))
+    if len(trs) < period:
+        return None
+    smoothed_tr = sum(trs[:period])
+    smoothed_plus_dm = sum(plus_dm[:period])
+    smoothed_minus_dm = sum(minus_dm[:period])
+    dx_values: list[float] = []
+    for i in range(period, len(trs)):
+        smoothed_tr = smoothed_tr - (smoothed_tr / period) + trs[i]
+        smoothed_plus_dm = smoothed_plus_dm - (smoothed_plus_dm / period) + plus_dm[i]
+        smoothed_minus_dm = smoothed_minus_dm - (smoothed_minus_dm / period) + minus_dm[i]
+        if smoothed_tr <= 0:
+            continue
+        plus_di = 100 * (smoothed_plus_dm / smoothed_tr)
+        minus_di = 100 * (smoothed_minus_dm / smoothed_tr)
+        denom = plus_di + minus_di
+        if denom <= 0:
+            continue
+        dx_values.append(100 * (abs(plus_di - minus_di) / denom))
+    if len(dx_values) < period:
+        return None
+    return sum(dx_values[-period:]) / period

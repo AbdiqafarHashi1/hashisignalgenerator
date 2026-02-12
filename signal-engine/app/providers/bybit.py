@@ -92,7 +92,7 @@ class BybitClient:
             raise ValueError(f"Bybit error: {data.get('retMsg')} ({data.get('retCode')})")
         return data
 
-    async def fetch_candles(self, symbol: str, interval: str = "5m", limit: int = 120) -> BybitKlineSnapshot:
+    async def fetch_candles(self, symbol: str, interval: str = "5m", limit: int = 120) -> BybitKlineSnapshot | None:
         requested_limit = max(2, min(limit, 1000))
         data = await self._get(
             "/v5/market/kline",
@@ -109,6 +109,8 @@ class BybitClient:
         now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
         rows = _sort_rows_oldest_first(rows)
         selected_row, selected_closed = _select_previous_closed_row(rows, interval, now_ms)
+        if selected_row is None:
+            return None
         selected_open_time_ms = _kline_start_time_ms(selected_row)
         selected_close_time_ms = selected_open_time_ms + _interval_to_ms(interval)
         candles = [_parse_kline(raw, interval) for raw in rows if _is_row_closed(raw, interval, now_ms)]
@@ -248,10 +250,10 @@ def _sort_rows_oldest_first(rows: list[Any]) -> list[Any]:
     return sorted(rows, key=_kline_start_time_ms)
 
 
-def _select_previous_closed_row(rows: list[Any], interval: str, now_ms: int) -> tuple[Any, bool]:
+def _select_previous_closed_row(rows: list[Any], interval: str, now_ms: int) -> tuple[Any | None, bool]:
     previous_row = rows[-2]
     if not _is_row_closed(previous_row, interval, now_ms):
-        raise ValueError("Previous candle is not closed; refusing to evaluate newest candle")
+        return None, False
     return previous_row, True
 
 
@@ -289,6 +291,11 @@ def _kline_confirm(raw: Any) -> bool | None:
     return None
 
 
-async def fetch_symbol_klines(symbol: str, interval: str = "5m", limit: int = 120, rest_base: str = DEFAULT_REST_BASE) -> BybitKlineSnapshot:
+async def fetch_symbol_klines(
+    symbol: str,
+    interval: str = "5m",
+    limit: int = 120,
+    rest_base: str = DEFAULT_REST_BASE,
+) -> BybitKlineSnapshot | None:
     client = BybitClient(rest_base=rest_base)
     return await client.fetch_candles(symbol=symbol, interval=interval, limit=limit)

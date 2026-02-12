@@ -75,6 +75,39 @@ def test_scheduler_skips_open_candle(monkeypatch) -> None:
     asyncio.run(run())
 
 
+def test_scheduler_waits_when_provider_not_ready_then_processes_closed_candle(monkeypatch) -> None:
+    snapshot = _build_snapshot(close_time_ms=7_000_000, closed=True)
+    calls = {"fetch": 0, "decide": 0}
+
+    async def fake_fetch(*args, **kwargs):
+        calls["fetch"] += 1
+        if calls["fetch"] == 1:
+            return None
+        return snapshot
+
+    def fake_decide(*args, **kwargs):
+        calls["decide"] += 1
+        return _trade_plan()
+
+    monkeypatch.setattr(scheduler_module, "fetch_symbol_klines", fake_fetch)
+    monkeypatch.setattr(scheduler_module, "decide", fake_decide)
+
+    settings = Settings(telegram_enabled=False, _env_file=None)
+    state = StateStore()
+    scheduler = DecisionScheduler(settings, state)
+
+    async def run():
+        first = await scheduler.run_once()
+        assert first[0]["plan"] is None
+        assert first[0]["reason"] == "candle_open"
+
+        second = await scheduler.run_once()
+        assert second[0]["plan"] is not None
+        assert second[0]["reason"] is None
+        assert calls["decide"] == 1
+
+    asyncio.run(run())
+
 def test_scheduler_runs_once_per_candle(monkeypatch) -> None:
     snapshot = _build_snapshot(close_time_ms=2_000_000, closed=True)
     calls = {"decide": 0}
@@ -128,14 +161,16 @@ def test_scheduler_dedupes_notifications(monkeypatch) -> None:
         telegram_enabled=True,
         telegram_bot_token="token",
         telegram_chat_id="chat",
+        force_trade_mode=False,
+        smoke_test_force_trade=False,
         _env_file=None,
     )
     state = StateStore()
     scheduler = DecisionScheduler(settings, state)
 
     async def run():
-        await scheduler.run_once(force=True)
-        await scheduler.run_once(force=True)
+        await scheduler.run_once()
+        await scheduler.run_once()
         assert sent["count"] == 1
 
     asyncio.run(run())

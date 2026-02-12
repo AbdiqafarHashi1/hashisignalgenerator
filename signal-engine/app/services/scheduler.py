@@ -174,6 +174,25 @@ class DecisionScheduler:
                     limit=self._settings.candle_history_limit,
                     rest_base=self._settings.bybit_rest_base,
                 )
+                if snapshot is None:
+                    logger.info("candle_fetch symbol=%s status=not_ready reason=candle_open", symbol)
+                    self._last_fetch_counts[symbol] = 0
+                    results.append(
+                        {
+                            "symbol": symbol,
+                            "plan": None,
+                            "reason": "candle_open",
+                            "candles_fetched": 0,
+                            "latest_candle_ts": None,
+                            "decision_status": None,
+                            "persisted": False,
+                            "dedupe_key": None,
+                            "telegram_sent": False,
+                            "trade_opened": False,
+                            "trade_id": None,
+                        }
+                    )
+                    continue
                 self._last_snapshots[symbol] = snapshot
                 self._last_fetch_counts[symbol] = len(snapshot.candles)
                 if self._settings.force_trade_mode or self._settings.smoke_test_force_trade:

@@ -93,21 +93,22 @@ class BybitClient:
         return data
 
     async def fetch_candles(self, symbol: str, interval: str = "5m", limit: int = 120) -> BybitKlineSnapshot:
+        requested_limit = max(2, min(limit, 1000))
         data = await self._get(
             "/v5/market/kline",
             {
                 "category": "linear",
                 "symbol": symbol,
                 "interval": _to_bybit_interval(interval),
-                "limit": max(1, min(limit, 1000)),
+                "limit": requested_limit,
             },
         )
         rows = data.get("result", {}).get("list", [])
-        if not rows:
-            raise ValueError("No kline data returned from Bybit")
+        if len(rows) < 2:
+            raise ValueError("Bybit returned fewer than 2 klines; cannot select previous closed candle")
         now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
         rows = _sort_rows_oldest_first(rows)
-        selected_row, selected_closed = _select_latest_closed_row(rows, interval, now_ms)
+        selected_row, selected_closed = _select_previous_closed_row(rows, interval, now_ms)
         selected_open_time_ms = _kline_start_time_ms(selected_row)
         selected_close_time_ms = selected_open_time_ms + _interval_to_ms(interval)
         candles = [_parse_kline(raw, interval) for raw in rows if _is_row_closed(raw, interval, now_ms)]
@@ -247,11 +248,11 @@ def _sort_rows_oldest_first(rows: list[Any]) -> list[Any]:
     return sorted(rows, key=_kline_start_time_ms)
 
 
-def _select_latest_closed_row(rows: list[Any], interval: str, now_ms: int) -> tuple[Any, bool]:
-    for row in reversed(rows):
-        if _is_row_closed(row, interval, now_ms):
-            return row, True
-    return rows[-1], False
+def _select_previous_closed_row(rows: list[Any], interval: str, now_ms: int) -> tuple[Any, bool]:
+    previous_row = rows[-2]
+    if not _is_row_closed(previous_row, interval, now_ms):
+        raise ValueError("Previous candle is not closed; refusing to evaluate newest candle")
+    return previous_row, True
 
 
 def _is_row_closed(raw: Any, interval: str, now_ms: int) -> bool:

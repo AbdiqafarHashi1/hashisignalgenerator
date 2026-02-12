@@ -28,6 +28,65 @@ class Settings(BaseSettings):
         "scalper",
         validation_alias=AliasChoices("STRATEGY", "strategy"),
     )
+    current_mode: Literal["SWING", "SCALP"] = Field(
+        "SWING",
+        validation_alias=AliasChoices("CURRENT_MODE", "current_mode"),
+    )
+    scalp_tp_pct: float = Field(0.005, validation_alias=AliasChoices("SCALP_TP_PCT", "scalp_tp_pct"))
+    scalp_sl_pct: float = Field(0.0025, validation_alias=AliasChoices("SCALP_SL_PCT", "scalp_sl_pct"))
+    scalp_max_hold_minutes: int = Field(
+        60,
+        validation_alias=AliasChoices("SCALP_MAX_HOLD_MINUTES", "scalp_max_hold_minutes"),
+    )
+    scalp_reentry_cooldown_minutes: int = Field(
+        20,
+        validation_alias=AliasChoices("SCALP_REENTRY_COOLDOWN_MINUTES", "scalp_reentry_cooldown_minutes"),
+    )
+    scalp_min_score: int = Field(78, validation_alias=AliasChoices("SCALP_MIN_SCORE", "scalp_min_score"))
+    scalp_trend_filter_enabled: bool = Field(
+        True,
+        validation_alias=AliasChoices("SCALP_TREND_FILTER_ENABLED", "scalp_trend_filter_enabled"),
+    )
+    daily_max_dd_pct: float = Field(3.0, validation_alias=AliasChoices("DAILY_MAX_DD_PCT", "daily_max_dd_pct"))
+    scalp_regime_enabled: bool = Field(
+        True,
+        validation_alias=AliasChoices("SCALP_REGIME_ENABLED", "scalp_regime_enabled"),
+    )
+    scalp_ema_fast: int = Field(20, validation_alias=AliasChoices("SCALP_EMA_FAST", "scalp_ema_fast"))
+    scalp_ema_slow: int = Field(50, validation_alias=AliasChoices("SCALP_EMA_SLOW", "scalp_ema_slow"))
+    scalp_ema_trend: int = Field(200, validation_alias=AliasChoices("SCALP_EMA_TREND", "scalp_ema_trend"))
+    scalp_atr_period: int = Field(14, validation_alias=AliasChoices("SCALP_ATR_PERIOD", "scalp_atr_period"))
+    scalp_atr_pct_min: float = Field(0.0015, validation_alias=AliasChoices("SCALP_ATR_PCT_MIN", "scalp_atr_pct_min"))
+    scalp_atr_pct_max: float = Field(0.0120, validation_alias=AliasChoices("SCALP_ATR_PCT_MAX", "scalp_atr_pct_max"))
+    scalp_trend_slope_min: float = Field(
+        0.0002,
+        validation_alias=AliasChoices("SCALP_TREND_SLOPE_MIN", "scalp_trend_slope_min"),
+    )
+    scalp_setup_mode: Literal["pullback_engulfing", "breakout_retest", "either"] = Field(
+        "pullback_engulfing",
+        validation_alias=AliasChoices("SCALP_SETUP_MODE", "scalp_setup_mode"),
+    )
+    scalp_pullback_ema: int = Field(20, validation_alias=AliasChoices("SCALP_PULLBACK_EMA", "scalp_pullback_ema"))
+    scalp_pullback_max_dist_pct: float = Field(
+        0.0020,
+        validation_alias=AliasChoices("SCALP_PULLBACK_MAX_DIST_PCT", "scalp_pullback_max_dist_pct"),
+    )
+    scalp_engulfing_min_body_pct: float = Field(
+        0.0006,
+        validation_alias=AliasChoices("SCALP_ENGULFING_MIN_BODY_PCT", "scalp_engulfing_min_body_pct"),
+    )
+    scalp_rsi_period: int = Field(14, validation_alias=AliasChoices("SCALP_RSI_PERIOD", "scalp_rsi_period"))
+    scalp_rsi_confirm: bool = Field(True, validation_alias=AliasChoices("SCALP_RSI_CONFIRM", "scalp_rsi_confirm"))
+    scalp_rsi_long_min: float = Field(45, validation_alias=AliasChoices("SCALP_RSI_LONG_MIN", "scalp_rsi_long_min"))
+    scalp_rsi_short_max: float = Field(55, validation_alias=AliasChoices("SCALP_RSI_SHORT_MAX", "scalp_rsi_short_max"))
+    scalp_breakout_lookback: int = Field(
+        20,
+        validation_alias=AliasChoices("SCALP_BREAKOUT_LOOKBACK", "scalp_breakout_lookback"),
+    )
+    scalp_retest_max_bars: int = Field(
+        6,
+        validation_alias=AliasChoices("SCALP_RETEST_MAX_BARS", "scalp_retest_max_bars"),
+    )
     debug_loosen: bool = Field(False, validation_alias=AliasChoices("DEBUG_LOOSEN", "debug_loosen"))
     debug_disable_hard_risk_gates: bool = Field(
         False,
@@ -200,6 +259,7 @@ class Settings(BaseSettings):
 
     news_blackouts: str = ""
     data_dir: str = "data"
+    telegram_debug_skips: bool = Field(False, validation_alias=AliasChoices("TELEGRAM_DEBUG_SKIPS", "telegram_debug_skips"))
     telegram_enabled: bool = False
     telegram_bot_token: str | None = None
     telegram_chat_id: str | None = None
@@ -336,6 +396,33 @@ class Settings(BaseSettings):
             "cooldown_minutes_after_loss": self.cooldown_minutes_after_loss,
             "max_trades_per_day": self.max_trades_per_day,
             "max_losses_per_day": self.max_losses_per_day,
+            "current_mode": self.current_mode,
+            "scalp_tp_pct": self.scalp_tp_pct,
+            "scalp_sl_pct": self.scalp_sl_pct,
+            "scalp_max_hold_minutes": self.scalp_max_hold_minutes,
+            "scalp_reentry_cooldown_minutes": self.scalp_reentry_cooldown_minutes,
+            "scalp_min_score": self.scalp_min_score,
+            "scalp_trend_filter_enabled": self.scalp_trend_filter_enabled,
+            "scalp_regime_enabled": self.scalp_regime_enabled,
+            "scalp_ema_fast": self.scalp_ema_fast,
+            "scalp_ema_slow": self.scalp_ema_slow,
+            "scalp_ema_trend": self.scalp_ema_trend,
+            "scalp_atr_period": self.scalp_atr_period,
+            "scalp_atr_pct_min": self.scalp_atr_pct_min,
+            "scalp_atr_pct_max": self.scalp_atr_pct_max,
+            "scalp_trend_slope_min": self.scalp_trend_slope_min,
+            "scalp_setup_mode": self.scalp_setup_mode,
+            "scalp_pullback_ema": self.scalp_pullback_ema,
+            "scalp_pullback_max_dist_pct": self.scalp_pullback_max_dist_pct,
+            "scalp_engulfing_min_body_pct": self.scalp_engulfing_min_body_pct,
+            "scalp_rsi_period": self.scalp_rsi_period,
+            "scalp_rsi_confirm": self.scalp_rsi_confirm,
+            "scalp_rsi_long_min": self.scalp_rsi_long_min,
+            "scalp_rsi_short_max": self.scalp_rsi_short_max,
+            "scalp_breakout_lookback": self.scalp_breakout_lookback,
+            "scalp_retest_max_bars": self.scalp_retest_max_bars,
+            "daily_max_dd_pct": self.daily_max_dd_pct,
+            "telegram_debug_skips": self.telegram_debug_skips,
             "max_daily_loss_pct": self.max_daily_loss_pct,
             "base_risk_pct": self.base_risk_pct,
             "max_risk_pct": self.max_risk_pct,

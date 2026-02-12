@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
+import math
 import logging
 
 from ..config import Settings
@@ -123,12 +124,18 @@ class PaperTrader:
         if plan.entry_zone is None or plan.stop_loss is None or plan.take_profit is None:
             return None
         entry = sum(plan.entry_zone) / 2.0
-        position_notional = plan.position_size_usd or self._settings.account_size * (plan.risk_pct_used or 0)
-        size = position_notional / entry if entry > 0 else 0.0
-        if size <= 0:
+        stop = plan.stop_loss
+        if stop is None:
             return None
         side = "long" if plan.direction == Direction.long else "short"
         entry_with_costs = self._apply_entry_price(side, entry)
+        risk_usd = self._settings.account_size * float(plan.risk_pct_used or self._settings.base_risk_pct or 0.0)
+        stop_distance = abs(entry_with_costs - stop)
+        size = (risk_usd / stop_distance) if stop_distance > 0 else 0.0
+        if plan.position_size_usd:
+            size = min(size, float(plan.position_size_usd) / entry_with_costs)
+        if size <= 0:
+            return None
         take_profit = self._cap_take_profit(entry_with_costs, plan.take_profit, side)
         if not self._is_reentry_allowed(symbol, side):
             logger.info("paper_trade_rejected symbol=%s reason=reentry_cooldown", symbol)
@@ -139,7 +146,7 @@ class PaperTrader:
         return self._db.open_trade(
             symbol=symbol,
             entry=entry_with_costs,
-            stop=plan.stop_loss,
+            stop=stop,
             take_profit=take_profit,
             size=size,
             side=side,
@@ -171,11 +178,25 @@ class PaperTrader:
             results.append(PaperTradeResult(trade.id, trade.symbol, exit_price, pnl_usd, pnl_r, reason))
         return results
 
-    def evaluate_open_trades(self, symbol: str, price: float) -> list[PaperTradeResult]:
+    def evaluate_open_trades(
+        self,
+        symbol: str,
+        price: float,
+        candle_high: float | None = None,
+        candle_low: float | None = None,
+    ) -> list[PaperTradeResult]:
         results: list[PaperTradeResult] = []
         self.update_mark_price(symbol, price)
         for trade in self._db.fetch_open_trades(symbol):
-            hit_result = self._check_exit(trade.side, trade.entry, trade.stop, trade.take_profit, price)
+            hit_result = self._check_exit(
+                trade.side,
+                trade.entry,
+                trade.stop,
+                trade.take_profit,
+                price,
+                candle_high=candle_high,
+                candle_low=candle_low,
+            )
             if hit_result is None:
                 continue
             exit_price, result = hit_result
@@ -237,21 +258,39 @@ class PaperTrader:
         stop: float,
         take_profit: float,
         price: float,
+        candle_high: float | None = None,
+        candle_low: float | None = None,
     ) -> tuple[float, str] | None:
+        high = price if candle_high is None else candle_high
+        low = price if candle_low is None else candle_low
+        if math.isnan(high) or math.isnan(low) or high < low:
+            return None
         if side == "long":
-            if price <= stop:
+            tp_hit = high >= take_profit
+            sl_hit = low <= stop
+            if tp_hit and sl_hit:
                 return stop, "sl_close"
-            if price >= take_profit:
+            if sl_hit:
+                return stop, "sl_close"
+            if tp_hit:
                 return take_profit, "tp_close"
         else:
-            if price >= stop:
+            tp_hit = low <= take_profit
+            sl_hit = high >= stop
+            if tp_hit and sl_hit:
                 return stop, "sl_close"
-            if price <= take_profit:
+            if sl_hit:
+                return stop, "sl_close"
+            if tp_hit:
                 return take_profit, "tp_close"
         return None
 
     def _is_reentry_allowed(self, symbol: str, side: str) -> bool:
-        cooldown = max(0, self._settings.reentry_cooldown_minutes)
+        cooldown = (
+            max(0, self._settings.scalp_reentry_cooldown_minutes)
+            if self._settings.current_mode == "SCALP"
+            else max(0, self._settings.reentry_cooldown_minutes)
+        )
         if cooldown <= 0:
             return True
         for trade in self._db.fetch_trades():

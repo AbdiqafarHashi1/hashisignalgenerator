@@ -22,6 +22,7 @@ from .state import StateStore
 from .services.database import Database
 from .services.paper_trader import PaperTrader
 from .services.stats import compute_stats
+from .services.performance import PerformanceStore, build_performance_snapshot
 from .storage.store import log_event
 from .strategy.decision import decide
 from .services.scheduler import DecisionScheduler
@@ -85,6 +86,7 @@ state = None
 database = None
 paper_trader = None
 scheduler = None
+performance_store = None
 
 running = False
 last_heartbeat_ts: datetime | None = None
@@ -237,7 +239,7 @@ def _publish_state_snapshot() -> None:
 
 
 def _initialize_engine(app: FastAPI) -> None:
-    global settings, state, database, paper_trader, scheduler
+    global settings, state, database, paper_trader, scheduler, performance_store
     global running, last_heartbeat_ts, last_action, last_correlation_id, last_status_reason_logged
 
     settings = get_settings()
@@ -254,6 +256,7 @@ def _initialize_engine(app: FastAPI) -> None:
         heartbeat_cb=_record_heartbeat,
     )
     scheduler.add_tick_listener(_publish_state_snapshot)
+    performance_store = PerformanceStore(settings.data_dir)
     running = False
     last_heartbeat_ts = None
     last_action = None
@@ -265,6 +268,7 @@ def _initialize_engine(app: FastAPI) -> None:
     app.state.database = database
     app.state.paper_trader = paper_trader
     app.state.scheduler = scheduler
+    app.state.performance_store = performance_store
 
 
 @asynccontextmanager
@@ -335,6 +339,12 @@ def _require_paper_trader() -> PaperTrader:
     if paper_trader is None:
         raise HTTPException(status_code=503, detail="engine_not_ready")
     return paper_trader
+
+
+def _require_performance_store() -> PerformanceStore:
+    if performance_store is None:
+        raise HTTPException(status_code=503, detail="engine_not_ready")
+    return performance_store
 
 
 @app.get("/")
@@ -450,6 +460,21 @@ async def trades() -> dict:
 async def equity() -> dict:
     summary = compute_stats(_require_database().fetch_trades())
     return {"equity_curve": summary.equity_curve}
+
+
+@app.get("/metrics/performance")
+async def performance_metrics() -> dict[str, Any]:
+    settings = _require_settings()
+    database = _require_database()
+    state_store = _require_state()
+    snapshot = build_performance_snapshot(
+        database.fetch_trades(),
+        account_size=float(settings.account_size or 0.0),
+        skip_reason_counts=state_store.skip_reason_counts(),
+    )
+    store = _require_performance_store()
+    store.save(snapshot)
+    return snapshot.__dict__
 
 
 @app.get("/account/summary", response_model=AccountSummary)

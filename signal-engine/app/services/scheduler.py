@@ -178,6 +178,8 @@ class DecisionScheduler:
                         "skip_reason": "market_data_disabled",
                     }
                 )
+            for _ in symbols:
+                self._state.record_skip_reason("market_data_disabled")
             self._notify_tick_listeners()
             return results
         for symbol in symbols:
@@ -211,6 +213,7 @@ class DecisionScheduler:
                         }
                     )
                     self._state.set_decision_meta(symbol, {"decision": "skip", "skip_reason": "candle_open"})
+                    self._state.record_skip_reason("candle_open")
                     continue
                 self._last_snapshots[symbol] = snapshot
                 self._last_fetch_counts[symbol] = len(snapshot.candles)
@@ -267,6 +270,7 @@ class DecisionScheduler:
                     }
                 )
                 self._state.set_decision_meta(symbol, {"decision": "skip", "skip_reason": f"symbol_error:{type(exc).__name__}"})
+                self._state.record_skip_reason(f"symbol_error:{type(exc).__name__}")
                 continue
 
             funding_state = _funding_blackout_state(tick_ts, self._settings)
@@ -447,6 +451,8 @@ class DecisionScheduler:
                 "ema_trend": scalp_meta.get("ema_trend"),
             }
             self._state.set_decision_meta(symbol, decision_meta)
+            if decision == "skip":
+                self._state.record_skip_reason(skip_reason)
             if self._settings.telegram_debug_skips and decision == "skip":
                 await self._maybe_send_skip_debug(symbol, skip_reason)
             logger.info(

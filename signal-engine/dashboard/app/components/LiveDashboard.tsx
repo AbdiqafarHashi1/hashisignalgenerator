@@ -2,7 +2,7 @@
 
 import type { ReactNode } from "react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { apiFetch, API_BASE, ApiError, EngineState, stateEventsUrl } from "../../lib/api";
+import { apiFetch, API_BASE, ApiError, EngineState, PerformanceMetrics, stateEventsUrl } from "../../lib/api";
 
 const CONTROL_BUTTONS = [
   { label: "Start", path: "/start" },
@@ -14,6 +14,7 @@ const MAX_POINTS = 200;
 
 export default function LiveDashboard() {
   const [state, setState] = useState<EngineState | null>(null);
+  const [performance, setPerformance] = useState<PerformanceMetrics | null>(null);
   const [equityCurve, setEquityCurve] = useState<number[]>([]);
   const [pnlCurve, setPnlCurve] = useState<number[]>([]);
   const [isStreamLive, setIsStreamLive] = useState(false);
@@ -24,6 +25,15 @@ export default function LiveDashboard() {
   const formatApiError = useCallback((label: string, apiError: ApiError) => {
     return `${label}: ${apiError.message} (Status: ${apiError.status})`;
   }, []);
+
+  const loadPerformance = useCallback(async () => {
+    try {
+      const payload = await apiFetch<PerformanceMetrics>("/metrics/performance");
+      setPerformance(payload);
+    } catch (err) {
+      setError(formatApiError("Performance", err as ApiError));
+    }
+  }, [formatApiError]);
 
   const pushChartPoints = useCallback((snapshot: EngineState) => {
     setEquityCurve((prev) => [...prev, snapshot.equity].slice(-MAX_POINTS));
@@ -50,7 +60,15 @@ export default function LiveDashboard() {
     };
 
     loadInitial();
-  }, [applySnapshot, formatApiError]);
+    loadPerformance();
+  }, [applySnapshot, formatApiError, loadPerformance]);
+
+  useEffect(() => {
+    const timer = setInterval(() => {
+      loadPerformance();
+    }, 2000);
+    return () => clearInterval(timer);
+  }, [loadPerformance]);
 
   useEffect(() => {
     let source: EventSource | null = null;
@@ -98,6 +116,7 @@ export default function LiveDashboard() {
       await apiFetch(path);
       const payload = await apiFetch<EngineState>("/state");
       applySnapshot(payload);
+      loadPerformance();
     } catch (err) {
       setError(formatApiError("Action", err as ApiError));
     }
@@ -114,7 +133,8 @@ export default function LiveDashboard() {
     return <span className={`rounded-full px-3 py-1 text-xs font-semibold ${classes}`}>{isStreamLive ? "LIVE" : "DISCONNECTED"}</span>;
   }, [isStreamLive]);
 
-  const fmtUsd = (v: number | undefined | null) => (v === undefined || v === null ? "--" : Number(v).toFixed(2));
+  const fmtNum = (v: number | undefined | null) => (v === undefined || v === null ? "--" : Number(v).toFixed(2));
+  const fmtUsd = (v: number | undefined | null) => (v === undefined || v === null ? "--" : `$${Number(v).toFixed(2)}`);
   const fmtPct = (v: number | undefined | null, asFraction = false) => {
     if (v === undefined || v === null) return "--";
     const num = asFraction ? v * 100 : v;
@@ -141,38 +161,40 @@ export default function LiveDashboard() {
 
         {error ? <p className="text-sm text-red-400">{error}</p> : null}
 
-        <section className="grid gap-3 md:grid-cols-3 xl:grid-cols-5">
+        <section>
+          <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide text-slate-300">Account Status</h2>
+          <div className="grid gap-3 md:grid-cols-3 xl:grid-cols-6">
           <Kpi label="Equity" value={fmtUsd(state?.equity)} />
           <Kpi label="Balance" value={fmtUsd(state?.balance)} />
-          <Kpi label="Unrealized PnL" value={fmtUsd(state?.unrealized_pnl_usd)} />
+          <Kpi label="Unrealized PnL (Live)" value={fmtUsd(state?.unrealized_pnl_usd)} />
           <Kpi label="Realized PnL Today" value={fmtUsd(state?.realized_pnl_today_usd)} />
+          <Kpi label="Open Positions" value={String(state?.open_positions?.length ?? "--")} />
           <Kpi label="Trades Today" value={String(state?.trades_today ?? "--")} />
-          <Kpi label="Wins" value={String(state?.wins ?? "--")} />
-          <Kpi label="Losses" value={String(state?.losses ?? "--")} />
-          <Kpi label="Win Rate" value={fmtPct(state?.win_rate, true)} />
-          <Kpi label="Profit Factor" value={fmtUsd(state?.profit_factor)} />
-          <Kpi label="Max DD Today" value={fmtPct(state?.max_dd_today_pct)} />
+          </div>
+        </section>
+
+        <section>
+          <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide text-slate-300">Performance Analytics</h2>
+          <div className="grid gap-3 md:grid-cols-3 xl:grid-cols-7">
+          <Kpi label="Expectancy (R)" value={fmtNum(performance?.expectancy_r)} />
+          <Kpi label="Profit Factor" value={fmtNum(performance?.profit_factor)} />
+          <Kpi label="Avg Win" value={fmtUsd(performance?.avg_win)} />
+          <Kpi label="Avg Loss" value={fmtUsd(performance?.avg_loss)} />
+          <Kpi label="Trades Today" value={String(performance?.trades_today ?? "--")} />
+          <Kpi label="Win Rate" value={fmtPct(performance?.win_rate, true)} />
+          <Kpi label="Max DD %" value={fmtPct(performance?.max_drawdown_pct)} />
+          </div>
         </section>
 
         <section className="grid gap-4 lg:grid-cols-2">
-          <Panel title="Equity Curve"><Spark data={equityCurve} color="#22c55e" /></Panel>
-          <Panel title="PnL Curve"><Spark data={pnlCurve} color="#60a5fa" /></Panel>
+          <Panel title="Equity Curve"><Spark data={performance?.equity_curve || equityCurve} color="#22c55e" /></Panel>
+          <Panel title="Drawdown Curve"><Spark data={performance?.drawdown_curve_pct || pnlCurve} color="#f97316" /></Panel>
         </section>
 
-        <section className="grid gap-3 md:grid-cols-2 lg:grid-cols-5">
-          <Kpi label="Daily Loss Remaining" value={fmtUsd(state?.daily_loss_remaining_usd)} />
-          <Kpi label="Cooldown Active" value={state?.cooldown_active ? "YES" : "NO"} />
-          <Kpi label="Funding Blackout" value={state?.funding_blackout ? "YES" : "NO"} />
-          <Kpi label="Swings Enabled" value={state?.swings_enabled ? "YES" : "NO"} />
-          <Kpi label="Current Mode" value={state?.current_mode?.toUpperCase() ?? "--"} />
-          <Kpi label="Open Positions" value={String(state?.open_positions?.length ?? 0)} />
-          <Kpi label="Consecutive Losses" value={String(state?.consecutive_losses ?? 0)} />
-          <Kpi label="Regime" value={state?.regime_label?.toUpperCase() ?? "--"} />
-          <Kpi label="Allowed Side" value={state?.allowed_side?.toUpperCase() ?? "--"} />
-          <Kpi label="Last Decision" value={state?.last_decision ?? "--"} />
-          <Kpi label="Skip Reason" value={state?.last_skip_reason ?? "--"} />
-          <Kpi label="ATR %" value={fmtPct(state?.atr_pct, true)} />
-          <Kpi label="Daily Loss %" value={fmtPct(state?.daily_loss_pct, true)} />
+        <section className="grid gap-4 lg:grid-cols-3">
+          <Panel title="Skip Reason Histogram"><Bars data={performance?.skip_reason_counts || {}} /></Panel>
+          <Panel title="Win/Loss Distribution"><Bars data={performance?.win_loss_distribution || {}} /></Panel>
+          <Panel title="Avg Hold Time"><Kpi label="Seconds" value={fmtNum(performance?.avg_hold_time)} /></Panel>
         </section>
 
         <section className="rounded-xl border border-binance-border bg-binance-card p-4">
@@ -198,7 +220,7 @@ function Kpi({ label, value }: { label: string; value: string }) {
   return (
     <div className="rounded-xl border border-binance-border bg-binance-card p-3">
       <p className="text-xs uppercase text-slate-400">{label}</p>
-      <p className="mt-1 text-lg font-semibold text-slate-100 break-all">{value}</p>
+      <p className="mt-1 break-all text-lg font-semibold text-slate-100">{value}</p>
     </div>
   );
 }
@@ -234,4 +256,20 @@ function Spark({ data, color }: { data: number[]; color: string }) {
     .map((v, i) => `${(i / Math.max(1, data.length - 1)) * 100},${100 - ((v - min) / range) * 100}`)
     .join(" ");
   return <svg viewBox="0 0 100 100" className="h-40 w-full"><polyline points={points} fill="none" stroke={color} strokeWidth="2" /></svg>;
+}
+
+function Bars({ data }: { data: Record<string, number> }) {
+  const entries = Object.entries(data);
+  if (!entries.length) return <p className="text-sm text-slate-400">No data.</p>;
+  const max = Math.max(...entries.map(([, v]) => v), 1);
+  return (
+    <div className="space-y-2 text-xs">
+      {entries.map(([label, value]) => (
+        <div key={label}>
+          <div className="mb-1 flex justify-between text-slate-300"><span>{label}</span><span>{value}</span></div>
+          <div className="h-2 rounded bg-slate-800"><div className="h-2 rounded bg-cyan-500" style={{ width: `${(value / max) * 100}%` }} /></div>
+        </div>
+      ))}
+    </div>
+  );
 }

@@ -166,6 +166,12 @@ export default function LiveDashboard() {
           <Kpi label="Swings Enabled" value={state?.swings_enabled ? "YES" : "NO"} />
           <Kpi label="Current Mode" value={state?.current_mode?.toUpperCase() ?? "--"} />
           <Kpi label="Open Positions" value={String(state?.open_positions?.length ?? 0)} />
+          <Kpi label="Consecutive Losses" value={String(state?.consecutive_losses ?? 0)} />
+          <Kpi label="Regime" value={state?.regime_label?.toUpperCase() ?? "--"} />
+          <Kpi label="Allowed Side" value={state?.allowed_side?.toUpperCase() ?? "--"} />
+          <Kpi label="Last Decision" value={state?.last_decision ?? "--"} />
+          <Kpi label="Skip Reason" value={state?.last_skip_reason ?? "--"} />
+          <Kpi label="ATR %" value={fmtPct(state?.atr_pct, true)} />
           <Kpi label="Daily Loss %" value={fmtPct(state?.daily_loss_pct, true)} />
         </section>
 

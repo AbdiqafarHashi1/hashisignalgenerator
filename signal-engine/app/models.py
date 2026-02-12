@@ -135,3 +135,12 @@ class EngineState(BaseModel):
     funding_blackout: bool
     swings_enabled: bool
     current_mode: str
+    consecutive_losses: int = 0
+    last_decision: str | None = None
+    last_skip_reason: str | None = None
+    regime_label: str | None = None
+    allowed_side: str | None = None
+    atr_pct: float | None = None
+    ema_fast: float | None = None
+    ema_slow: float | None = None
+    ema_trend: float | None = None

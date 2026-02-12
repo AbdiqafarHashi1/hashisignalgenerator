@@ -3,6 +3,8 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import logging
+import math
 import time
 from datetime import datetime, timezone
 from typing import Any
@@ -12,6 +14,10 @@ from pydantic import BaseModel, Field
 
 DEFAULT_REST_BASE = "https://api-testnet.bybit.com"
 DEFAULT_WS_PUBLIC_LINEAR = "wss://stream-testnet.bybit.com/v5/public/linear"
+PRICE_SANITY_DEVIATION = 0.10
+
+
+logger = logging.getLogger(__name__)
 
 
 class BybitCandle(BaseModel):
@@ -34,6 +40,9 @@ class BybitKlineSnapshot(BaseModel):
     kline_is_closed: bool
     candle: BybitCandle
     candles: list[BybitCandle] = Field(default_factory=list)
+    provider_name: str = "bybit"
+    provider_category: str = "linear"
+    provider_endpoint: str = "/v5/market/kline"
 
 
 class BybitClient:
@@ -117,6 +126,28 @@ class BybitClient:
         if not candles:
             candles = [_parse_kline(selected_row, interval)]
         candle = _parse_kline(selected_row, interval)
+        if not _is_valid_candle(candle):
+            logger.warning(
+                "price_sanity_failed symbol=%s endpoint=%s reason=invalid_candle o=%s h=%s l=%s c=%s",
+                symbol,
+                f"{self.rest_base}/v5/market/kline",
+                candle.open,
+                candle.high,
+                candle.low,
+                candle.close,
+            )
+            return None
+        if not _price_within_reasonable_band(candle.close, candles):
+            median_close = _median_close(candles)
+            logger.warning(
+                "price_sanity_failed symbol=%s endpoint=%s reason=price_band close=%s median=%s limit_pct=%.2f",
+                symbol,
+                f"{self.rest_base}/v5/market/kline",
+                candle.close,
+                median_close,
+                PRICE_SANITY_DEVIATION * 100,
+            )
+            return None
         return BybitKlineSnapshot(
             symbol=symbol,
             interval=interval,
@@ -127,6 +158,7 @@ class BybitClient:
             kline_is_closed=selected_closed,
             candle=candle,
             candles=candles,
+            provider_endpoint=f"{self.rest_base}/v5/market/kline",
         )
 
     async def fetch_kline_debug_rows(self, symbol: str, interval: str = "5m", limit: int = 3) -> dict[str, Any]:
@@ -365,6 +397,32 @@ def _kline_confirm(raw: Any) -> bool | None:
     if text in {"0", "false", "f", "no", "n"}:
         return False
     return None
+
+
+def _is_valid_candle(candle: BybitCandle) -> bool:
+    values = (candle.open, candle.high, candle.low, candle.close)
+    if any(math.isnan(value) or math.isinf(value) for value in values):
+        return False
+    return candle.high >= candle.low
+
+
+def _median_close(candles: list[BybitCandle]) -> float:
+    closes = sorted(candle.close for candle in candles if not math.isnan(candle.close) and not math.isinf(candle.close))
+    if not closes:
+        return 0.0
+    mid = len(closes) // 2
+    if len(closes) % 2 == 1:
+        return closes[mid]
+    return (closes[mid - 1] + closes[mid]) / 2.0
+
+
+def _price_within_reasonable_band(price: float, candles: list[BybitCandle]) -> bool:
+    if math.isnan(price) or math.isinf(price):
+        return False
+    median_close = _median_close(candles[-20:])
+    if median_close <= 0:
+        return False
+    return abs(price - median_close) / median_close <= PRICE_SANITY_DEVIATION
 
 
 async def fetch_symbol_klines(

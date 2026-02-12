@@ -161,3 +161,32 @@ def test_fetch_candles_never_requests_limit_one() -> None:
         assert client.last_params["limit"] == 2
 
     asyncio.run(run())
+
+
+def test_fetch_candles_returns_none_when_price_band_is_unrealistic() -> None:
+    rows_newest_first = [
+        ["1700000180000", "30000", "35000", "29000", "34000", "20", "0", "0", "true"],
+        ["1700000120000", "100", "101", "99", "100", "20", "0", "0", "true"],
+        ["1700000060000", "101", "102", "100", "101", "20", "0", "0", "true"],
+    ]
+    client = _StubBybitClient(rows_newest_first, now_ms=1700000240000)
+
+    async def run():
+        snapshot = await client.fetch_candles(symbol="BTCUSDT", interval="1m", limit=3)
+        assert snapshot is None
+
+    asyncio.run(run())
+
+
+def test_fetch_candles_returns_none_on_invalid_high_low() -> None:
+    rows_newest_first = [
+        ["1700000180000", "101", "99", "100", "101", "20", "0", "0", "true"],
+        ["1700000120000", "100", "101", "99", "100", "20", "0", "0", "true"],
+    ]
+    client = _StubBybitClient(rows_newest_first, now_ms=1700000240000)
+
+    async def run():
+        snapshot = await client.fetch_candles(symbol="BTCUSDT", interval="1m", limit=2)
+        assert snapshot is None
+
+    asyncio.run(run())

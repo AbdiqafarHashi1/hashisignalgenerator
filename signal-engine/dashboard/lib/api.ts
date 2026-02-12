@@ -64,6 +64,15 @@ export type EngineState = {
   funding_blackout: boolean;
   swings_enabled: boolean;
   current_mode: string;
+  consecutive_losses?: number;
+  last_decision?: string | null;
+  last_skip_reason?: string | null;
+  regime_label?: string | null;
+  allowed_side?: string | null;
+  atr_pct?: number | null;
+  ema_fast?: number | null;
+  ema_slow?: number | null;
+  ema_trend?: number | null;
 };
 
 export const stateEventsUrl = `${API_BASE}/events/state`;

@@ -178,7 +178,8 @@ def _build_engine_state_snapshot() -> EngineState:
     last_tick = scheduler.last_tick_time()
     last_tick_age_seconds = (now - last_tick).total_seconds() if last_tick else None
 
-    current_mode = state_store.get_last_notified_key("__sweet8_current_mode__") or cfg.sweet8_current_mode
+    current_mode = cfg.current_mode
+    decision_meta = state_store.get_decision_meta(risk_symbol)
 
     return EngineState(
         timestamp=now,
@@ -202,6 +203,15 @@ def _build_engine_state_snapshot() -> EngineState:
         funding_blackout=_funding_blackout_active(now, cfg),
         swings_enabled=cfg.sweet8_enabled,
         current_mode=str(current_mode),
+        consecutive_losses=int(risk.get("consecutive_losses", 0) or 0),
+        last_decision=decision_meta.get("decision"),
+        last_skip_reason=decision_meta.get("skip_reason"),
+        regime_label=decision_meta.get("regime_label"),
+        allowed_side=decision_meta.get("allowed_side"),
+        atr_pct=decision_meta.get("atr_pct"),
+        ema_fast=decision_meta.get("ema_fast"),
+        ema_slow=decision_meta.get("ema_slow"),
+        ema_trend=decision_meta.get("ema_trend"),
     )
 
 

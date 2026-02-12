@@ -31,6 +31,7 @@ class StateStore:
         self._symbols: list[str] = []
         self._last_heartbeat_ts: datetime | None = None
         self._last_telegram_update_id: int | None = None
+        self._decision_meta: dict[str, dict[str, object]] = {}
 
     def _today_key(self) -> str:
         return datetime.now(timezone.utc).date().isoformat()
@@ -120,6 +121,15 @@ class StateStore:
         with self._lock:
             self._last_telegram_update_id = value
 
+
+    def set_decision_meta(self, symbol: str, meta: dict[str, object]) -> None:
+        with self._lock:
+            self._decision_meta[symbol] = dict(meta)
+
+    def get_decision_meta(self, symbol: str) -> dict[str, object]:
+        with self._lock:
+            return dict(self._decision_meta.get(symbol, {}))
+
     def record_trade(self, symbol: str) -> None:
         state = self.get_daily_state(symbol)
         with self._lock:
@@ -146,6 +156,7 @@ class StateStore:
             self._last_decision_ts.clear()
             self._last_heartbeat_ts = None
             self._last_telegram_update_id = None
+            self._decision_meta.clear()
 
     def risk_snapshot(self, symbol: str, cfg: Settings, now: datetime) -> dict[str, object]:
         state = self.get_daily_state(symbol)

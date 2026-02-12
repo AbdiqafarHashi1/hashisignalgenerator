@@ -135,3 +135,48 @@ def test_reentry_cooldown_blocks_then_allows(tmp_path):
 
     allowed = trader.maybe_open_trade("ETHUSDT", _plan(), allow_multiple=True)
     assert allowed is not None
+
+
+def test_candle_cross_exit_realism_long_and_deterministic_conflict(tmp_path):
+    settings = _settings(tmp_path)
+    settings.reentry_cooldown_minutes = 0
+    db = Database(settings)
+    trader = PaperTrader(settings, db)
+
+    plan = _plan().model_copy(update={"entry_zone": (2000.0, 2000.0), "stop_loss": 1995.0, "take_profit": 2010.0})
+    trade_id = trader.maybe_open_trade("ETHUSDT", plan, allow_multiple=True)
+    assert trade_id is not None
+
+    not_hit = trader.evaluate_open_trades("ETHUSDT", 2005.0, candle_high=2009.0, candle_low=1999.0)
+    assert not not_hit
+
+    tp_hit = trader.evaluate_open_trades("ETHUSDT", 2005.0, candle_high=2011.0, candle_low=1999.0)
+    assert len(tp_hit) == 1
+    assert tp_hit[0].result == "tp_close"
+
+    trade_id = trader.maybe_open_trade("ETHUSDT", plan, allow_multiple=True)
+    assert trade_id is not None
+    sl_hit = trader.evaluate_open_trades("ETHUSDT", 1997.0, candle_high=2000.0, candle_low=1994.0)
+    assert len(sl_hit) == 1
+    assert sl_hit[0].result == "sl_close"
+
+    trade_id = trader.maybe_open_trade("ETHUSDT", plan, allow_multiple=True)
+    assert trade_id is not None
+    conflict_hit = trader.evaluate_open_trades("ETHUSDT", 2000.0, candle_high=2011.0, candle_low=1994.0)
+    assert len(conflict_hit) == 1
+    assert conflict_hit[0].result == "sl_close"
+
+
+def test_scalp_mode_uses_tighter_reentry_cooldown(tmp_path):
+    settings = _settings(tmp_path)
+    settings.current_mode = "SCALP"
+    settings.scalp_reentry_cooldown_minutes = 30
+    db = Database(settings)
+    trader = PaperTrader(settings, db)
+
+    trade_id = trader.maybe_open_trade("ETHUSDT", _plan(), allow_multiple=True)
+    assert trade_id is not None
+    trader.evaluate_open_trades("ETHUSDT", 2011.0, candle_high=2011.0, candle_low=2000.0)
+
+    blocked = trader.maybe_open_trade("ETHUSDT", _plan(), allow_multiple=True)
+    assert blocked is None

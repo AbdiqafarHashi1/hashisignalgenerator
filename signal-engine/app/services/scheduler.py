@@ -58,6 +58,8 @@ class DecisionScheduler:
         self._last_fetch_counts: dict[str, int] = {}
         self._last_symbol_tick_time: dict[str, datetime] = {}
         self._last_force_trade_ts: dict[str, datetime] = {}
+        self._last_exit_eval_close_ms: dict[str, int] = {}
+        self._last_skip_telegram_ts: dict[str, datetime] = {}
         self._tick_listeners: list[Callable[[], None]] = []
 
         self._stop_event = asyncio.Event()
@@ -172,6 +174,8 @@ class DecisionScheduler:
                         "telegram_sent": False,
                         "trade_opened": False,
                         "trade_id": None,
+                        "decision": "skip",
+                        "skip_reason": "market_data_disabled",
                     }
                 )
             self._notify_tick_listeners()
@@ -202,8 +206,11 @@ class DecisionScheduler:
                             "telegram_sent": False,
                             "trade_opened": False,
                             "trade_id": None,
+                            "decision": "skip",
+                            "skip_reason": "candle_open",
                         }
                     )
+                    self._state.set_decision_meta(symbol, {"decision": "skip", "skip_reason": "candle_open"})
                     continue
                 self._last_snapshots[symbol] = snapshot
                 self._last_fetch_counts[symbol] = len(snapshot.candles)
@@ -211,7 +218,15 @@ class DecisionScheduler:
                     self._auto_close_forced_trades(symbol, snapshot, tick_ts)
                 if self._paper_trader is not None:
                     self._paper_trader.update_mark_price(symbol, snapshot.candle.close)
-                    self._paper_trader.evaluate_open_trades(symbol, snapshot.candle.close)
+                    last_eval_close = self._last_exit_eval_close_ms.get(symbol)
+                    if last_eval_close != snapshot.kline_close_time_ms:
+                        self._paper_trader.evaluate_open_trades(
+                            symbol,
+                            snapshot.candle.close,
+                            candle_high=snapshot.candle.high,
+                            candle_low=snapshot.candle.low,
+                        )
+                        self._last_exit_eval_close_ms[symbol] = snapshot.kline_close_time_ms
                     self._close_time_stop_trades(symbol, snapshot.candle.close, tick_ts)
                 active_mode = self.detect_regime(snapshot)
                 if self._settings.sweet8_enabled:
@@ -247,22 +262,27 @@ class DecisionScheduler:
                         "telegram_sent": False,
                         "trade_opened": False,
                         "trade_id": None,
+                        "decision": "skip",
+                        "skip_reason": f"symbol_error:{type(exc).__name__}",
                     }
                 )
+                self._state.set_decision_meta(symbol, {"decision": "skip", "skip_reason": f"symbol_error:{type(exc).__name__}"})
                 continue
 
             funding_state = _funding_blackout_state(tick_ts, self._settings)
-            if funding_state["close_positions"] and self._paper_trader is not None:
-                should_force_close = False
-                if self._settings.funding_blackout_force_close:
-                    util_pct = self._paper_trader.margin_utilization_pct()
-                    unrealized = self._paper_trader.symbol_unrealized_pnl_usd(symbol)
-                    should_force_close = (
+            if self._paper_trader is not None and self._settings.funding_blackout_force_close:
+                util_pct = self._paper_trader.margin_utilization_pct()
+                unrealized = self._paper_trader.symbol_unrealized_pnl_usd(symbol)
+                should_force_close = (
+                    funding_state["close_positions"]
+                    and (
                         util_pct >= self._settings.funding_blackout_max_util_pct
                         or unrealized <= -abs(self._settings.funding_blackout_max_loss_usd)
                     )
+                )
                 if should_force_close:
                     self._paper_trader.force_close_trades(symbol, snapshot.candle.close, reason="funding_blackout_close")
+                    logger.warning("funding_blackout_forced_close symbol=%s", symbol)
 
             plan: TradePlan | None = None
             reason: str | None = None
@@ -272,10 +292,15 @@ class DecisionScheduler:
             telegram_sent = False
             trade_opened = False
             trade_id: str | None = None
+            decision = "skip"
+            skip_reason: str | None = None
+            scalp_meta: dict[str, object] = {}
             if not snapshot.kline_is_closed:
                 reason = "candle_open"
+                skip_reason = "candle_open"
             elif funding_state["block_new_entries"]:
-                reason = "funding_blackout_blocked"
+                reason = "funding_blackout_entries_blocked"
+                skip_reason = "funding_blackout_entries_blocked"
             else:
                 last_processed = self._state.get_last_processed_close_time_ms(snapshot.symbol)
                 if (
@@ -283,6 +308,7 @@ class DecisionScheduler:
                     and last_processed == snapshot.kline_close_time_ms
                 ):
                     reason = "candle_already_processed"
+                    skip_reason = "candle_already_processed"
                 else:
                     forced_trade = False
                     if force_mode and self._force_trade_due(snapshot.symbol, tick_ts):
@@ -297,6 +323,11 @@ class DecisionScheduler:
                                 update={"strategy": "scalper" if active_mode == "scalper" else "baseline"}
                             )
                         plan = decide(request, self._state, settings_for_decision)
+                    if plan.status == Status.TRADE:
+                        plan, mode_skip_reason, scalp_meta = _apply_mode_overrides(plan, snapshot, self._settings)
+                        if plan.status != Status.TRADE:
+                            reason = mode_skip_reason or "setup_not_confirmed"
+                            skip_reason = mode_skip_reason or "setup_not_confirmed"
                     decision_status = plan.status.value
                     self._state.set_latest_decision(snapshot.symbol, plan)
                     persisted = True
@@ -334,13 +365,14 @@ class DecisionScheduler:
                             snapshot.kline_close_time_ms,
                         )
                     if plan.status == Status.TRADE:
+                        decision = "enter_long" if plan.direction == Direction.long else "enter_short"
                         if forced_trade:
                             dedupe_key = _force_trade_key(snapshot.symbol, plan, tick_ts)
                         else:
                             dedupe_key = _trade_key(snapshot, plan)
                         last_trade_key = self._state.get_last_trade_key(snapshot.symbol)
                         if dedupe_key != last_trade_key:
-                            message = format_trade_message(snapshot.symbol, plan)
+                            message = format_trade_message(snapshot.symbol, plan, snapshot)
                             telegram_sent = await send_telegram_message(message, self._settings)
                             if telegram_sent:
                                 logger.info(
@@ -352,6 +384,7 @@ class DecisionScheduler:
                                 allow_multiple = (
                                     (self._settings.force_trade_mode or self._settings.smoke_test_force_trade)
                                     and self._settings.force_trade_auto_close_seconds == 0
+                                    and self._settings.current_mode != "SCALP"
                                 )
                                 trade_id = self._paper_trader.maybe_open_trade(
                                     snapshot.symbol,
@@ -378,6 +411,8 @@ class DecisionScheduler:
                             )
                 if plan is not None and decision_status is None:
                     decision_status = plan.status.value
+                if plan is not None and plan.status != Status.TRADE and skip_reason is None:
+                    skip_reason = _plan_skip_reason(plan)
             outcome = "waiting"
             reasons: list[str] = []
             if plan is not None:
@@ -399,11 +434,27 @@ class DecisionScheduler:
                 ",".join(reasons),
                 persisted,
             )
+            if skip_reason is None and decision == "skip":
+                skip_reason = reason
+            decision_meta = {
+                "decision": decision,
+                "skip_reason": skip_reason,
+                "regime_label": scalp_meta.get("regime_label"),
+                "allowed_side": scalp_meta.get("allowed_side"),
+                "atr_pct": scalp_meta.get("atr_pct"),
+                "ema_fast": scalp_meta.get("ema_fast"),
+                "ema_slow": scalp_meta.get("ema_slow"),
+                "ema_trend": scalp_meta.get("ema_trend"),
+            }
+            self._state.set_decision_meta(symbol, decision_meta)
+            if self._settings.telegram_debug_skips and decision == "skip":
+                await self._maybe_send_skip_debug(symbol, skip_reason)
             logger.info(
-                "tick symbol=%s ts=%s decision=%s",
+                "tick symbol=%s ts=%s decision=%s skip_reason=%s",
                 symbol,
                 tick_ts.isoformat(),
-                plan.status.value if plan is not None else (reason or "none"),
+                decision,
+                skip_reason,
             )
             results.append(
                 {
@@ -418,10 +469,28 @@ class DecisionScheduler:
                     "telegram_sent": telegram_sent,
                     "trade_opened": trade_opened,
                     "trade_id": trade_id,
+                    "decision": decision,
+                    "skip_reason": skip_reason,
+                    "regime_label": decision_meta.get("regime_label"),
+                    "allowed_side": decision_meta.get("allowed_side"),
+                    "atr_pct": decision_meta.get("atr_pct"),
                 }
             )
         self._notify_tick_listeners()
         return results
+
+
+    async def _maybe_send_skip_debug(self, symbol: str, skip_reason: str | None) -> None:
+        if not skip_reason:
+            return
+        now = datetime.now(timezone.utc)
+        last_sent = self._last_skip_telegram_ts.get(symbol)
+        if last_sent is not None and (now - last_sent).total_seconds() < 600:
+            return
+        message = f"⏭️ Skip\nSymbol: {symbol}\nReason: {skip_reason}"
+        sent = await send_telegram_message(message, self._settings)
+        if sent:
+            self._last_skip_telegram_ts[symbol] = now
 
     def _force_trade_due(self, symbol: str, now: datetime) -> bool:
         last_forced = self._last_force_trade_ts.get(symbol)
@@ -461,12 +530,13 @@ class DecisionScheduler:
             return
         if self._database is None or self._paper_trader is None:
             return
-        if self._settings.max_hold_minutes <= 0:
+        hold_minutes = self._settings.scalp_max_hold_minutes if self._settings.current_mode == "SCALP" else self._settings.max_hold_minutes
+        if hold_minutes <= 0:
             return
         for trade in self._database.fetch_open_trades(symbol):
             opened_at = datetime.fromisoformat(trade.opened_at)
             elapsed_minutes = (now - opened_at).total_seconds() / 60.0
-            if elapsed_minutes >= self._settings.max_hold_minutes:
+            if elapsed_minutes >= hold_minutes:
                 self._paper_trader.force_close_trades(symbol, price, reason="time_stop_close")
 
     def detect_regime(self, snapshot: BybitKlineSnapshot) -> str:
@@ -635,6 +705,248 @@ def _build_decision_request(snapshot: BybitKlineSnapshot) -> DecisionRequest:
             for item in snapshot.candles
         ],
     )
+
+
+
+def _apply_mode_overrides(
+    plan: TradePlan,
+    snapshot: BybitKlineSnapshot,
+    settings: Settings,
+) -> tuple[TradePlan, str | None, dict[str, object]]:
+    if settings.current_mode != "SCALP":
+        return plan, None, {}
+    score = plan.signal_score or 0
+    if score < settings.scalp_min_score:
+        return (
+            plan.model_copy(update={"status": Status.NO_TRADE, "rationale": [*plan.rationale, "scalp_score_below_min"]}),
+            "setup_not_confirmed",
+            {},
+        )
+
+    regime = classify_scalp_regime(snapshot, settings)
+    regime_label = regime["regime_label"]
+    allowed_side = regime["allowed_side"]
+    scalp_meta = {
+        "regime_label": regime_label,
+        "allowed_side": allowed_side,
+        "atr_pct": regime["atr_pct"],
+        "ema_fast": regime["ema_fast"],
+        "ema_slow": regime["ema_slow"],
+        "ema_trend": regime["ema_trend"],
+    }
+
+    if settings.scalp_regime_enabled:
+        if regime_label == "dead":
+            return plan.model_copy(update={"status": Status.NO_TRADE}), "atr_too_low", scalp_meta
+        if regime_label == "too_hot":
+            return plan.model_copy(update={"status": Status.NO_TRADE}), "atr_too_high", scalp_meta
+        if regime_label == "chop":
+            return plan.model_copy(update={"status": Status.NO_TRADE}), "regime_chop", scalp_meta
+        if allowed_side is None:
+            return plan.model_copy(update={"status": Status.NO_TRADE}), "trend_mismatch", scalp_meta
+        if (plan.direction == Direction.long and allowed_side != "long") or (
+            plan.direction == Direction.short and allowed_side != "short"
+        ):
+            return plan.model_copy(update={"status": Status.NO_TRADE}), "trend_mismatch", scalp_meta
+
+    if settings.scalp_trend_filter_enabled:
+        trend_bias = _derive_trend_bias(snapshot)
+        if trend_bias is not None and plan.direction != trend_bias:
+            return plan.model_copy(update={"status": Status.NO_TRADE}), "trend_mismatch", scalp_meta
+
+    if not is_scalp_setup_confirmed(snapshot, settings, plan.direction):
+        return plan.model_copy(update={"status": Status.NO_TRADE}), "setup_not_confirmed", scalp_meta
+
+    entry = snapshot.candle.close
+    if plan.direction == Direction.long:
+        stop_loss = entry * (1 - settings.scalp_sl_pct)
+        take_profit = entry * (1 + settings.scalp_tp_pct)
+    else:
+        stop_loss = entry * (1 + settings.scalp_sl_pct)
+        take_profit = entry * (1 - settings.scalp_tp_pct)
+
+    updated = plan.model_copy(
+        update={
+            "entry_zone": (entry, entry),
+            "stop_loss": stop_loss,
+            "take_profit": take_profit,
+            "rationale": [*plan.rationale, "mode_scalp"],
+        }
+    )
+    return updated, None, scalp_meta
+
+
+def classify_scalp_regime(snapshot: BybitKlineSnapshot, settings: Settings) -> dict[str, object]:
+    closes = [candle.close for candle in snapshot.candles if candle.close > 0]
+    highs = [candle.high for candle in snapshot.candles]
+    lows = [candle.low for candle in snapshot.candles]
+    if not closes:
+        return {"regime_label": "chop", "allowed_side": None, "atr_pct": 0.0, "ema_fast": 0.0, "ema_slow": 0.0, "ema_trend": 0.0}
+
+    close = closes[-1]
+    ema_fast = _ema(closes, settings.scalp_ema_fast)
+    ema_slow = _ema(closes, settings.scalp_ema_slow)
+    ema_trend = _ema(closes, settings.scalp_ema_trend if len(closes) >= settings.scalp_ema_trend else settings.scalp_ema_slow)
+    atr = _atr(highs, lows, closes, settings.scalp_atr_period)
+    atr_pct = (atr / close) if close > 0 else 0.0
+
+    if atr_pct < settings.scalp_atr_pct_min:
+        regime_label = "dead"
+        allowed_side = None
+    elif atr_pct > settings.scalp_atr_pct_max:
+        regime_label = "too_hot"
+        allowed_side = None
+    else:
+        slope = _ema_slope(closes, settings.scalp_ema_slow)
+        if close > ema_trend and ema_fast > ema_slow and slope >= settings.scalp_trend_slope_min:
+            regime_label = "bull"
+            allowed_side = "long"
+        elif close < ema_trend and ema_fast < ema_slow and slope <= -settings.scalp_trend_slope_min:
+            regime_label = "bear"
+            allowed_side = "short"
+        else:
+            regime_label = "chop"
+            allowed_side = None
+
+    return {
+        "regime_label": regime_label,
+        "allowed_side": allowed_side,
+        "atr_pct": atr_pct,
+        "ema_fast": ema_fast,
+        "ema_slow": ema_slow,
+        "ema_trend": ema_trend,
+    }
+
+
+def is_scalp_setup_confirmed(snapshot: BybitKlineSnapshot, settings: Settings, direction: Direction) -> bool:
+    if direction not in {Direction.long, Direction.short}:
+        return False
+    if settings.scalp_setup_mode in {"pullback_engulfing", "either"} and _confirm_pullback_engulfing(snapshot, settings, direction):
+        return True
+    if settings.scalp_setup_mode in {"breakout_retest", "either"} and _confirm_breakout_retest(snapshot, settings, direction):
+        return True
+    return False
+
+
+def _confirm_pullback_engulfing(snapshot: BybitKlineSnapshot, settings: Settings, direction: Direction) -> bool:
+    candles = snapshot.candles
+    if len(candles) < 3:
+        return False
+    closes = [c.close for c in candles]
+    ema_pull = _ema(closes, settings.scalp_pullback_ema)
+    current = candles[-1]
+    prev = candles[-2]
+    dist = abs(current.close - ema_pull) / current.close if current.close > 0 else 1.0
+    if dist > settings.scalp_pullback_max_dist_pct:
+        return False
+
+    current_body = abs(current.close - current.open)
+    min_body = current.close * settings.scalp_engulfing_min_body_pct
+
+    if direction == Direction.long:
+        engulfing = current.close > current.open and prev.close < prev.open and current.open <= prev.close and current.close >= prev.open
+        strong_close = current.close > prev.high and current_body >= min_body
+    else:
+        engulfing = current.close < current.open and prev.close > prev.open and current.open >= prev.close and current.close <= prev.open
+        strong_close = current.close < prev.low and current_body >= min_body
+    if not (engulfing or strong_close):
+        return False
+
+    if settings.scalp_rsi_confirm:
+        rsi = _rsi(closes, settings.scalp_rsi_period)
+        if rsi is None:
+            return False
+        if direction == Direction.long and rsi < settings.scalp_rsi_long_min:
+            return False
+        if direction == Direction.short and rsi > settings.scalp_rsi_short_max:
+            return False
+    return True
+
+
+def _confirm_breakout_retest(snapshot: BybitKlineSnapshot, settings: Settings, direction: Direction) -> bool:
+    candles = snapshot.candles
+    lookback = max(3, settings.scalp_breakout_lookback)
+    if len(candles) < lookback + 2:
+        return False
+    window = candles[-(lookback + settings.scalp_retest_max_bars + 1):]
+    breakout_level = max(c.high for c in window[:lookback]) if direction == Direction.long else min(c.low for c in window[:lookback])
+    for i in range(lookback, len(window)):
+        candle = window[i]
+        if direction == Direction.long and candle.close > breakout_level:
+            retest_window = window[i + 1 : i + 1 + settings.scalp_retest_max_bars]
+            return any(item.low <= breakout_level <= item.close for item in retest_window)
+        if direction == Direction.short and candle.close < breakout_level:
+            retest_window = window[i + 1 : i + 1 + settings.scalp_retest_max_bars]
+            return any(item.high >= breakout_level >= item.close for item in retest_window)
+    return False
+
+
+def _derive_trend_bias(snapshot: BybitKlineSnapshot, lookback: int = 20) -> Direction | None:
+    closes = [candle.close for candle in snapshot.candles[-lookback:] if candle.close > 0]
+    if len(closes) < 4:
+        return None
+    midpoint = len(closes) // 2
+    first_avg = sum(closes[:midpoint]) / midpoint
+    second_avg = sum(closes[midpoint:]) / (len(closes) - midpoint)
+    if second_avg > first_avg:
+        return Direction.long
+    if second_avg < first_avg:
+        return Direction.short
+    return None
+
+
+def _ema(values: list[float], period: int) -> float:
+    period = max(2, min(period, len(values)))
+    alpha = 2 / (period + 1)
+    ema = values[0]
+    for value in values[1:]:
+        ema = (value * alpha) + (ema * (1 - alpha))
+    return ema
+
+
+def _ema_slope(values: list[float], period: int) -> float:
+    if len(values) < period + 2:
+        return 0.0
+    ema_now = _ema(values, period)
+    ema_prev = _ema(values[:-1], period)
+    return ((ema_now - ema_prev) / ema_prev) if ema_prev else 0.0
+
+
+def _atr(highs: list[float], lows: list[float], closes: list[float], period: int) -> float:
+    if len(closes) < period + 1:
+        return 0.0
+    trs: list[float] = []
+    for idx in range(1, len(closes)):
+        trs.append(max(highs[idx] - lows[idx], abs(highs[idx] - closes[idx - 1]), abs(lows[idx] - closes[idx - 1])))
+    return sum(trs[-period:]) / period if len(trs) >= period else 0.0
+
+
+def _rsi(closes: list[float], period: int) -> float | None:
+    if len(closes) < period + 1:
+        return None
+    gains = 0.0
+    losses = 0.0
+    for i in range(-period, 0):
+        diff = closes[i] - closes[i - 1]
+        if diff >= 0:
+            gains += diff
+        else:
+            losses -= diff
+    if losses == 0:
+        return 100.0
+    rs = gains / losses
+    return 100.0 - (100.0 / (1 + rs))
+
+
+def _plan_skip_reason(plan: TradePlan) -> str:
+    rationale = set(plan.rationale)
+    if "cooldown" in rationale:
+        return "cooldown"
+    if "max_losses" in rationale:
+        return "max_consecutive_losses"
+    if "daily_loss_limit" in rationale:
+        return "daily_dd_limit"
+    return "setup_not_confirmed"
 
 
 def _trade_key(snapshot: BybitKlineSnapshot, plan: TradePlan) -> str:

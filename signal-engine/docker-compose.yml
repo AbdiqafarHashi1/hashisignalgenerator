@@ -1,42 +1,32 @@
-﻿services:
+﻿version: "3.9"
+
+services:
   api:
     build: .
     ports:
       - "8000:8000"
+
+    # ✅ SINGLE SOURCE OF TRUTH
+    # Everything comes from .env only
     env_file:
       - .env
-    environment:
-      # Market data
-      MARKET_PROVIDER: "bybit_testnet"
-      MARKET_DATA_ENABLED: "true"
-      BYBIT_API_SECRET: ""
-      BYBIT_API_KEY: ""
-      BYBIT_WS_PUBLIC_LINEAR: "wss://stream-testnet.bybit.com/v5/public/linear"
-      BYBIT_REST_BASE: "https://api-testnet.bybit.com"
-      BYBIT_TESTNET: "true"
-
-      # Scheduler tick speed (THIS is the key)
-      TICK_INTERVAL_SECONDS: "5"
-
-      # Force-trade smoke mode (fast full-cycle testing)
-      SMOKE_TEST_FORCE_TRADE: "false"
-      FORCE_TRADE_MODE: "false"
-      FORCE_TRADE_EVERY_SECONDS: "5"
-      FORCE_TRADE_AUTO_CLOSE_SECONDS: "5"
-      FORCE_TRADE_COOLDOWN_SECONDS: "0"
-      FORCE_TRADE_RANDOM_DIRECTION: "false"
 
     volumes:
       - ./data:/app/data
+
     restart: unless-stopped
+
 
   dashboard:
     build: ./dashboard
     ports:
       - "80:3000"
+
     depends_on:
       - api
+
     environment:
-      NEXT_PUBLIC_API_BASE: "http://localhost:8000"
-      INTERNAL_API_BASE_URL: "http://api:8000"
+      # frontend talks to backend container internally
+      NEXT_PUBLIC_API_BASE: "http://api:8000"
+
     restart: unless-stopped

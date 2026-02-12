@@ -1,8 +1,8 @@
 "use client";
 
 import type { ReactNode } from "react";
-import { useCallback, useEffect, useMemo, useState } from "react";
-import { apiFetch, API_BASE, ApiError, fetchEngineStatus, EngineStatus } from "../../lib/api";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { apiFetch, API_BASE, ApiError, EngineState, stateEventsUrl } from "../../lib/api";
 
 const CONTROL_BUTTONS = [
   { label: "Start", path: "/start" },
@@ -10,117 +10,119 @@ const CONTROL_BUTTONS = [
   { label: "Run Once (Force)", path: "/run?force=true" },
 ];
 
-type AccountSummary = {
-  equity_usd: number;
-  balance_usd: number;
-  unrealized_pnl_usd: number;
-  realized_pnl_today_usd: number;
-  daily_pct: number;
-  trades_today: number;
-  wins_today: number;
-  losses_today: number;
-  win_rate_today: number;
-  profit_factor: number;
-  max_drawdown_pct: number;
-  engine_status: string;
-  last_trade_ts: string | null;
-  equity_curve: number[];
-  pnl_curve: number[];
-};
-
-type RiskSummary = {
-  daily_loss_remaining_usd: number;
-  trades_remaining: number;
-  consecutive_losses: number;
-  cooldown_active: boolean;
-  funding_blackout_active: boolean;
-  sweet8_enabled?: boolean;
-  sweet8_current_mode?: string;
-  open_positions?: number;
-  blocked_premature_exits?: number;
-  daily_loss_pct?: number;
-  risk_per_trade_pct?: number;
-};
-
-type PositionsResponse = { positions: Array<Record<string, unknown>> };
-
-type TradesResponse = { trades: Array<Record<string, unknown>> };
+const MAX_POINTS = 200;
 
 export default function LiveDashboard() {
-  const [summary, setSummary] = useState<AccountSummary | null>(null);
-  const [risk, setRisk] = useState<RiskSummary | null>(null);
-  const [positions, setPositions] = useState<Array<Record<string, unknown>>>([]);
-  const [trades, setTrades] = useState<Array<Record<string, unknown>>>([]);
-  const [engineStatus, setEngineStatus] = useState<EngineStatus | null>(null);
+  const [state, setState] = useState<EngineState | null>(null);
+  const [equityCurve, setEquityCurve] = useState<number[]>([]);
+  const [pnlCurve, setPnlCurve] = useState<number[]>([]);
+  const [isStreamLive, setIsStreamLive] = useState(false);
+  const [lastUpdateAtMs, setLastUpdateAtMs] = useState<number | null>(null);
   const [error, setError] = useState<string>("");
+  const reconnectTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const formatApiError = useCallback((label: string, apiError: ApiError) => {
     return `${label}: ${apiError.message} (Status: ${apiError.status})`;
   }, []);
 
-  const load = useCallback(async () => {
-    try {
-      const [summaryPayload, riskPayload, positionsPayload, tradesPayload] = await Promise.all([
-        apiFetch<AccountSummary>("/account/summary"),
-        apiFetch<RiskSummary>("/risk/summary"),
-        apiFetch<PositionsResponse>("/positions"),
-        apiFetch<TradesResponse>("/trades"),
-      ]);
-      setSummary(summaryPayload);
-      setRisk(riskPayload);
-      setPositions(positionsPayload.positions || []);
-      setTrades((tradesPayload.trades || []).slice(0, 50));
-      setError("");
-    } catch (err) {
-      setError(formatApiError("Dashboard", err as ApiError));
-    }
-  }, [formatApiError]);
+  const pushChartPoints = useCallback((snapshot: EngineState) => {
+    setEquityCurve((prev) => [...prev, snapshot.equity].slice(-MAX_POINTS));
+    setPnlCurve((prev) => [...prev, snapshot.realized_pnl_today_usd].slice(-MAX_POINTS));
+  }, []);
+
+  const applySnapshot = useCallback((snapshot: EngineState) => {
+    setState(snapshot);
+    setLastUpdateAtMs(Date.now());
+    pushChartPoints(snapshot);
+  }, [pushChartPoints]);
 
   useEffect(() => {
-    load();
-    const timer = setInterval(load, 3000);
-    return () => clearInterval(timer);
-  }, [load]);
-
-
-  useEffect(() => {
-    const fetchStatus = async () => {
+    const loadInitial = async () => {
       try {
-        const statusPayload = await fetchEngineStatus();
-        setEngineStatus(statusPayload);
+        const payload = await apiFetch<EngineState>("/state");
+        setEquityCurve([payload.equity]);
+        setPnlCurve([payload.realized_pnl_today_usd]);
+        applySnapshot(payload);
+        setError("");
       } catch (err) {
-        setError(formatApiError("Engine status", err as ApiError));
+        setError(formatApiError("State", err as ApiError));
       }
     };
 
-    fetchStatus();
-    const id = setInterval(fetchStatus, 5000);
-    return () => clearInterval(id);
-  }, [formatApiError]);
+    loadInitial();
+  }, [applySnapshot, formatApiError]);
+
+  useEffect(() => {
+    let source: EventSource | null = null;
+    let cancelled = false;
+
+    const connect = () => {
+      if (cancelled) return;
+      source = new EventSource(stateEventsUrl);
+
+      source.onopen = () => {
+        setIsStreamLive(true);
+      };
+
+      source.onerror = () => {
+        setIsStreamLive(false);
+        source?.close();
+        if (!cancelled) {
+          reconnectTimer.current = setTimeout(connect, 1500);
+        }
+      };
+
+      source.addEventListener("state", (event) => {
+        try {
+          const payload = JSON.parse((event as MessageEvent<string>).data) as EngineState;
+          applySnapshot(payload);
+          setIsStreamLive(true);
+          setError("");
+        } catch {
+          setError("State stream parse error");
+        }
+      });
+    };
+
+    connect();
+
+    return () => {
+      cancelled = true;
+      if (reconnectTimer.current) clearTimeout(reconnectTimer.current);
+      source?.close();
+    };
+  }, [applySnapshot]);
 
   const handleAction = async (path: string) => {
     try {
       await apiFetch(path);
-      await load();
+      const payload = await apiFetch<EngineState>("/state");
+      applySnapshot(payload);
     } catch (err) {
       setError(formatApiError("Action", err as ApiError));
     }
   };
 
-  const statusBadge = useMemo(() => {
-    const isRunning = Boolean(engineStatus?.running);
-    const status = isRunning ? "RUNNING" : "STOPPED";
+  const runningBadge = useMemo(() => {
+    const isRunning = Boolean(state?.running);
     const classes = isRunning ? "bg-emerald-600" : "bg-red-600";
-    return <span className={`rounded-full px-3 py-1 text-xs font-semibold ${classes}`}>{status}</span>;
-  }, [engineStatus?.running]);
+    return <span className={`rounded-full px-3 py-1 text-xs font-semibold ${classes}`}>{isRunning ? "RUNNING" : "STOPPED"}</span>;
+  }, [state?.running]);
 
-  const fmt = (v: number | undefined | null) => (v === undefined || v === null ? "--" : v.toFixed(2));
+  const streamBadge = useMemo(() => {
+    const classes = isStreamLive ? "bg-emerald-700" : "bg-amber-600";
+    return <span className={`rounded-full px-3 py-1 text-xs font-semibold ${classes}`}>{isStreamLive ? "LIVE" : "DISCONNECTED"}</span>;
+  }, [isStreamLive]);
 
-  const lastTickAgeSeconds =
-    typeof engineStatus?.last_tick_ts === "number"
-      ? Math.max(0, Math.floor(Date.now() / 1000 - engineStatus.last_tick_ts))
-      : null;
-  const engineStale = lastTickAgeSeconds !== null && lastTickAgeSeconds > 30;
+  const fmtUsd = (v: number | undefined | null) => (v === undefined || v === null ? "--" : Number(v).toFixed(2));
+  const fmtPct = (v: number | undefined | null, asFraction = false) => {
+    if (v === undefined || v === null) return "--";
+    const num = asFraction ? v * 100 : v;
+    return `${num.toFixed(2)}%`;
+  };
+
+  const lastTickAgeSeconds = state?.last_tick_age_seconds == null ? null : Math.max(0, Math.floor(state.last_tick_age_seconds));
+  const lastUpdateAgeSeconds = lastUpdateAtMs == null ? null : Math.max(0, Math.floor((Date.now() - lastUpdateAtMs) / 1000));
 
   return (
     <div className="min-h-screen bg-slate-950 px-5 py-6 text-slate-100">
@@ -131,46 +133,40 @@ export default function LiveDashboard() {
               <h1 className="text-2xl font-semibold">Professional Trading Dashboard</h1>
               <p className="text-xs text-slate-400">API: {API_BASE}</p>
               <p className="text-xs text-slate-400">Last tick: {lastTickAgeSeconds === null ? "--" : `${lastTickAgeSeconds} seconds ago`}</p>
-              {engineStale ? <p className="text-xs font-semibold text-amber-400">Engine stale</p> : null}
+              <p className="text-xs text-slate-400">Last update age: {lastUpdateAgeSeconds === null ? "--" : `${lastUpdateAgeSeconds} seconds ago`}</p>
             </div>
-            {statusBadge}
+            <div className="flex gap-2">{streamBadge}{runningBadge}</div>
           </div>
         </header>
 
         {error ? <p className="text-sm text-red-400">{error}</p> : null}
 
         <section className="grid gap-3 md:grid-cols-3 xl:grid-cols-5">
-          <Kpi label="Equity" value={fmt(summary?.equity_usd)} />
-          <Kpi label="Balance" value={fmt(summary?.balance_usd)} />
-          <Kpi label="Unrealized PnL" value={fmt(summary?.unrealized_pnl_usd)} />
-          <Kpi label="Realized PnL Today" value={fmt(summary?.realized_pnl_today_usd)} />
-          <Kpi label="Daily %" value={`${fmt(summary?.daily_pct)}%`} />
-          <Kpi label="Trades Today" value={String(summary?.trades_today ?? "--")} />
-          <Kpi label="Wins" value={String(summary?.wins_today ?? "--")} />
-          <Kpi label="Losses" value={String(summary?.losses_today ?? "--")} />
-          <Kpi label="Win Rate" value={`${fmt((summary?.win_rate_today ?? 0) * 100)}%`} />
-          <Kpi label="Profit Factor" value={fmt(summary?.profit_factor)} />
-          <Kpi label="Max DD Today" value={`${fmt(summary?.max_drawdown_pct)}%`} />
-          <Kpi label="Last Trade" value={summary?.last_trade_ts ?? "--"} />
+          <Kpi label="Equity" value={fmtUsd(state?.equity)} />
+          <Kpi label="Balance" value={fmtUsd(state?.balance)} />
+          <Kpi label="Unrealized PnL" value={fmtUsd(state?.unrealized_pnl_usd)} />
+          <Kpi label="Realized PnL Today" value={fmtUsd(state?.realized_pnl_today_usd)} />
+          <Kpi label="Trades Today" value={String(state?.trades_today ?? "--")} />
+          <Kpi label="Wins" value={String(state?.wins ?? "--")} />
+          <Kpi label="Losses" value={String(state?.losses ?? "--")} />
+          <Kpi label="Win Rate" value={fmtPct(state?.win_rate, true)} />
+          <Kpi label="Profit Factor" value={fmtUsd(state?.profit_factor)} />
+          <Kpi label="Max DD Today" value={fmtPct(state?.max_dd_today_pct)} />
         </section>
 
         <section className="grid gap-4 lg:grid-cols-2">
-          <Panel title="Equity Curve"><Spark data={summary?.equity_curve || []} color="#22c55e" /></Panel>
-          <Panel title="PnL Curve"><Spark data={summary?.pnl_curve || []} color="#60a5fa" /></Panel>
+          <Panel title="Equity Curve"><Spark data={equityCurve} color="#22c55e" /></Panel>
+          <Panel title="PnL Curve"><Spark data={pnlCurve} color="#60a5fa" /></Panel>
         </section>
 
         <section className="grid gap-3 md:grid-cols-2 lg:grid-cols-5">
-          <Kpi label="Daily Loss Remaining" value={fmt(risk?.daily_loss_remaining_usd)} />
-          <Kpi label="Trades Remaining" value={String(risk?.trades_remaining ?? "--")} />
-          <Kpi label="Consecutive Losses" value={String(risk?.consecutive_losses ?? "--")} />
-          <Kpi label="Cooldown Active" value={risk?.cooldown_active ? "YES" : "NO"} />
-          <Kpi label="Funding Blackout" value={risk?.funding_blackout_active ? "YES" : "NO"} />
-          <Kpi label="Sweet8 Enabled" value={risk?.sweet8_enabled ? "YES" : "NO"} />
-          <Kpi label="Current Mode" value={risk?.sweet8_current_mode?.toUpperCase() ?? ((engineStatus as any)?.sweet8_current_mode?.toUpperCase?.() || "--")} />
-          <Kpi label="Open Positions" value={String(risk?.open_positions ?? positions.length)} />
-          <Kpi label="Blocked Premature Exits" value={String(risk?.blocked_premature_exits ?? "--")} />
-          <Kpi label="Daily Loss %" value={`${fmt((risk?.daily_loss_pct ?? 0) * 100)}%`} />
-          <Kpi label="Risk per Trade" value={`${fmt((risk?.risk_per_trade_pct ?? 0) * 100)}%`} />
+          <Kpi label="Daily Loss Remaining" value={fmtUsd(state?.daily_loss_remaining_usd)} />
+          <Kpi label="Cooldown Active" value={state?.cooldown_active ? "YES" : "NO"} />
+          <Kpi label="Funding Blackout" value={state?.funding_blackout ? "YES" : "NO"} />
+          <Kpi label="Swings Enabled" value={state?.swings_enabled ? "YES" : "NO"} />
+          <Kpi label="Current Mode" value={state?.current_mode?.toUpperCase() ?? "--"} />
+          <Kpi label="Open Positions" value={String(state?.open_positions?.length ?? 0)} />
+          <Kpi label="Daily Loss %" value={fmtPct(state?.daily_loss_pct, true)} />
         </section>
 
         <section className="rounded-xl border border-binance-border bg-binance-card p-4">
@@ -184,8 +180,8 @@ export default function LiveDashboard() {
         </section>
 
         <section className="grid gap-4 lg:grid-cols-2">
-          <Panel title="Live Trades / Open Positions"><Table rows={positions} emptyLabel="No open positions" /></Panel>
-          <Panel title="Recent Trades"><Table rows={trades} emptyLabel="No trades" /></Panel>
+          <Panel title="Live Trades / Open Positions"><Table rows={state?.open_positions || []} emptyLabel="No open positions" /></Panel>
+          <Panel title="Recent Trades"><Table rows={state?.recent_trades || []} emptyLabel="No trades" /></Panel>
         </section>
       </div>
     </div>

@@ -58,6 +58,7 @@ class DecisionScheduler:
         self._last_fetch_counts: dict[str, int] = {}
         self._last_symbol_tick_time: dict[str, datetime] = {}
         self._last_force_trade_ts: dict[str, datetime] = {}
+        self._tick_listeners: list[Callable[[], None]] = []
 
         self._stop_event = asyncio.Event()
         self._task: asyncio.Task | None = None
@@ -89,6 +90,16 @@ class DecisionScheduler:
 
     def last_symbol_tick_time(self, symbol: str) -> datetime | None:
         return self._last_symbol_tick_time.get(symbol)
+
+    def add_tick_listener(self, listener: Callable[[], None]) -> None:
+        self._tick_listeners.append(listener)
+
+    def _notify_tick_listeners(self) -> None:
+        for listener in self._tick_listeners:
+            try:
+                listener()
+            except Exception:
+                logger.exception("scheduler_tick_listener_error")
 
     async def start(self) -> bool:
         async with self._lock:
@@ -163,6 +174,7 @@ class DecisionScheduler:
                         "trade_id": None,
                     }
                 )
+            self._notify_tick_listeners()
             return results
         for symbol in symbols:
             tick_ts = datetime.now(timezone.utc)
@@ -198,6 +210,7 @@ class DecisionScheduler:
                 if self._settings.force_trade_mode or self._settings.smoke_test_force_trade:
                     self._auto_close_forced_trades(symbol, snapshot, tick_ts)
                 if self._paper_trader is not None:
+                    self._paper_trader.update_mark_price(symbol, snapshot.candle.close)
                     self._paper_trader.evaluate_open_trades(symbol, snapshot.candle.close)
                     self._close_time_stop_trades(symbol, snapshot.candle.close, tick_ts)
                 active_mode = self.detect_regime(snapshot)
@@ -398,6 +411,7 @@ class DecisionScheduler:
                     "trade_id": trade_id,
                 }
             )
+        self._notify_tick_listeners()
         return results
 
     def _force_trade_due(self, symbol: str, now: datetime) -> bool:

@@ -253,7 +253,16 @@ class DecisionScheduler:
 
             funding_state = _funding_blackout_state(tick_ts, self._settings)
             if funding_state["close_positions"] and self._paper_trader is not None:
-                self._paper_trader.force_close_trades(symbol, snapshot.candle.close, reason="funding_blackout_close")
+                should_force_close = False
+                if self._settings.funding_blackout_force_close:
+                    util_pct = self._paper_trader.margin_utilization_pct()
+                    unrealized = self._paper_trader.symbol_unrealized_pnl_usd(symbol)
+                    should_force_close = (
+                        util_pct >= self._settings.funding_blackout_max_util_pct
+                        or unrealized <= -abs(self._settings.funding_blackout_max_loss_usd)
+                    )
+                if should_force_close:
+                    self._paper_trader.force_close_trades(symbol, snapshot.candle.close, reason="funding_blackout_close")
 
             plan: TradePlan | None = None
             reason: str | None = None
@@ -266,7 +275,7 @@ class DecisionScheduler:
             if not snapshot.kline_is_closed:
                 reason = "candle_open"
             elif funding_state["block_new_entries"]:
-                reason = "funding_blackout_active"
+                reason = "funding_blackout_blocked"
             else:
                 last_processed = self._state.get_last_processed_close_time_ms(snapshot.symbol)
                 if (
@@ -452,13 +461,13 @@ class DecisionScheduler:
             return
         if self._database is None or self._paper_trader is None:
             return
-        if self._settings.time_stop_minutes <= 0:
+        if self._settings.max_hold_minutes <= 0:
             return
         for trade in self._database.fetch_open_trades(symbol):
             opened_at = datetime.fromisoformat(trade.opened_at)
             elapsed_minutes = (now - opened_at).total_seconds() / 60.0
-            if elapsed_minutes >= self._settings.time_stop_minutes:
-                self._paper_trader.force_close_trades(symbol, price, reason="time_stop")
+            if elapsed_minutes >= self._settings.max_hold_minutes:
+                self._paper_trader.force_close_trades(symbol, price, reason="time_stop_close")
 
     def detect_regime(self, snapshot: BybitKlineSnapshot) -> str:
         if self._settings.sweet8_mode != "auto":

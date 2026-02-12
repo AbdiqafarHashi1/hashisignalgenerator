@@ -326,3 +326,74 @@ def test_scheduler_loop_survives_tick_exception(monkeypatch) -> None:
         assert scheduler.stop_reason == "TimeoutError: network_timeout"
 
     asyncio.run(run())
+
+
+def test_scheduler_time_stop_closes_old_trade(monkeypatch, tmp_path) -> None:
+    snapshot = _build_snapshot(close_time_ms=8_000_000, closed=True)
+    snapshot.candle.close = 101.0
+    snapshot.price = 101.0
+
+    async def fake_fetch(*args, **kwargs):
+        return snapshot
+
+    def fake_decide(*args, **kwargs):
+        return _trade_plan()
+
+    monkeypatch.setattr(scheduler_module, "fetch_symbol_klines", fake_fetch)
+    monkeypatch.setattr(scheduler_module, "decide", fake_decide)
+
+    settings = Settings(MODE="paper", data_dir=str(tmp_path), max_hold_minutes=1, _env_file=None)
+    state = StateStore()
+    database = Database(settings)
+    paper_trader = PaperTrader(settings, database)
+    scheduler = DecisionScheduler(settings, state, database=database, paper_trader=paper_trader)
+
+    trade_id = paper_trader.maybe_open_trade("BTCUSDT", _trade_plan(), allow_multiple=True)
+    assert trade_id is not None
+    with database._conn:
+        database._conn.execute("UPDATE trades SET opened_at = ? WHERE id = ?", ("2000-01-01T00:00:00+00:00", trade_id))
+
+    async def run():
+        await scheduler.run_once(force=True)
+        closed = [t for t in database.fetch_trades() if t.id == trade_id][0]
+        assert closed.closed_at is not None
+        assert closed.result == "time_stop_close"
+
+    asyncio.run(run())
+
+
+def test_funding_blackout_blocks_entries_without_auto_close(monkeypatch, tmp_path) -> None:
+    snapshot = _build_snapshot(close_time_ms=9_000_000, closed=True)
+    snapshot.candle.close = 101.0
+    snapshot.price = 101.0
+
+    async def fake_fetch(*args, **kwargs):
+        return snapshot
+
+    def fake_decide(*args, **kwargs):
+        return _trade_plan()
+
+    monkeypatch.setattr(scheduler_module, "fetch_symbol_klines", fake_fetch)
+    monkeypatch.setattr(scheduler_module, "decide", fake_decide)
+    monkeypatch.setattr(
+        scheduler_module,
+        "_funding_blackout_state",
+        lambda *args, **kwargs: {"block_new_entries": True, "close_positions": True},
+    )
+
+    settings = Settings(MODE="paper", data_dir=str(tmp_path), funding_blackout_force_close=False, _env_file=None)
+    state = StateStore()
+    database = Database(settings)
+    paper_trader = PaperTrader(settings, database)
+    scheduler = DecisionScheduler(settings, state, database=database, paper_trader=paper_trader)
+
+    trade_id = paper_trader.maybe_open_trade("BTCUSDT", _trade_plan(), allow_multiple=True)
+    assert trade_id is not None
+
+    async def run():
+        results = await scheduler.run_once(force=True)
+        assert results[0]["reason"] == "funding_blackout_blocked"
+        still_open = [t for t in database.fetch_open_trades() if t.id == trade_id]
+        assert len(still_open) == 1
+
+    asyncio.run(run())

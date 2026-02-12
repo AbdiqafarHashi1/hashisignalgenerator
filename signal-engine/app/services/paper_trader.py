@@ -45,6 +45,19 @@ class PaperTrader:
             return 0.0
         return sum((trade.entry * trade.size) / leverage for trade in self._db.fetch_open_trades())
 
+    def margin_utilization_pct(self) -> float:
+        account_size = float(self._settings.account_size or 0.0)
+        if account_size <= 0:
+            return 0.0
+        return (self.total_margin_used_usd() / account_size) * 100.0
+
+    def symbol_unrealized_pnl_usd(self, symbol: str) -> float:
+        total = 0.0
+        for trade in self._db.fetch_open_trades(symbol):
+            mark_price = self._last_mark_prices.get(trade.symbol, trade.entry)
+            total += self._unrealized_pnl(trade.side, trade.entry, mark_price, trade.size)
+        return total
+
     def maybe_open_trade(
         self,
         symbol: str,
@@ -84,13 +97,14 @@ class PaperTrader:
                 return None
             if plan.direction == Direction.long:
                 stop = entry - sl_distance
-                take_profit = entry + tp_distance
+                take_profit = self._cap_take_profit(entry, entry + tp_distance, "long")
                 side = "long"
             else:
                 stop = entry + sl_distance
-                take_profit = entry - tp_distance
+                take_profit = self._cap_take_profit(entry, entry - tp_distance, "short")
                 side = "short"
             entry_with_costs = self._apply_entry_price(side, entry)
+            take_profit = self._cap_take_profit(entry_with_costs, take_profit, side)
             if not self._can_open_trade(entry_with_costs, size):
                 logger.info("paper_trade_rejected symbol=%s reason=insufficient_margin", symbol)
                 return None
@@ -115,6 +129,10 @@ class PaperTrader:
             return None
         side = "long" if plan.direction == Direction.long else "short"
         entry_with_costs = self._apply_entry_price(side, entry)
+        take_profit = self._cap_take_profit(entry_with_costs, plan.take_profit, side)
+        if not self._is_reentry_allowed(symbol, side):
+            logger.info("paper_trade_rejected symbol=%s reason=reentry_cooldown", symbol)
+            return None
         if not self._can_open_trade(entry_with_costs, size):
             logger.info("paper_trade_rejected symbol=%s reason=insufficient_margin", symbol)
             return None
@@ -122,7 +140,7 @@ class PaperTrader:
             symbol=symbol,
             entry=entry_with_costs,
             stop=plan.stop_loss,
-            take_profit=plan.take_profit,
+            take_profit=take_profit,
             size=size,
             side=side,
             opened_at=datetime.now(timezone.utc),
@@ -130,9 +148,9 @@ class PaperTrader:
         )
 
     def force_close_trades(self, symbol: str, price: float, reason: str = "force_close") -> list[PaperTradeResult]:
-        if self._settings.sweet8_enabled and reason in {"time_stop", "force_trade_auto_close"}:
+        if self._settings.sweet8_enabled and reason in {"time_stop_close", "force_trade_auto_close"}:
             self._settings.sweet8_blocked_close_total += 1
-            if reason == "time_stop":
+            if reason == "time_stop_close":
                 self._settings.sweet8_blocked_close_time_stop += 1
             if reason == "force_trade_auto_close":
                 self._settings.sweet8_blocked_close_force += 1
@@ -222,15 +240,34 @@ class PaperTrader:
     ) -> tuple[float, str] | None:
         if side == "long":
             if price <= stop:
-                return stop, "loss"
+                return stop, "sl_close"
             if price >= take_profit:
-                return take_profit, "win"
+                return take_profit, "tp_close"
         else:
             if price >= stop:
-                return stop, "loss"
+                return stop, "sl_close"
             if price <= take_profit:
-                return take_profit, "win"
+                return take_profit, "tp_close"
         return None
+
+    def _is_reentry_allowed(self, symbol: str, side: str) -> bool:
+        cooldown = max(0, self._settings.reentry_cooldown_minutes)
+        if cooldown <= 0:
+            return True
+        for trade in self._db.fetch_trades():
+            if trade.symbol != symbol or trade.closed_at is None:
+                continue
+            if trade.result != "tp_close" or trade.side != side:
+                continue
+            closed_at = datetime.fromisoformat(trade.closed_at)
+            elapsed_minutes = (datetime.now(timezone.utc) - closed_at).total_seconds() / 60.0
+            return elapsed_minutes >= cooldown
+        return True
+
+    def _cap_take_profit(self, entry: float, take_profit: float, side: str) -> float:
+        if side == "long":
+            return min(take_profit, entry * 1.02)
+        return max(take_profit, entry * 0.98)
 
     def _calculate_pnl(
         self,

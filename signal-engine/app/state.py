@@ -32,6 +32,7 @@ class StateStore:
         self._last_heartbeat_ts: datetime | None = None
         self._last_telegram_update_id: int | None = None
         self._decision_meta: dict[str, dict[str, object]] = {}
+        self._skip_reason_counts: dict[str, int] = {}
 
     def _today_key(self) -> str:
         return datetime.now(timezone.utc).date().isoformat()
@@ -126,6 +127,16 @@ class StateStore:
         with self._lock:
             self._decision_meta[symbol] = dict(meta)
 
+    def record_skip_reason(self, reason: str | None) -> None:
+        if not reason:
+            return
+        with self._lock:
+            self._skip_reason_counts[reason] = self._skip_reason_counts.get(reason, 0) + 1
+
+    def skip_reason_counts(self) -> dict[str, int]:
+        with self._lock:
+            return dict(self._skip_reason_counts)
+
     def get_decision_meta(self, symbol: str) -> dict[str, object]:
         with self._lock:
             return dict(self._decision_meta.get(symbol, {}))
@@ -157,6 +168,7 @@ class StateStore:
             self._last_heartbeat_ts = None
             self._last_telegram_update_id = None
             self._decision_meta.clear()
+            self._skip_reason_counts.clear()
 
     def risk_snapshot(self, symbol: str, cfg: Settings, now: datetime) -> dict[str, object]:
         state = self.get_daily_state(symbol)

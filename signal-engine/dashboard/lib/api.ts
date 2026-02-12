@@ -75,6 +75,41 @@ export type EngineState = {
   ema_trend?: number | null;
 };
 
+export type PerformanceTrade = {
+  trade_id: number;
+  symbol: string;
+  entry_time: string;
+  exit_time: string;
+  side: string;
+  entry_price: number;
+  exit_price: number;
+  pnl_usd: number;
+  pnl_pct: number;
+  r_multiple: number;
+  hold_seconds: number;
+  reason: string;
+};
+
+export type PerformanceMetrics = {
+  generated_at: string;
+  trades: PerformanceTrade[];
+  trades_today: number;
+  win_rate: number;
+  avg_win: number;
+  avg_loss: number;
+  expectancy_r: number;
+  profit_factor: number;
+  max_drawdown_pct: number;
+  consecutive_wins: number;
+  consecutive_losses: number;
+  avg_hold_time: number;
+  sharpe_like: number;
+  skip_reason_counts: Record<string, number>;
+  equity_curve: number[];
+  drawdown_curve_pct: number[];
+  win_loss_distribution: Record<string, number>;
+};
+
 export const stateEventsUrl = `${API_BASE}/events/state`;
 
 export async function apiFetch<T>(

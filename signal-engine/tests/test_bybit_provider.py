@@ -7,12 +7,16 @@ from app.providers.bybit import BybitClient, _select_latest_closed_row, _sort_ro
 
 
 class _StubBybitClient(BybitClient):
-    def __init__(self, rows):
+    def __init__(self, rows, now_ms: int = 1_700_000_150_000):
         super().__init__(rest_base="https://example.com")
         self._rows = rows
+        self._now_ms = now_ms
         self.last_params = None
 
     async def _get(self, *args, **kwargs):  # type: ignore[override]
+        path = args[0] if args else kwargs.get("path")
+        if path == "/v5/market/time":
+            return {"retCode": 0, "result": {"timeNano": str(self._now_ms * 1_000_000)}}
         if len(args) >= 2:
             self.last_params = args[1]
         else:
@@ -89,6 +93,37 @@ def test_fetch_candles_normalizes_second_timestamps_and_string_confirm() -> None
         assert snapshot is not None
         assert snapshot.kline_open_time_ms == 120000
         assert snapshot.kline_close_time_ms == 180000
+
+    asyncio.run(run())
+
+
+def test_fetch_candles_returns_none_when_now_is_inside_latest_candle() -> None:
+    rows_newest_first = [
+        ["1700000180000", "101", "102", "99", "101.5", "20", "0", "0"],
+        ["1700000130000", "100", "101", "98", "100.5", "10", "0", "0"],
+    ]
+    client = _StubBybitClient(rows_newest_first, now_ms=1700000185000)
+
+    async def run():
+        snapshot = await client.fetch_candles(symbol="BTCUSDT", interval="1m", limit=2)
+        assert snapshot is None
+
+    asyncio.run(run())
+
+
+def test_fetch_candles_returns_snapshot_when_now_is_past_candle_end() -> None:
+    rows_newest_first = [
+        ["1700000180000", "101", "102", "99", "101.5", "20", "0", "0"],
+        ["1700000130000", "100", "101", "98", "100.5", "10", "0", "0"],
+    ]
+    client = _StubBybitClient(rows_newest_first, now_ms=1700000240000)
+
+    async def run():
+        snapshot = await client.fetch_candles(symbol="BTCUSDT", interval="1m", limit=2)
+        assert snapshot is not None
+        assert snapshot.kline_open_time_ms == 1700000180000
+        assert snapshot.kline_close_time_ms == 1700000240000
+        assert snapshot.kline_is_closed is True
 
     asyncio.run(run())
 

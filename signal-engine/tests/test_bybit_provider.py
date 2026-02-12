@@ -30,8 +30,35 @@ def test_select_previous_closed_row_ignores_newest_even_if_forming() -> None:
     selected, is_closed = _select_previous_closed_row(rows, interval="1m", now_ms=150000)
 
     assert is_closed is True
+    assert selected is not None
     assert int(selected[0]) == 60000
 
+
+def test_select_previous_closed_row_returns_not_ready_when_previous_is_still_open() -> None:
+    rows_newest_first = [
+        ["180000", "102", "103", "101", "102.5", "22", "0", "0", "false"],
+        ["120000", "101", "102", "99", "101.5", "20", "0", "0", "false"],
+    ]
+    rows = _sort_rows_oldest_first(rows_newest_first)
+
+    selected, is_closed = _select_previous_closed_row(rows, interval="1m", now_ms=150000)
+
+    assert selected is None
+    assert is_closed is False
+
+
+def test_fetch_candles_returns_none_when_previous_candle_not_closed() -> None:
+    rows_newest_first = [
+        ["180000", "102", "103", "101", "102.5", "22", "0", "0", "false"],
+        ["120000", "101", "102", "99", "101.5", "20", "0", "0", "false"],
+    ]
+    client = _StubBybitClient(rows_newest_first)
+
+    async def run():
+        snapshot = await client.fetch_candles(symbol="BTCUSDT", interval="1m", limit=2)
+        assert snapshot is None
+
+    asyncio.run(run())
 
 def test_fetch_candles_uses_last_closed_candle_for_snapshot() -> None:
     rows_newest_first = [

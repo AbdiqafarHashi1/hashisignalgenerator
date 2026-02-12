@@ -94,6 +94,7 @@ class BybitClient:
 
     async def fetch_candles(self, symbol: str, interval: str = "5m", limit: int = 120) -> BybitKlineSnapshot | None:
         requested_limit = max(2, min(limit, 1000))
+        now_ms = await self._fetch_server_time_ms()
         data = await self._get(
             "/v5/market/kline",
             {
@@ -106,7 +107,6 @@ class BybitClient:
         rows = data.get("result", {}).get("list", [])
         if len(rows) < 1:
             raise ValueError("Bybit returned no klines")
-        now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
         rows = _sort_rows_oldest_first(rows)
         selected_row, selected_closed = _select_latest_closed_row(rows, interval, now_ms)
         if selected_row is None:
@@ -130,6 +130,8 @@ class BybitClient:
         )
 
     async def fetch_kline_debug_rows(self, symbol: str, interval: str = "5m", limit: int = 3) -> dict[str, Any]:
+        now_ms = await self._fetch_server_time_ms()
+        interval_ms = _interval_to_ms(interval)
         data = await self._get(
             "/v5/market/kline",
             {
@@ -139,17 +141,19 @@ class BybitClient:
                 "limit": max(1, min(limit, 10)),
             },
         )
-        now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
         rows = _sort_rows_oldest_first(data.get("result", {}).get("list", []))
         sampled_rows = rows[-3:]
         return {
             "symbol": symbol,
             "interval": interval,
             "now_ms": now_ms,
+            "interval_ms": interval_ms,
             "rows": [
                 {
                     "raw": row,
                     "start_time_ms": _kline_start_time_ms(row),
+                    "interval_ms": interval_ms,
+                    "end_ms": _kline_start_time_ms(row) + interval_ms,
                     "close_time_ms": _kline_close_time_ms(row, interval),
                     "confirm": _kline_confirm(row),
                     "is_closed": _is_row_closed(row, interval, now_ms),
@@ -157,6 +161,21 @@ class BybitClient:
                 for row in sampled_rows
             ],
         }
+
+    async def _fetch_server_time_ms(self) -> int:
+        data = await self._get("/v5/market/time")
+        result = data.get("result", {})
+        if isinstance(result, dict):
+            time_nano = result.get("timeNano")
+            if time_nano is not None:
+                return int(int(time_nano) / 1_000_000)
+            time_second = result.get("timeSecond")
+            if time_second is not None:
+                return int(time_second) * 1000
+            time_ms = result.get("time")
+            if time_ms is not None:
+                return _timestamp_to_ms(time_ms)
+        raise ValueError("Bybit returned invalid server time payload")
 
     async def fetch_ticker_price(self, symbol: str) -> float:
         data = await self._get(
@@ -268,6 +287,9 @@ def _to_bybit_interval(interval: str) -> str:
 
 
 def _interval_to_ms(interval: str) -> int:
+    normalized = interval.strip().upper()
+    if normalized.isdigit():
+        return int(normalized) * 60_000
     mapping = {
         "1m": 60_000,
         "3m": 180_000,
@@ -277,8 +299,10 @@ def _interval_to_ms(interval: str) -> int:
         "1h": 3_600_000,
         "4h": 14_400_000,
         "1d": 86_400_000,
+        "D": 86_400_000,
+        "W": 604_800_000,
     }
-    return mapping.get(interval.lower(), 300_000)
+    return mapping.get(interval.lower(), mapping.get(normalized, 300_000))
 
 
 def _sort_rows_oldest_first(rows: list[Any]) -> list[Any]:

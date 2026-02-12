@@ -108,6 +108,40 @@ def test_scheduler_waits_when_provider_not_ready_then_processes_closed_candle(mo
 
     asyncio.run(run())
 
+
+
+def test_scheduler_logs_transition_from_candle_open_to_ready(monkeypatch, caplog) -> None:
+    snapshot = _build_snapshot(close_time_ms=7_000_000, closed=True)
+    calls = {"fetch": 0}
+
+    async def fake_fetch(*args, **kwargs):
+        calls["fetch"] += 1
+        if calls["fetch"] == 1:
+            return None
+        return snapshot
+
+    def fake_decide(*args, **kwargs):
+        return _trade_plan()
+
+    monkeypatch.setattr(scheduler_module, "fetch_symbol_klines", fake_fetch)
+    monkeypatch.setattr(scheduler_module, "decide", fake_decide)
+
+    settings = Settings(telegram_enabled=False, _env_file=None)
+    state = StateStore()
+    scheduler = DecisionScheduler(settings, state)
+
+    async def run():
+        await scheduler.run_once()
+        await scheduler.run_once()
+
+    caplog.set_level("INFO")
+    asyncio.run(run())
+
+    logs = "\n".join(record.getMessage() for record in caplog.records)
+    assert "status=not_ready reason=candle_open" in logs
+    assert "candle_fetch symbol=BTCUSDT candles=" in logs
+
+
 def test_scheduler_runs_once_per_candle(monkeypatch) -> None:
     snapshot = _build_snapshot(close_time_ms=2_000_000, closed=True)
     calls = {"decide": 0}

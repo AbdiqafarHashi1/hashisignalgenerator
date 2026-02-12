@@ -167,10 +167,34 @@ class Settings(BaseSettings):
     slippage_bps: float = 1.5
     breakout_volume_multiplier: float = 1.5
     breakout_atr_multiplier: float = 1.2
-    time_stop_minutes: int = 20
+    max_hold_minutes: int = Field(
+        720,
+        validation_alias=AliasChoices(
+            "MAX_HOLD_MINUTES",
+            "max_hold_minutes",
+            "TIME_STOP_MINUTES",
+            "time_stop_minutes",
+        ),
+    )
+    reentry_cooldown_minutes: int = Field(
+        30,
+        validation_alias=AliasChoices("REENTRY_COOLDOWN_MINUTES", "reentry_cooldown_minutes"),
+    )
     funding_block_before_minutes: int = 10
     funding_close_before_minutes: int = 2
     funding_interval_minutes: int = 480
+    funding_blackout_force_close: bool = Field(
+        False,
+        validation_alias=AliasChoices("FUNDING_BLACKOUT_FORCE_CLOSE", "funding_blackout_force_close"),
+    )
+    funding_blackout_max_util_pct: float = Field(
+        70,
+        validation_alias=AliasChoices("FUNDING_BLACKOUT_MAX_UTIL_PCT", "funding_blackout_max_util_pct"),
+    )
+    funding_blackout_max_loss_usd: float = Field(
+        100,
+        validation_alias=AliasChoices("FUNDING_BLACKOUT_MAX_LOSS_USD", "funding_blackout_max_loss_usd"),
+    )
 
     max_losses_per_day: int = 3
 

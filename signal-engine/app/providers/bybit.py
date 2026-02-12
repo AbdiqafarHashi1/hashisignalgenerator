@@ -104,15 +104,15 @@ class BybitClient:
             },
         )
         rows = data.get("result", {}).get("list", [])
-        if len(rows) < 2:
-            raise ValueError("Bybit returned fewer than 2 klines; cannot select previous closed candle")
+        if len(rows) < 1:
+            raise ValueError("Bybit returned no klines")
         now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
         rows = _sort_rows_oldest_first(rows)
-        selected_row, selected_closed = _select_previous_closed_row(rows, interval, now_ms)
+        selected_row, selected_closed = _select_latest_closed_row(rows, interval, now_ms)
         if selected_row is None:
             return None
         selected_open_time_ms = _kline_start_time_ms(selected_row)
-        selected_close_time_ms = selected_open_time_ms + _interval_to_ms(interval)
+        selected_close_time_ms = _kline_close_time_ms(selected_row, interval)
         candles = [_parse_kline(raw, interval) for raw in rows if _is_row_closed(raw, interval, now_ms)]
         if not candles:
             candles = [_parse_kline(selected_row, interval)]
@@ -128,6 +128,35 @@ class BybitClient:
             candle=candle,
             candles=candles,
         )
+
+    async def fetch_kline_debug_rows(self, symbol: str, interval: str = "5m", limit: int = 3) -> dict[str, Any]:
+        data = await self._get(
+            "/v5/market/kline",
+            {
+                "category": "linear",
+                "symbol": symbol,
+                "interval": _to_bybit_interval(interval),
+                "limit": max(1, min(limit, 10)),
+            },
+        )
+        now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+        rows = _sort_rows_oldest_first(data.get("result", {}).get("list", []))
+        sampled_rows = rows[-3:]
+        return {
+            "symbol": symbol,
+            "interval": interval,
+            "now_ms": now_ms,
+            "rows": [
+                {
+                    "raw": row,
+                    "start_time_ms": _kline_start_time_ms(row),
+                    "close_time_ms": _kline_close_time_ms(row, interval),
+                    "confirm": _kline_confirm(row),
+                    "is_closed": _is_row_closed(row, interval, now_ms),
+                }
+                for row in sampled_rows
+            ],
+        }
 
     async def fetch_ticker_price(self, symbol: str) -> float:
         data = await self._get(
@@ -214,16 +243,22 @@ class BybitClient:
 
 def _parse_kline(raw: Any, interval: str) -> BybitCandle:
     open_time_ms = _kline_start_time_ms(raw)
-    close_time_ms = open_time_ms + _interval_to_ms(interval)
+    close_time_ms = _kline_close_time_ms(raw, interval)
     return BybitCandle(
         open_time=datetime.fromtimestamp(open_time_ms / 1000, tz=timezone.utc),
-        open=float(raw[1]),
-        high=float(raw[2]),
-        low=float(raw[3]),
-        close=float(raw[4]),
-        volume=float(raw[5]),
+        open=_kline_float(raw, 1, "openPrice"),
+        high=_kline_float(raw, 2, "highPrice"),
+        low=_kline_float(raw, 3, "lowPrice"),
+        close=_kline_float(raw, 4, "closePrice"),
+        volume=_kline_float(raw, 5, "volume"),
         close_time=datetime.fromtimestamp(close_time_ms / 1000, tz=timezone.utc),
     )
+
+
+def _kline_float(raw: Any, index: int, key: str) -> float:
+    if isinstance(raw, dict):
+        return float(raw.get(key, 0.0))
+    return float(raw[index])
 
 
 def _to_bybit_interval(interval: str) -> str:
@@ -250,25 +285,42 @@ def _sort_rows_oldest_first(rows: list[Any]) -> list[Any]:
     return sorted(rows, key=_kline_start_time_ms)
 
 
-def _select_previous_closed_row(rows: list[Any], interval: str, now_ms: int) -> tuple[Any | None, bool]:
-    previous_row = rows[-2]
-    if not _is_row_closed(previous_row, interval, now_ms):
-        return None, False
-    return previous_row, True
+def _select_latest_closed_row(rows: list[Any], interval: str, now_ms: int) -> tuple[Any | None, bool]:
+    for row in reversed(rows):
+        if _is_row_closed(row, interval, now_ms):
+            return row, True
+    return None, False
 
 
 def _is_row_closed(raw: Any, interval: str, now_ms: int) -> bool:
     confirm = _kline_confirm(raw)
     if confirm is not None:
         return confirm
-    close_time_ms = _kline_start_time_ms(raw) + _interval_to_ms(interval)
+    close_time_ms = _kline_close_time_ms(raw, interval)
     return now_ms >= close_time_ms
 
 
 def _kline_start_time_ms(raw: Any) -> int:
     if isinstance(raw, dict):
-        return int(raw.get("startTime", 0))
-    return int(raw[0])
+        value = raw.get("startTime") or raw.get("openTime") or raw.get("start") or 0
+        return _timestamp_to_ms(value)
+    return _timestamp_to_ms(raw[0])
+
+
+def _kline_close_time_ms(raw: Any, interval: str) -> int:
+    if isinstance(raw, dict):
+        close_value = raw.get("closeTime") or raw.get("endTime")
+        if close_value is not None:
+            return _timestamp_to_ms(close_value)
+    return _kline_start_time_ms(raw) + _interval_to_ms(interval)
+
+
+def _timestamp_to_ms(value: Any) -> int:
+    timestamp = int(float(value))
+    # Handle second-based timestamps from some payloads; normalize to ms.
+    if abs(timestamp) < 10_000_000_000:
+        return timestamp * 1000
+    return timestamp
 
 
 def _kline_confirm(raw: Any) -> bool | None:

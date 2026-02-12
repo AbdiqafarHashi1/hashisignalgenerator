@@ -24,6 +24,7 @@ from .services.stats import compute_stats
 from .storage.store import log_event
 from .strategy.decision import decide
 from .services.scheduler import DecisionScheduler
+from .providers.bybit import BybitClient
 def _as_datetime_utc(value: Any) -> Optional[datetime]:
     """
     Normalize DB timestamps to timezone-aware UTC datetimes.
@@ -648,6 +649,23 @@ async def debug_runtime() -> dict:
             "health_check": storage_health,
         },
     }
+
+
+@app.get("/debug/kline")
+async def debug_kline(interval: str = Query("5m")) -> dict[str, Any]:
+    settings = _require_settings()
+    client = BybitClient(
+        api_key=settings.bybit_api_key,
+        api_secret=settings.bybit_api_secret,
+        rest_base=settings.bybit_rest_base,
+    )
+    symbols = ["BTCUSDT", "ETHUSDT"]
+    output: list[dict[str, Any]] = []
+    for symbol in symbols:
+        debug_rows = await client.fetch_kline_debug_rows(symbol=symbol, interval=interval, limit=3)
+        logger.info("bybit_kline_debug symbol=%s rows=%s", symbol, debug_rows["rows"])
+        output.append(debug_rows)
+    return {"interval": interval, "symbols": output}
 
 
 @app.post("/debug/force_signal")

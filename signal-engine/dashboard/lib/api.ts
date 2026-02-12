@@ -42,6 +42,32 @@ export type EngineStatus = {
   uptime_seconds?: number;
 };
 
+export type EngineState = {
+  timestamp: string;
+  last_tick_age_seconds: number | null;
+  running: boolean;
+  balance: number;
+  equity: number;
+  unrealized_pnl_usd: number;
+  realized_pnl_today_usd: number;
+  trades_today: number;
+  wins: number;
+  losses: number;
+  win_rate: number;
+  profit_factor: number;
+  max_dd_today_pct: number;
+  daily_loss_remaining_usd: number;
+  daily_loss_pct: number;
+  open_positions: Array<Record<string, unknown>>;
+  recent_trades: Array<Record<string, unknown>>;
+  cooldown_active: boolean;
+  funding_blackout: boolean;
+  swings_enabled: boolean;
+  current_mode: string;
+};
+
+export const stateEventsUrl = `${API_BASE}/events/state`;
+
 export async function apiFetch<T>(
   path: string,
   options: RequestInit = {}

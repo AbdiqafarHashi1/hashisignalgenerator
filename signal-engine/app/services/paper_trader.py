@@ -27,6 +27,23 @@ class PaperTrader:
     def __init__(self, settings: Settings, database: Database) -> None:
         self._settings = settings
         self._db = database
+        self._last_mark_prices: dict[str, float] = {}
+
+    def update_mark_price(self, symbol: str, price: float) -> None:
+        self._last_mark_prices[symbol] = price
+
+    def total_unrealized_pnl_usd(self) -> float:
+        total = 0.0
+        for trade in self._db.fetch_open_trades():
+            mark_price = self._last_mark_prices.get(trade.symbol, trade.entry)
+            total += self._unrealized_pnl(trade.side, trade.entry, mark_price, trade.size)
+        return total
+
+    def total_margin_used_usd(self) -> float:
+        leverage = self._effective_leverage()
+        if leverage <= 0:
+            return 0.0
+        return sum((trade.entry * trade.size) / leverage for trade in self._db.fetch_open_trades())
 
     def maybe_open_trade(
         self,
@@ -73,9 +90,13 @@ class PaperTrader:
                 stop = entry + sl_distance
                 take_profit = entry - tp_distance
                 side = "short"
+            entry_with_costs = self._apply_entry_price(side, entry)
+            if not self._can_open_trade(entry_with_costs, size):
+                logger.info("paper_trade_rejected symbol=%s reason=insufficient_margin", symbol)
+                return None
             return self._db.open_trade(
                 symbol=symbol,
-                entry=entry,
+                entry=entry_with_costs,
                 stop=stop,
                 take_profit=take_profit,
                 size=size,
@@ -88,11 +109,18 @@ class PaperTrader:
         if plan.entry_zone is None or plan.stop_loss is None or plan.take_profit is None:
             return None
         entry = sum(plan.entry_zone) / 2.0
-        size = plan.position_size_usd or self._settings.account_size * (plan.risk_pct_used or 0)
+        position_notional = plan.position_size_usd or self._settings.account_size * (plan.risk_pct_used or 0)
+        size = position_notional / entry if entry > 0 else 0.0
+        if size <= 0:
+            return None
         side = "long" if plan.direction == Direction.long else "short"
+        entry_with_costs = self._apply_entry_price(side, entry)
+        if not self._can_open_trade(entry_with_costs, size):
+            logger.info("paper_trade_rejected symbol=%s reason=insufficient_margin", symbol)
+            return None
         return self._db.open_trade(
             symbol=symbol,
-            entry=entry,
+            entry=entry_with_costs,
             stop=plan.stop_loss,
             take_profit=plan.take_profit,
             size=size,
@@ -112,25 +140,7 @@ class PaperTrader:
             return []
         results: list[PaperTradeResult] = []
         for trade in self._db.fetch_open_trades(symbol):
-            pnl_usd, pnl_r = self._calculate_pnl(trade.side, trade.entry, price, trade.stop, trade.size)
-            self._db.close_trade(
-                trade_id=trade.id,
-                exit_price=price,
-                pnl_usd=pnl_usd,
-                pnl_r=pnl_r,
-                closed_at=datetime.now(timezone.utc),
-                result=reason,
-            )
-            results.append(PaperTradeResult(trade.id, trade.symbol, price, pnl_usd, pnl_r, reason))
-        return results
-
-    def evaluate_open_trades(self, symbol: str, price: float) -> list[PaperTradeResult]:
-        results: list[PaperTradeResult] = []
-        for trade in self._db.fetch_open_trades(symbol):
-            hit_result = self._check_exit(trade.side, trade.entry, trade.stop, trade.take_profit, price)
-            if hit_result is None:
-                continue
-            exit_price, result = hit_result
+            exit_price = self._apply_exit_price(trade.side, price)
             pnl_usd, pnl_r = self._calculate_pnl(trade.side, trade.entry, exit_price, trade.stop, trade.size)
             self._db.close_trade(
                 trade_id=trade.id,
@@ -138,10 +148,69 @@ class PaperTrader:
                 pnl_usd=pnl_usd,
                 pnl_r=pnl_r,
                 closed_at=datetime.now(timezone.utc),
+                result=reason,
+            )
+            results.append(PaperTradeResult(trade.id, trade.symbol, exit_price, pnl_usd, pnl_r, reason))
+        return results
+
+    def evaluate_open_trades(self, symbol: str, price: float) -> list[PaperTradeResult]:
+        results: list[PaperTradeResult] = []
+        self.update_mark_price(symbol, price)
+        for trade in self._db.fetch_open_trades(symbol):
+            hit_result = self._check_exit(trade.side, trade.entry, trade.stop, trade.take_profit, price)
+            if hit_result is None:
+                continue
+            exit_price, result = hit_result
+            exit_with_costs = self._apply_exit_price(trade.side, exit_price)
+            pnl_usd, pnl_r = self._calculate_pnl(trade.side, trade.entry, exit_with_costs, trade.stop, trade.size)
+            self._db.close_trade(
+                trade_id=trade.id,
+                exit_price=exit_with_costs,
+                pnl_usd=pnl_usd,
+                pnl_r=pnl_r,
+                closed_at=datetime.now(timezone.utc),
                 result=result,
             )
-            results.append(PaperTradeResult(trade.id, trade.symbol, exit_price, pnl_usd, pnl_r, result))
+            results.append(PaperTradeResult(trade.id, trade.symbol, exit_with_costs, pnl_usd, pnl_r, result))
         return results
+
+    def _effective_leverage(self) -> float:
+        return max(1.0, float(getattr(self._settings, "leverage_elevated", 1.0)))
+
+    def _available_margin(self) -> float:
+        closed_pnl = sum(float(trade.pnl_usd or 0.0) for trade in self._db.fetch_trades() if trade.closed_at)
+        equity = self._settings.account_size + closed_pnl + self.total_unrealized_pnl_usd()
+        return max(0.0, equity - self.total_margin_used_usd())
+
+    def _can_open_trade(self, entry_price: float, qty_base: float) -> bool:
+        leverage = self._effective_leverage()
+        notional = entry_price * qty_base
+        margin_required = notional / leverage if leverage > 0 else notional
+        return margin_required <= self._available_margin()
+
+    def _apply_entry_price(self, side: str, price: float) -> float:
+        spread = self._settings.spread_bps / 10_000
+        slippage = self._settings.slippage_bps / 10_000
+        impact = spread + slippage
+        if side == "long":
+            return price * (1 + impact)
+        return price * (1 - impact)
+
+    def _apply_exit_price(self, side: str, price: float) -> float:
+        spread = self._settings.spread_bps / 10_000
+        slippage = self._settings.slippage_bps / 10_000
+        impact = spread + slippage
+        if side == "long":
+            return price * (1 - impact)
+        return price * (1 + impact)
+
+    def _fees_usd(self, entry: float, exit_price: float, qty_base: float) -> float:
+        fee_rate = self._settings.fee_rate_bps / 10_000
+        return (entry * qty_base + exit_price * qty_base) * fee_rate
+
+    def _unrealized_pnl(self, side: str, entry: float, mark_price: float, qty_base: float) -> float:
+        side_sign = 1.0 if side == "long" else -1.0
+        return (mark_price - entry) * qty_base * side_sign
 
     def _check_exit(
         self,
@@ -171,15 +240,13 @@ class PaperTrader:
         stop: float,
         size: float,
     ) -> tuple[float, float]:
-        if side == "long":
-            pnl_pct = (exit_price - entry) / entry
-            risk_per_unit = (entry - stop)
-            pnl_r = (exit_price - entry) / risk_per_unit if risk_per_unit else 0.0
-        else:
-            pnl_pct = (entry - exit_price) / entry
-            risk_per_unit = (stop - entry)
-            pnl_r = (entry - exit_price) / risk_per_unit if risk_per_unit else 0.0
-        return pnl_pct * size, pnl_r
+        side_sign = 1.0 if side == "long" else -1.0
+        gross_pnl = (exit_price - entry) * size * side_sign
+        fees = self._fees_usd(entry, exit_price, size)
+        pnl_usd = gross_pnl - fees
+        risk_per_unit = abs(entry - stop)
+        pnl_r = ((exit_price - entry) * side_sign) / risk_per_unit if risk_per_unit else 0.0
+        return pnl_usd, pnl_r
 
 
 def _compute_atr(snapshot: BybitKlineSnapshot, period: int = 14) -> float | None:

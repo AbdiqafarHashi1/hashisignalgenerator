@@ -111,3 +111,27 @@ class TradeOutcome(BaseModel):
     pnl_usd: float
     win: bool
     timestamp: datetime
+
+
+class EngineState(BaseModel):
+    timestamp: datetime
+    last_tick_age_seconds: float | None
+    running: bool
+    balance: float
+    equity: float
+    unrealized_pnl_usd: float
+    realized_pnl_today_usd: float
+    trades_today: int
+    wins: int
+    losses: int
+    win_rate: float
+    profit_factor: float
+    max_dd_today_pct: float
+    daily_loss_remaining_usd: float
+    daily_loss_pct: float
+    open_positions: list[dict[str, Any]] = Field(default_factory=list)
+    recent_trades: list[dict[str, Any]] = Field(default_factory=list)
+    cooldown_active: bool
+    funding_blackout: bool
+    swings_enabled: bool
+    current_mode: str

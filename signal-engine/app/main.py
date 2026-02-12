@@ -1,22 +1,23 @@
 ﻿from __future__ import annotations
-from datetime import datetime, timezone
-from typing import Any, Optional
-from contextlib import asynccontextmanager
+
 import asyncio
-import time
-from datetime import datetime, timezone
+import json
 import logging
+import time
+from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, Optional
 from uuid import uuid4
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from .services.notifier import format_trade_message, send_telegram_message
 from .config import Settings, get_settings
-from .models import BiasSignal, DecisionRequest, Direction, MarketSnapshot, Posture, SetupType, Status, TradeOutcome, TradePlan
+from .models import BiasSignal, DecisionRequest, Direction, EngineState, MarketSnapshot, Posture, SetupType, Status, TradeOutcome, TradePlan
 from .state import StateStore
 from .services.database import Database
 from .services.paper_trader import PaperTrader
@@ -90,6 +91,8 @@ last_heartbeat_ts: datetime | None = None
 last_action: str | None = None
 last_correlation_id: str | None = None
 last_status_reason_logged: str | None = None
+state_subscribers: set[asyncio.Queue[str]] = set()
+latest_engine_state: EngineState | None = None
 
 
 def _record_heartbeat() -> None:
@@ -105,6 +108,122 @@ def _record_action(action_type: str) -> None:
 def _record_correlation_id(correlation_id: str) -> None:
     global last_correlation_id
     last_correlation_id = correlation_id
+
+
+def _funding_blackout_active(now: datetime, cfg: Settings) -> bool:
+    minutes = int(now.timestamp() // 60)
+    interval = max(1, cfg.funding_interval_minutes)
+    minute_in_window = minutes % interval
+    block_start = max(0, interval - cfg.funding_block_before_minutes)
+    return minute_in_window >= block_start or minute_in_window <= 1
+
+
+def _trade_to_dict(trade: Any) -> dict[str, Any]:
+    return {
+        "id": trade.id,
+        "symbol": trade.symbol,
+        "entry": trade.entry,
+        "exit": trade.exit,
+        "stop": trade.stop,
+        "take_profit": trade.take_profit,
+        "size": trade.size,
+        "pnl_usd": trade.pnl_usd,
+        "side": trade.side,
+        "opened_at": trade.opened_at,
+        "closed_at": trade.closed_at,
+        "result": trade.result,
+        "trade_mode": trade.trade_mode,
+    }
+
+
+def _build_engine_state_snapshot() -> EngineState:
+    scheduler = _require_scheduler()
+    cfg = _require_settings()
+    db = _require_database()
+    state_store = _require_state()
+    trader = _require_paper_trader()
+    now = datetime.now(timezone.utc)
+
+    trades = db.fetch_trades()
+    summary = compute_stats(trades)
+    start_of_day = now.replace(hour=0, minute=0, second=0, microsecond=0)
+
+    wins = 0
+    losses = 0
+    trades_today = 0
+    realized_pnl_today = 0.0
+    for trade in trades:
+        closed_at_dt = _as_datetime_utc(getattr(trade, "closed_at", None))
+        if closed_at_dt is None or closed_at_dt < start_of_day:
+            continue
+        if getattr(trade, "trade_mode", "paper") == "test":
+            continue
+        pnl = float(getattr(trade, "pnl_usd", None) or 0.0)
+        realized_pnl_today += pnl
+        trades_today += 1
+        if pnl > 0:
+            wins += 1
+        elif pnl < 0:
+            losses += 1
+
+    unrealized = trader.total_unrealized_pnl_usd()
+    balance = cfg.account_size + summary.total_pnl
+    equity = balance + unrealized
+    max_dd_today_pct = (summary.max_drawdown / cfg.account_size) * 100 if cfg.account_size else 0.0
+
+    symbols = state_store.get_symbols()
+    risk_symbol = symbols[0] if symbols else (cfg.symbols[0] if cfg.symbols else "BTCUSDT")
+    risk = state_store.risk_snapshot(risk_symbol, cfg, now)
+
+    last_tick = scheduler.last_tick_time()
+    last_tick_age_seconds = (now - last_tick).total_seconds() if last_tick else None
+
+    current_mode = state_store.get_last_notified_key("__sweet8_current_mode__") or cfg.sweet8_current_mode
+
+    return EngineState(
+        timestamp=now,
+        last_tick_age_seconds=last_tick_age_seconds,
+        running=scheduler.running,
+        balance=balance,
+        equity=equity,
+        unrealized_pnl_usd=unrealized,
+        realized_pnl_today_usd=realized_pnl_today,
+        trades_today=trades_today,
+        wins=wins,
+        losses=losses,
+        win_rate=(wins / trades_today) if trades_today else 0.0,
+        profit_factor=summary.profit_factor,
+        max_dd_today_pct=max_dd_today_pct,
+        daily_loss_remaining_usd=float(risk.get("daily_loss_remaining_usd", 0.0)),
+        daily_loss_pct=float(cfg.max_daily_loss_pct or 0.0),
+        open_positions=[_trade_to_dict(trade) for trade in db.fetch_open_trades()],
+        recent_trades=[_trade_to_dict(trade) for trade in trades[:50]],
+        cooldown_active=bool(risk.get("cooldown_active", False)),
+        funding_blackout=_funding_blackout_active(now, cfg),
+        swings_enabled=cfg.sweet8_enabled,
+        current_mode=str(current_mode),
+    )
+
+
+def _publish_state_snapshot() -> None:
+    global latest_engine_state
+    snapshot = _build_engine_state_snapshot()
+    latest_engine_state = snapshot
+    logger.info(
+        "state_tick_summary equity=%.2f unrealized=%.2f open_positions=%s",
+        snapshot.equity,
+        snapshot.unrealized_pnl_usd,
+        len(snapshot.open_positions),
+    )
+    payload = f"event: state\ndata: {json.dumps(snapshot.model_dump(mode='json'))}\n\n"
+    stale: list[asyncio.Queue[str]] = []
+    for queue in state_subscribers:
+        try:
+            queue.put_nowait(payload)
+        except asyncio.QueueFull:
+            stale.append(queue)
+    for queue in stale:
+        state_subscribers.discard(queue)
 
 
 def _initialize_engine(app: FastAPI) -> None:
@@ -124,6 +243,7 @@ def _initialize_engine(app: FastAPI) -> None:
         interval_seconds=settings.tick_interval_seconds,
         heartbeat_cb=_record_heartbeat,
     )
+    scheduler.add_tick_listener(_publish_state_snapshot)
     running = False
     last_heartbeat_ts = None
     last_action = None
@@ -230,15 +350,40 @@ async def run_once(force: bool = Query(False)) -> dict:
     return {"status": "ok", "results": results}
 
 
-@app.get("/state")
-async def latest_state() -> dict:
-    state_store = _require_state()
-    symbols = state_store.get_symbols()
-    decisions = {}
-    for symbol in symbols:
-        daily_state = state_store.get_daily_state(symbol)
-        decisions[symbol] = daily_state.latest_decision
-    return {"decisions": decisions}
+@app.get("/state", response_model=EngineState)
+async def latest_state() -> EngineState:
+    global latest_engine_state
+    snapshot = _build_engine_state_snapshot()
+    latest_engine_state = snapshot
+    return snapshot
+
+
+@app.get("/events/state")
+async def stream_state_events(request: Request) -> StreamingResponse:
+    queue: asyncio.Queue[str] = asyncio.Queue(maxsize=8)
+    state_subscribers.add(queue)
+    logger.info("state_stream_subscribe subscribers=%s", len(state_subscribers))
+
+    if latest_engine_state is not None:
+        queue.put_nowait(f"event: state\ndata: {json.dumps(latest_engine_state.model_dump(mode='json'))}\n\n")
+    else:
+        queue.put_nowait(f"event: state\ndata: {json.dumps(_build_engine_state_snapshot().model_dump(mode='json'))}\n\n")
+
+    async def event_generator():
+        try:
+            while True:
+                if await request.is_disconnected():
+                    break
+                try:
+                    message = await asyncio.wait_for(queue.get(), timeout=20.0)
+                    yield message
+                except asyncio.TimeoutError:
+                    yield ": keepalive\n\n"
+        finally:
+            state_subscribers.discard(queue)
+            logger.info("state_stream_unsubscribe subscribers=%s", len(state_subscribers))
+
+    return StreamingResponse(event_generator(), media_type="text/event-stream")
 
 
 @app.get("/start")
@@ -254,6 +399,7 @@ async def start_scheduler() -> dict[str, str]:
         logger.error("engine_start status=failed reason=%s", scheduler.stop_reason)
     else:
         logger.info("engine_start status=%s", status)
+    _publish_state_snapshot()
     return {"status": status}
 
 
@@ -270,6 +416,7 @@ async def stop_scheduler() -> dict[str, str]:
     running = scheduler.running
     _record_action("stop")
     logger.info("engine_stop status=%s", "stopped" if stopped else "already_stopped")
+    _publish_state_snapshot()
     return {"status": "stopped" if stopped else "already_stopped"}
 
 
@@ -305,7 +452,7 @@ async def account_summary() -> AccountSummary:
 
     starting_balance = settings.account_size or 0.0
     realized_pnl = summary.total_pnl
-    unrealized_pnl = 0.0
+    unrealized_pnl = _require_paper_trader().total_unrealized_pnl_usd()
     balance = starting_balance + realized_pnl
     equity = balance + unrealized_pnl
     total_pnl = realized_pnl + unrealized_pnl

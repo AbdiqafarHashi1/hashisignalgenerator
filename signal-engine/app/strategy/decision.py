@@ -114,9 +114,10 @@ def _decide_scalper(request: DecisionRequest, state: StateStore, cfg: Settings) 
         )
     min_candles = max(cfg.ema_length, cfg.atr_period + cfg.atr_sma_period + 2)
     if len(candles) < min_candles:
-        rationale.append("no_candles")
-        return TradePlan(
-            status=Status.RISK_OFF,
+        if not cfg.debug_loosen:
+            rationale.append("no_candles")
+            return TradePlan(
+                status=Status.RISK_OFF,
             direction=request.tradingview.direction_hint,
             entry_zone=None,
             stop_loss=None,
@@ -127,7 +128,7 @@ def _decide_scalper(request: DecisionRequest, state: StateStore, cfg: Settings) 
             posture=posture_snapshot.posture,
             rationale=rationale,
             raw_input_snapshot=request.model_dump(),
-        )
+            )
 
     trend_direction, ema = scalper_engine.trend_direction(candles, cfg.ema_length)
     if trend_direction is None or ema is None:
@@ -156,7 +157,7 @@ def _decide_scalper(request: DecisionRequest, state: StateStore, cfg: Settings) 
     else:
         rationale.append("no_valid_setup")
         return TradePlan(
-            status=Status.RISK_OFF,
+            status=Status.NO_TRADE,
             direction=trend_direction,
             entry_zone=None,
             stop_loss=None,

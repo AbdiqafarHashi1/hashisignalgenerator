@@ -173,6 +173,35 @@ def test_scheduler_runs_once_per_candle(monkeypatch) -> None:
     asyncio.run(run())
 
 
+
+
+def test_force_run_bypasses_dedupe_without_force_trade_mode(monkeypatch) -> None:
+    snapshot = _build_snapshot(close_time_ms=8_000_000, closed=True)
+    calls = {"decide": 0}
+
+    async def fake_fetch(*args, **kwargs):
+        return snapshot
+
+    def fake_decide(*args, **kwargs):
+        calls["decide"] += 1
+        return _trade_plan().model_copy(update={"rationale": ["qualified_trade"]})
+
+    monkeypatch.setattr(scheduler_module, "fetch_symbol_klines", fake_fetch)
+    monkeypatch.setattr(scheduler_module, "decide", fake_decide)
+
+    settings = Settings(force_trade_mode=False, smoke_test_force_trade=False, telegram_enabled=False, _env_file=None)
+    state = StateStore()
+    scheduler = DecisionScheduler(settings, state)
+
+    async def run():
+        first = await scheduler.run_once(force=False)
+        assert first[0]["reason"] is None
+        second = await scheduler.run_once(force=True)
+        assert second[0]["reason"] is None
+        assert calls["decide"] == 2
+        assert "force_trade_mode" not in (second[0]["plan"].rationale if second[0]["plan"] else [])
+
+    asyncio.run(run())
 def test_scheduler_dedupes_notifications(monkeypatch) -> None:
     snapshot = _build_snapshot(close_time_ms=3_000_000, closed=True)
     sent = {"count": 0}
@@ -303,6 +332,36 @@ def test_scheduler_symbol_error_isolated(monkeypatch) -> None:
     asyncio.run(run())
 
 
+
+
+def test_scheduler_uses_cached_snapshot_before_next_close(monkeypatch) -> None:
+    from time import time
+    close_time_ms = int(time() // 300 * 300 * 1000)
+    snapshot = _build_snapshot(close_time_ms=close_time_ms, closed=True)
+    calls = {"fetch": 0, "decide": 0}
+
+    async def fake_fetch(*args, **kwargs):
+        calls["fetch"] += 1
+        return snapshot
+
+    def fake_decide(*args, **kwargs):
+        calls["decide"] += 1
+        return _trade_plan().model_copy(update={"status": Status.NO_TRADE, "rationale": ["no_valid_setup"]})
+
+    monkeypatch.setattr(scheduler_module, "fetch_symbol_klines", fake_fetch)
+    monkeypatch.setattr(scheduler_module, "decide", fake_decide)
+
+    settings = Settings(telegram_enabled=False, _env_file=None)
+    state = StateStore()
+    scheduler = DecisionScheduler(settings, state)
+
+    async def run():
+        await scheduler.run_once(force=False)
+        await scheduler.run_once(force=False)
+        assert calls["fetch"] == 1
+        assert calls["decide"] == 1
+
+    asyncio.run(run())
 def test_scheduler_loop_survives_tick_exception(monkeypatch) -> None:
     settings = Settings(telegram_enabled=False, _env_file=None)
     state = StateStore()

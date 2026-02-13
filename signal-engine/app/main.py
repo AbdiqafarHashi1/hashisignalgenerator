@@ -899,6 +899,7 @@ async def debug_force_signal(payload: DebugForceSignalRequest) -> dict:
         "correlation_id": correlation_id,
         "symbol": symbol,
         "plan": plan,
+        "decision": plan,
         "executed": executed,
         "trade_id": trade_id,
     }
@@ -1049,8 +1050,6 @@ def _build_force_plan(
     force_reasons: list[str],
 ) -> TradePlan:
     now = datetime.now(timezone.utc)
-    if force_trade:
-        return _forced_trade_plan(symbol, direction, snapshot, effective_settings, force_reasons)
     hard_gate_reasons = _hard_risk_gate_reasons(symbol, now)
     if hard_gate_reasons:
         return TradePlan(
@@ -1066,6 +1065,8 @@ def _build_force_plan(
             rationale=hard_gate_reasons,
             raw_input_snapshot={"symbol": symbol, "direction": direction.value},
         )
+    if force_trade:
+        return _forced_trade_plan(symbol, direction, snapshot, effective_settings, force_reasons)
     request = _build_force_request(symbol, direction, snapshot)
     plan = decide(request, state, effective_settings)
     if payload.bypass_soft_gates and plan.status in {Status.RISK_OFF, Status.NO_TRADE}:
@@ -1188,7 +1189,7 @@ def _hard_risk_gate_reasons(symbol: str, now: datetime) -> list[str]:
 
 def _fallback_decision(symbol: str) -> TradePlan:
     return TradePlan(
-        status=Status.RISK_OFF,
+        status=Status.NO_TRADE,
         direction=Direction.none,
         entry_zone=None,
         stop_loss=None,
@@ -1196,7 +1197,7 @@ def _fallback_decision(symbol: str) -> TradePlan:
         risk_pct_used=None,
         position_size_usd=None,
         signal_score=None,
-        posture=Posture.RISK_OFF,
+        posture=Posture.NORMAL,
         rationale=["no_decision_yet"],
         raw_input_snapshot={"symbol": symbol},
     )

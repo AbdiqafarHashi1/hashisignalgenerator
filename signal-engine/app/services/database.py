@@ -137,6 +137,18 @@ class Database:
             )
         return int(cursor.lastrowid)
 
+
+    def update_trade_stop(self, trade_id: int, stop: float) -> None:
+        with self._conn:
+            self._conn.execute(
+                """
+                UPDATE trades
+                SET stop = ?
+                WHERE id = ?
+                """,
+                (stop, trade_id),
+            )
+
     def close_trade(
         self,
         trade_id: int,

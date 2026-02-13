@@ -686,3 +686,25 @@ def test_skip_reason_is_atr_too_low_when_regime_blocks(monkeypatch, tmp_path):
         assert state.get_decision_meta("BTCUSDT").get("final_entry_gate") == "atr_too_low"
 
     asyncio.run(run())
+
+
+def test_scheduler_blocks_stale_market_data(monkeypatch) -> None:
+    now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+    snapshot = _build_snapshot(close_time_ms=now_ms - 700_000, closed=True)
+
+    async def fake_fetch(*args, **kwargs):
+        return snapshot
+
+    monkeypatch.setattr(scheduler_module, "fetch_symbol_klines", fake_fetch)
+
+    settings = Settings(telegram_enabled=False, market_data_allow_stale=1, _env_file=None)
+    state = StateStore()
+    scheduler = DecisionScheduler(settings, state)
+
+    async def run() -> None:
+        results = await scheduler.run_once()
+        assert results[0]["reason"] == "MARKET_DATA_STALE"
+        assert results[0]["trade_opened"] is False
+        assert state.get_decision_meta("BTCUSDT").get("market_data_status") == "STALE"
+
+    asyncio.run(run())

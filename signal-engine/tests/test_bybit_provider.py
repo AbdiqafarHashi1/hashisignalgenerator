@@ -190,3 +190,213 @@ def test_fetch_candles_returns_none_on_invalid_high_low() -> None:
         assert snapshot is None
 
     asyncio.run(run())
+
+
+def test_failover_triggers_after_threshold_on_403(monkeypatch) -> None:
+    from app.providers import bybit as bybit_module
+
+    attempts = {"count": 0}
+
+    async def fake_fetch_candles(self, symbol: str, interval: str = "5m", limit: int = 120):
+        attempts["count"] += 1
+        raise bybit_module.MarketDataBlockedError("HTTP_403")
+
+    async def fake_binance(symbol: str, interval: str = "5m", limit: int = 120):
+        candle = bybit_module.BybitCandle(
+            open_time=datetime.now(timezone.utc),
+            close_time=datetime.now(timezone.utc),
+            open=100.0,
+            high=101.0,
+            low=99.0,
+            close=100.5,
+            volume=10.0,
+        )
+        return bybit_module.BybitKlineSnapshot(
+            symbol=symbol,
+            interval=interval,
+            price=100.5,
+            volume=10.0,
+            kline_open_time_ms=1,
+            kline_close_time_ms=2,
+            kline_is_closed=True,
+            candle=candle,
+            candles=[candle],
+            provider_name="binance",
+            provider_category="spot",
+            provider_endpoint="/api/v3/klines",
+        )
+
+    monkeypatch.setattr(bybit_module.BybitClient, "fetch_candles", fake_fetch_candles)
+    monkeypatch.setattr(bybit_module, "_fetch_from_binance", fake_binance)
+
+    async def run() -> None:
+        snapshot = await bybit_module.fetch_symbol_klines(
+            symbol="BTCUSDT",
+            interval="1m",
+            failover_threshold=3,
+            backoff_base_ms=1,
+            backoff_max_ms=2,
+        )
+        assert snapshot is not None
+        assert snapshot.provider_name == "binance"
+        assert attempts["count"] == 1
+
+    asyncio.run(run())
+
+
+def test_failover_not_triggered_on_single_transient_failure(monkeypatch) -> None:
+    from app.providers import bybit as bybit_module
+
+    attempts = {"count": 0}
+
+    async def fake_fetch_candles(self, symbol: str, interval: str = "5m", limit: int = 120):
+        attempts["count"] += 1
+        if attempts["count"] == 1:
+            raise ValueError("transient")
+        candle = bybit_module.BybitCandle(
+            open_time=datetime.now(timezone.utc),
+            close_time=datetime.now(timezone.utc),
+            open=100.0,
+            high=101.0,
+            low=99.0,
+            close=100.5,
+            volume=10.0,
+        )
+        return bybit_module.BybitKlineSnapshot(
+            symbol=symbol,
+            interval=interval,
+            price=100.5,
+            volume=10.0,
+            kline_open_time_ms=1,
+            kline_close_time_ms=2,
+            kline_is_closed=True,
+            candle=candle,
+            candles=[candle],
+            provider_name="bybit",
+            provider_category="linear",
+            provider_endpoint="/v5/market/kline",
+        )
+
+    async def fail_if_called(*args, **kwargs):
+        raise AssertionError("fallback should not be called")
+
+    monkeypatch.setattr(bybit_module.BybitClient, "fetch_candles", fake_fetch_candles)
+    monkeypatch.setattr(bybit_module, "_fetch_from_binance", fail_if_called)
+
+    async def run() -> None:
+        snapshot = await bybit_module.fetch_symbol_klines(
+            symbol="BTCUSDT",
+            interval="1m",
+            failover_threshold=3,
+            backoff_base_ms=1,
+            backoff_max_ms=2,
+        )
+        assert snapshot is not None
+        assert snapshot.provider_name == "bybit"
+        assert attempts["count"] == 2
+
+    asyncio.run(run())
+
+
+def test_failover_triggers_after_threshold_for_consistent_failures(monkeypatch) -> None:
+    from app.providers import bybit as bybit_module
+
+    attempts = {"count": 0}
+
+    async def fake_fetch_candles(self, symbol: str, interval: str = "5m", limit: int = 120):
+        attempts["count"] += 1
+        raise ValueError("upstream_timeout")
+
+    async def fake_binance(symbol: str, interval: str = "5m", limit: int = 120):
+        candle = bybit_module.BybitCandle(
+            open_time=datetime.now(timezone.utc),
+            close_time=datetime.now(timezone.utc),
+            open=100.0,
+            high=101.0,
+            low=99.0,
+            close=100.5,
+            volume=10.0,
+        )
+        return bybit_module.BybitKlineSnapshot(
+            symbol=symbol,
+            interval=interval,
+            price=100.5,
+            volume=10.0,
+            kline_open_time_ms=1,
+            kline_close_time_ms=2,
+            kline_is_closed=True,
+            candle=candle,
+            candles=[candle],
+            provider_name="binance",
+            provider_category="spot",
+            provider_endpoint="/api/v3/klines",
+        )
+
+    monkeypatch.setattr(bybit_module.BybitClient, "fetch_candles", fake_fetch_candles)
+    monkeypatch.setattr(bybit_module, "_fetch_from_binance", fake_binance)
+
+    async def run() -> None:
+        snapshot = await bybit_module.fetch_symbol_klines(
+            symbol="BTCUSDT",
+            interval="1m",
+            failover_threshold=3,
+            backoff_base_ms=1,
+            backoff_max_ms=2,
+        )
+        assert snapshot is not None
+        assert snapshot.provider_name == "binance"
+        assert attempts["count"] == 3
+
+    asyncio.run(run())
+
+
+def test_provider_chain_uses_okx_after_bybit_and_binance_fail(monkeypatch) -> None:
+    from app.providers import bybit as bybit_module
+
+    async def bybit_fail(self, symbol: str, interval: str = "5m", limit: int = 120):
+        raise bybit_module.MarketDataBlockedError("HTTP_403")
+
+    async def binance_fail(*args, **kwargs):
+        raise ValueError("binance_down")
+
+    async def okx_success(*args, **kwargs):
+        candle = bybit_module.BybitCandle(
+            open_time=datetime.now(timezone.utc),
+            close_time=datetime.now(timezone.utc),
+            open=100.0,
+            high=101.0,
+            low=99.0,
+            close=100.5,
+            volume=5.0,
+        )
+        return bybit_module.BybitKlineSnapshot(
+            symbol="BTCUSDT",
+            interval="1m",
+            price=100.5,
+            volume=5.0,
+            kline_open_time_ms=1,
+            kline_close_time_ms=2,
+            kline_is_closed=True,
+            candle=candle,
+            candles=[candle],
+            provider_name="okx",
+            provider_category="swap",
+            provider_endpoint="/api/v5/market/history-candles",
+        )
+
+    monkeypatch.setattr(bybit_module.BybitClient, "fetch_candles", bybit_fail)
+    monkeypatch.setattr(bybit_module, "_fetch_from_binance", binance_fail)
+    monkeypatch.setattr(bybit_module, "_fetch_from_okx", okx_success)
+
+    async def run() -> None:
+        snapshot = await bybit_module.fetch_symbol_klines(
+            symbol="BTCUSDT",
+            interval="1m",
+            provider="bybit",
+            fallback_provider="binance,okx",
+            failover_threshold=3,
+        )
+        assert snapshot is not None
+        assert snapshot.provider_name == "okx"
+
+    asyncio.run(run())

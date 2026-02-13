@@ -167,3 +167,63 @@ def test_symbols_endpoint_normalizes_values() -> None:
         response = client.post("/symbols", json={"symbols": [" btcusdt ", "Ethusdt"]})
         assert response.status_code == 200
         assert response.json()["symbols"] == ["BTCUSDT", "ETHUSDT"]
+
+
+def test_dashboard_overview_contract() -> None:
+    from app import main as main_module
+
+    with TestClient(main_module.app) as client:
+        response = client.get("/dashboard/overview")
+        assert response.status_code == 200
+        payload = response.json()
+        assert "account" in payload
+        assert "risk" in payload
+        assert "activity" in payload
+        assert "symbols" in payload
+        assert "recent_trades" in payload
+
+
+def test_kill_switch_endpoint() -> None:
+    from app import main as main_module
+
+    with TestClient(main_module.app) as client:
+        response = client.post("/engine/kill-switch", params={"enabled": "true"})
+        assert response.status_code == 200
+        assert response.json()["manual_kill_switch"] is True
+
+
+def test_debug_kline_includes_provider(monkeypatch) -> None:
+    from app import main as main_module
+    from app.providers.bybit import BybitCandle, BybitKlineSnapshot
+
+    async def fake_fetch(**kwargs):
+        candle = BybitCandle(
+            open_time=datetime.now(timezone.utc),
+            close_time=datetime.now(timezone.utc),
+            open=100.0,
+            high=101.0,
+            low=99.0,
+            close=100.5,
+            volume=5.0,
+        )
+        return BybitKlineSnapshot(
+            symbol=kwargs["symbol"],
+            interval=kwargs.get("interval", "1m"),
+            price=100.5,
+            volume=5.0,
+            kline_open_time_ms=1,
+            kline_close_time_ms=2,
+            kline_is_closed=True,
+            candle=candle,
+            candles=[candle],
+            provider_name="binance",
+            provider_category="spot",
+            provider_endpoint="/api/v3/klines",
+        )
+
+    monkeypatch.setattr(main_module, "fetch_symbol_klines", fake_fetch)
+    with TestClient(main_module.app) as client:
+        response = client.get("/debug/kline", params={"interval": "1m"})
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["symbols"][0]["provider"] in {"bybit", "binance"}

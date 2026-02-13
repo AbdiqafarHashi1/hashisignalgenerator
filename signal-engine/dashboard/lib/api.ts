@@ -111,6 +111,16 @@ export type PerformanceMetrics = {
   win_loss_distribution: Record<string, number>;
 };
 
+export type DashboardOverview = {
+  account: Record<string, unknown>;
+  risk: Record<string, unknown>;
+  activity: Record<string, unknown>;
+  symbols: Record<string, Record<string, unknown>>;
+  recent_trades: Array<Record<string, unknown>>;
+  equity_curve: Array<{ index: number; equity: number }>;
+  skip_reasons: Record<string, unknown>;
+};
+
 export const stateEventsUrl = `${API_BASE}/events/state`;
 
 export async function apiFetch<T>(

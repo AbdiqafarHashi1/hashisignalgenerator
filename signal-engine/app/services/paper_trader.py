@@ -213,6 +213,26 @@ class PaperTrader:
             results.append(PaperTradeResult(trade.id, trade.symbol, exit_with_costs, pnl_usd, pnl_r, result))
         return results
 
+
+    def move_stop_to_breakeven(self, symbol: str, trigger_r: float = 0.6) -> int:
+        moved = 0
+        for trade in self._db.fetch_open_trades(symbol):
+            risk = abs(trade.entry - trade.stop)
+            if risk <= 0:
+                continue
+            mark = self._last_mark_prices.get(symbol, trade.entry)
+            progress = ((mark - trade.entry) / risk) if trade.side == "long" else ((trade.entry - mark) / risk)
+            if progress < trigger_r:
+                continue
+            breakeven = trade.entry
+            if trade.side == "long" and trade.stop < breakeven:
+                self._db.update_trade_stop(trade.id, breakeven)
+                moved += 1
+            elif trade.side == "short" and trade.stop > breakeven:
+                self._db.update_trade_stop(trade.id, breakeven)
+                moved += 1
+        return moved
+
     def _effective_leverage(self) -> float:
         return max(1.0, float(getattr(self._settings, "leverage_elevated", 1.0)))
 

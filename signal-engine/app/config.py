@@ -4,10 +4,10 @@ from datetime import datetime, time
 from functools import lru_cache
 import json
 import logging
-from typing import Literal
+from typing import Annotated, Literal
 
 from pydantic import AliasChoices, Field, field_validator, model_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 
 class Settings(BaseSettings):
@@ -22,7 +22,10 @@ class Settings(BaseSettings):
     MODE: Literal["prop_cfd", "personal_crypto", "paper", "signal_only"] = "prop_cfd"
     PROFILE: Literal["profit", "diag"] = "profit"
     engine_mode: Literal["paper", "signal_only"] = "signal_only"
-    symbols: list[str] = Field(default_factory=lambda: ["BTCUSDT"], validation_alias=AliasChoices("SYMBOLS", "symbols"))
+    symbols: Annotated[list[str], NoDecode] = Field(
+        default_factory=lambda: ["BTCUSDT"],
+        validation_alias=AliasChoices("SYMBOLS", "symbols"),
+    )
     heartbeat_minutes: int = Field(30, validation_alias=AliasChoices("HEARTBEAT_MINUTES", "heartbeat_minutes"))
     strategy: Literal["scalper", "baseline"] = Field(
         "scalper",
@@ -87,19 +90,56 @@ class Settings(BaseSettings):
         6,
         validation_alias=AliasChoices("SCALP_RETEST_MAX_BARS", "scalp_retest_max_bars"),
     )
+    min_signal_score_trend: int = Field(78, validation_alias=AliasChoices("MIN_SIGNAL_SCORE_TREND", "min_signal_score_trend"))
+    min_signal_score_range: int = Field(70, validation_alias=AliasChoices("MIN_SIGNAL_SCORE_RANGE", "min_signal_score_range"))
+    be_trigger_r_mult: float = Field(0.6, validation_alias=AliasChoices("BE_TRIGGER_R_MULT", "be_trigger_r_mult"))
+    exit_score_min: int = Field(55, validation_alias=AliasChoices("EXIT_SCORE_MIN", "exit_score_min"))
+    pullback_atr_mult: float = Field(0.5, validation_alias=AliasChoices("PULLBACK_ATR_MULT", "pullback_atr_mult"))
+    sl_atr_mult: float = Field(1.0, validation_alias=AliasChoices("SL_ATR_MULT", "sl_atr_mult"))
+    tp_atr_mult: float = Field(1.2, validation_alias=AliasChoices("TP_ATR_MULT", "tp_atr_mult"))
+    dev_atr_mult: float = Field(1.0, validation_alias=AliasChoices("DEV_ATR_MULT", "dev_atr_mult"))
+    range_sl_atr_mult: float = Field(0.8, validation_alias=AliasChoices("RANGE_SL_ATR_MULT", "range_sl_atr_mult"))
+    range_tp_atr_mult: float = Field(1.0, validation_alias=AliasChoices("RANGE_TP_ATR_MULT", "range_tp_atr_mult"))
+    symbol_cooldown_min: int = Field(5, validation_alias=AliasChoices("SYMBOL_COOLDOWN_MIN", "symbol_cooldown_min"))
     debug_loosen: bool = Field(False, validation_alias=AliasChoices("DEBUG_LOOSEN", "debug_loosen"))
     debug_disable_hard_risk_gates: bool = Field(
         False,
         validation_alias=AliasChoices("DEBUG_DISABLE_HARD_RISK_GATES", "debug_disable_hard_risk_gates"),
     )
-    market_provider: str = Field("bybit_testnet", validation_alias=AliasChoices("MARKET_PROVIDER", "market_provider"))
+    market_provider: str = Field("bybit", validation_alias=AliasChoices("MARKET_PROVIDER", "market_provider"))
+    market_data_provider: str = Field("bybit", validation_alias=AliasChoices("MARKET_DATA_PROVIDER", "market_data_provider"))
+    market_data_fallbacks: str = Field("binance,okx,replay", validation_alias=AliasChoices("MARKET_DATA_FALLBACKS", "market_data_fallbacks"))
+    market_data_failover_threshold: int = Field(
+        3,
+        validation_alias=AliasChoices("MARKET_DATA_FAILOVER_THRESHOLD", "market_data_failover_threshold"),
+    )
+    market_data_backoff_base_ms: int = Field(
+        500,
+        validation_alias=AliasChoices("MARKET_DATA_BACKOFF_BASE_MS", "market_data_backoff_base_ms"),
+    )
+    market_data_backoff_max_ms: int = Field(
+        15000,
+        validation_alias=AliasChoices("MARKET_DATA_BACKOFF_MAX_MS", "market_data_backoff_max_ms"),
+    )
+    market_data_replay_path: str = Field(
+        "data/replay",
+        validation_alias=AliasChoices("MARKET_DATA_REPLAY_PATH", "market_data_replay_path"),
+    )
+    market_data_replay_speed: float = Field(
+        1.0,
+        validation_alias=AliasChoices("MARKET_DATA_REPLAY_SPEED", "market_data_replay_speed"),
+    )
+    market_data_allow_stale: int = Field(
+        60,
+        validation_alias=AliasChoices("MARKET_DATA_ALLOW_STALE", "market_data_allow_stale"),
+    )
     market_data_enabled: bool = Field(True, validation_alias=AliasChoices("MARKET_DATA_ENABLED", "market_data_enabled"))
 
-    bybit_testnet: bool = Field(True, validation_alias=AliasChoices("BYBIT_TESTNET", "bybit_testnet"))
+    bybit_testnet: bool = Field(False, validation_alias=AliasChoices("BYBIT_TESTNET", "bybit_testnet"))
     bybit_api_key: str = Field("", validation_alias=AliasChoices("BYBIT_API_KEY", "bybit_api_key"))
     bybit_api_secret: str = Field("", validation_alias=AliasChoices("BYBIT_API_SECRET", "bybit_api_secret"))
-    bybit_rest_base: str = Field("https://api-testnet.bybit.com", validation_alias=AliasChoices("BYBIT_REST_BASE", "bybit_rest_base"))
-    bybit_ws_public_linear: str = Field("wss://stream-testnet.bybit.com/v5/public/linear", validation_alias=AliasChoices("BYBIT_WS_PUBLIC_LINEAR", "bybit_ws_public_linear"))
+    bybit_rest_base: str = Field("https://api.bybit.com", validation_alias=AliasChoices("BYBIT_REST_BASE", "bybit_rest_base"))
+    bybit_ws_public_linear: str = Field("wss://stream.bybit.com/v5/public/linear", validation_alias=AliasChoices("BYBIT_WS_PUBLIC_LINEAR", "bybit_ws_public_linear"))
 
     account_size: float | None = None
     base_risk_pct: float | None = None
@@ -110,6 +150,14 @@ class Settings(BaseSettings):
     daily_profit_target_pct: float | None = None
     max_consecutive_losses: int | None = None
     cooldown_minutes_after_loss: int | None = None
+    global_drawdown_limit_pct: float = Field(
+        0.08,
+        validation_alias=AliasChoices("GLOBAL_DD_LIMIT_PCT", "global_drawdown_limit_pct"),
+    )
+    manual_kill_switch: bool = Field(
+        False,
+        validation_alias=AliasChoices("MANUAL_KILL_SWITCH", "manual_kill_switch"),
+    )
 
     funding_extreme_abs: float = 0.03
     funding_elevated_abs: float = 0.02
@@ -221,9 +269,9 @@ class Settings(BaseSettings):
     volume_confirm_multiplier: float = 1.0
     max_stop_pct: float = 0.0025
     take_profit_pct: float = 0.003
-    fee_rate_bps: float = 5.5
+    fee_rate_bps: float = Field(5.5, validation_alias=AliasChoices("FEE_BPS", "fee_rate_bps"))
     spread_bps: float = 1.5
-    slippage_bps: float = 1.5
+    slippage_bps: float = Field(1.5, validation_alias=AliasChoices("SLIPPAGE_BPS", "slippage_bps"))
     breakout_volume_multiplier: float = 1.5
     breakout_atr_multiplier: float = 1.2
     max_hold_minutes: int = Field(
@@ -280,10 +328,14 @@ class Settings(BaseSettings):
     @classmethod
     def parse_symbols(cls, value: str | list[str]) -> list[str]:
         if isinstance(value, str):
-            try:
-                value = json.loads(value)
-            except json.JSONDecodeError as exc:
-                raise ValueError(f"SYMBOLS must be a JSON list string, got {value!r}") from exc
+            raw = value.strip()
+            if raw.startswith("["):
+                try:
+                    value = json.loads(raw)
+                except json.JSONDecodeError as exc:
+                    raise ValueError(f"SYMBOLS must be a JSON list string or comma-separated list, got {value!r}") from exc
+            else:
+                value = [item.strip() for item in raw.split(",") if item.strip()]
         if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
             raise ValueError(f"SYMBOLS must be a list of strings, got {value!r}")
         return [item.strip().upper() for item in value if item.strip()]
@@ -351,18 +403,18 @@ class Settings(BaseSettings):
     def _profile_defaults(self) -> dict[str, object]:
         if self.PROFILE == "diag":
             return {
-                "candle_interval": "5m",
+                "candle_interval": "1m",
                 "min_signal_score": 35,
                 "trend_strength_min": 0.30,
                 "cooldown_minutes_after_loss": 0,
                 "max_trades_per_day": 50,
             }
         return {
-            "candle_interval": "5m",
+            "candle_interval": "1m",
             "min_signal_score": 60,
             "trend_strength_min": 0.45,
-            "cooldown_minutes_after_loss": 60,
-            "max_trades_per_day": 30,
+            "cooldown_minutes_after_loss": 10,
+            "max_trades_per_day": 8,
         }
 
     def blackout_windows(self) -> list[tuple[time, time]]:
@@ -430,9 +482,21 @@ class Settings(BaseSettings):
             "scalp_rsi_short_max": self.scalp_rsi_short_max,
             "scalp_breakout_lookback": self.scalp_breakout_lookback,
             "scalp_retest_max_bars": self.scalp_retest_max_bars,
+            "min_signal_score_trend": self.min_signal_score_trend,
+            "min_signal_score_range": self.min_signal_score_range,
+            "be_trigger_r_mult": self.be_trigger_r_mult,
+            "exit_score_min": self.exit_score_min,
+            "pullback_atr_mult": self.pullback_atr_mult,
+            "sl_atr_mult": self.sl_atr_mult,
+            "tp_atr_mult": self.tp_atr_mult,
+            "dev_atr_mult": self.dev_atr_mult,
+            "range_sl_atr_mult": self.range_sl_atr_mult,
+            "range_tp_atr_mult": self.range_tp_atr_mult,
+            "symbol_cooldown_min": self.symbol_cooldown_min,
             "daily_max_dd_pct": self.daily_max_dd_pct,
             "telegram_debug_skips": self.telegram_debug_skips,
             "max_daily_loss_pct": self.max_daily_loss_pct,
+            "global_drawdown_limit_pct": self.global_drawdown_limit_pct,
             "base_risk_pct": self.base_risk_pct,
             "max_risk_pct": self.max_risk_pct,
             "news_blackouts": self.news_blackouts,
@@ -440,10 +504,19 @@ class Settings(BaseSettings):
             "debug_disable_hard_risk_gates": self.debug_disable_hard_risk_gates,
             "strategy": self.strategy,
             "market_provider": self.market_provider,
+            "market_data_provider": self.market_data_provider,
+            "market_data_fallbacks": self.market_data_fallbacks,
+            "market_data_replay_path": self.market_data_replay_path,
+            "market_data_replay_speed": self.market_data_replay_speed,
+            "market_data_allow_stale": self.market_data_allow_stale,
+            "market_data_failover_threshold": self.market_data_failover_threshold,
+            "market_data_backoff_base_ms": self.market_data_backoff_base_ms,
+            "market_data_backoff_max_ms": self.market_data_backoff_max_ms,
             "market_data_enabled": self.market_data_enabled,
             "bybit_testnet": self.bybit_testnet,
             "bybit_rest_base": self.bybit_rest_base,
             "bybit_ws_public_linear": self.bybit_ws_public_linear,
+            "manual_kill_switch": self.manual_kill_switch,
             "smoke_test_force_trade": self.smoke_test_force_trade,
             "sweet8_enabled": self.sweet8_enabled,
             "sweet8_mode": self.sweet8_mode,

@@ -22,6 +22,7 @@ from ..models import (
 from ..state import StateStore
 from ..strategy.decision import decide
 from ..providers.bybit import BybitKlineSnapshot, fetch_symbol_klines
+from ..utils.intervals import interval_to_ms
 from .notifier import format_trade_message, send_telegram_message
 
 logger = logging.getLogger(__name__)
@@ -60,6 +61,7 @@ class DecisionScheduler:
         self._last_force_trade_ts: dict[str, datetime] = {}
         self._last_exit_eval_close_ms: dict[str, int] = {}
         self._last_skip_telegram_ts: dict[str, datetime] = {}
+        self._next_fetch_after_ms: dict[str, int] = {}
         self._tick_listeners: list[Callable[[], None]] = []
 
         self._stop_event = asyncio.Event()
@@ -148,6 +150,7 @@ class DecisionScheduler:
         symbols = list(self._settings.symbols)
         self._last_tick_time = datetime.now(timezone.utc)
         force_mode = force or self._settings.smoke_test_force_trade or self._settings.force_trade_mode
+        dedupe_bypass = force
         logger.info("scheduler_tick_start symbols=%s force=%s", ",".join(symbols), force_mode)
         if force_mode:
             logger.info("FORCE MODE ACTIVE")
@@ -186,12 +189,17 @@ class DecisionScheduler:
             tick_ts = datetime.now(timezone.utc)
             self._last_symbol_tick_time[symbol] = tick_ts
             try:
-                snapshot = await fetch_symbol_klines(
-                    symbol=symbol,
-                    interval=self._settings.candle_interval,
-                    limit=self._settings.candle_history_limit,
-                    rest_base=self._settings.bybit_rest_base,
-                )
+                snapshot = self._last_snapshots.get(symbol)
+                now_ms = int(tick_ts.timestamp() * 1000)
+                next_fetch_after_ms = self._next_fetch_after_ms.get(symbol, 0)
+                should_refresh = snapshot is None or force_mode or now_ms >= next_fetch_after_ms
+                if should_refresh:
+                    snapshot = await fetch_symbol_klines(
+                        symbol=symbol,
+                        interval=self._settings.candle_interval,
+                        limit=self._settings.candle_history_limit,
+                        rest_base=self._settings.bybit_rest_base,
+                    )
                 if snapshot is None:
                     logger.info("candle_fetch symbol=%s status=not_ready reason=candle_open", symbol)
                     self._last_fetch_counts[symbol] = 0
@@ -217,6 +225,7 @@ class DecisionScheduler:
                     continue
                 self._last_snapshots[symbol] = snapshot
                 self._last_fetch_counts[symbol] = len(snapshot.candles)
+                self._next_fetch_after_ms[symbol] = snapshot.kline_close_time_ms + interval_to_ms(snapshot.interval)
                 if self._settings.force_trade_mode or self._settings.smoke_test_force_trade:
                     self._auto_close_forced_trades(symbol, snapshot, tick_ts)
                 if self._paper_trader is not None:
@@ -316,14 +325,14 @@ class DecisionScheduler:
             else:
                 last_processed = self._state.get_last_processed_close_time_ms(snapshot.symbol)
                 if (
-                    not force_mode
+                    not dedupe_bypass
                     and last_processed == snapshot.kline_close_time_ms
                 ):
                     reason = "candle_already_processed"
                     skip_reason = "candle_already_processed"
                 else:
                     forced_trade = False
-                    if force_mode and self._force_trade_due(snapshot.symbol, tick_ts):
+                    if (self._settings.force_trade_mode or self._settings.smoke_test_force_trade) and self._force_trade_due(snapshot.symbol, tick_ts):
                         plan = _build_forced_trade_plan(snapshot, self._settings)
                         self._last_force_trade_ts[snapshot.symbol] = tick_ts
                         forced_trade = True
@@ -771,8 +780,9 @@ def _apply_mode_overrides(
         if trend_bias is not None and plan.direction != trend_bias:
             return plan.model_copy(update={"status": Status.NO_TRADE}), "trend_mismatch", scalp_meta
 
-    setup_confirmed, setup_reason = scalp_setup_gate_reason(snapshot, settings, plan.direction)
+    setup_confirmed = is_scalp_setup_confirmed(snapshot, settings, plan.direction)
     if not setup_confirmed:
+        _, setup_reason = scalp_setup_gate_reason(snapshot, settings, plan.direction)
         return plan.model_copy(update={"status": Status.NO_TRADE}), setup_reason, scalp_meta
 
     entry = snapshot.candle.close
@@ -973,6 +983,13 @@ def _plan_skip_reason(plan: TradePlan) -> str:
         return "max_consecutive_losses"
     if "daily_loss_limit" in rationale:
         return "daily_dd_limit"
+    if "max_losses_per_day" in rationale:
+        return "max_losses_per_day"
+    if "max_trades" in rationale:
+        return "max_trades"
+    for soft_reason in ("no_valid_setup", "setup_not_confirmed", "atr_too_low", "no_trend", "no_candles"):
+        if soft_reason in rationale:
+            return soft_reason
     if plan.rationale:
         return f"setup_not_confirmed:{plan.rationale[0]}"
     return "setup_not_confirmed"

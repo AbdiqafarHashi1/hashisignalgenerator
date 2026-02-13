@@ -6,11 +6,14 @@ import json
 import logging
 import math
 import time
+import asyncio
 from datetime import datetime, timezone
 from typing import Any
 
 import httpx
 from pydantic import BaseModel, Field
+
+from ..utils.intervals import interval_to_ms
 
 DEFAULT_REST_BASE = "https://api-testnet.bybit.com"
 DEFAULT_WS_PUBLIC_LINEAR = "wss://stream-testnet.bybit.com/v5/public/linear"
@@ -18,6 +21,10 @@ PRICE_SANITY_DEVIATION = 0.10
 
 
 logger = logging.getLogger(__name__)
+
+
+class BybitRateLimitError(ValueError):
+    pass
 
 
 class BybitCandle(BaseModel):
@@ -86,7 +93,11 @@ class BybitClient:
             response.raise_for_status()
             data = response.json()
         if data.get("retCode") != 0:
-            raise ValueError(f"Bybit error: {data.get('retMsg')} ({data.get('retCode')})")
+            ret_code = data.get("retCode")
+            message = f"Bybit error: {data.get('retMsg')} ({ret_code})"
+            if ret_code == 10006:
+                raise BybitRateLimitError(message)
+            raise ValueError(message)
         return data
 
     async def _post(self, path: str, body: dict[str, Any], signed: bool = True) -> dict[str, Any]:
@@ -98,7 +109,11 @@ class BybitClient:
             response.raise_for_status()
             data = response.json()
         if data.get("retCode") != 0:
-            raise ValueError(f"Bybit error: {data.get('retMsg')} ({data.get('retCode')})")
+            ret_code = data.get("retCode")
+            message = f"Bybit error: {data.get('retMsg')} ({ret_code})"
+            if ret_code == 10006:
+                raise BybitRateLimitError(message)
+            raise ValueError(message)
         return data
 
     async def fetch_candles(self, symbol: str, interval: str = "5m", limit: int = 120) -> BybitKlineSnapshot | None:
@@ -163,7 +178,7 @@ class BybitClient:
 
     async def fetch_kline_debug_rows(self, symbol: str, interval: str = "5m", limit: int = 3) -> dict[str, Any]:
         now_ms = await self._fetch_server_time_ms()
-        interval_ms = _interval_to_ms(interval)
+        interval_ms = interval_to_ms(interval)
         data = await self._get(
             "/v5/market/kline",
             {
@@ -319,22 +334,7 @@ def _to_bybit_interval(interval: str) -> str:
 
 
 def _interval_to_ms(interval: str) -> int:
-    normalized = interval.strip().upper()
-    if normalized.isdigit():
-        return int(normalized) * 60_000
-    mapping = {
-        "1m": 60_000,
-        "3m": 180_000,
-        "5m": 300_000,
-        "15m": 900_000,
-        "30m": 1_800_000,
-        "1h": 3_600_000,
-        "4h": 14_400_000,
-        "1d": 86_400_000,
-        "D": 86_400_000,
-        "W": 604_800_000,
-    }
-    return mapping.get(interval.lower(), mapping.get(normalized, 300_000))
+    return interval_to_ms(interval)
 
 
 def _sort_rows_oldest_first(rows: list[Any]) -> list[Any]:
@@ -432,4 +432,16 @@ async def fetch_symbol_klines(
     rest_base: str = DEFAULT_REST_BASE,
 ) -> BybitKlineSnapshot | None:
     client = BybitClient(rest_base=rest_base)
+    backoff_schedule = [0.25, 0.5, 1.0]
+    for attempt, sleep_seconds in enumerate(backoff_schedule, start=1):
+        try:
+            return await client.fetch_candles(symbol=symbol, interval=interval, limit=limit)
+        except BybitRateLimitError:
+            logger.warning(
+                "bybit_rate_limit symbol=%s interval=%s attempt=%s",
+                symbol,
+                interval,
+                attempt,
+            )
+            await asyncio.sleep(sleep_seconds)
     return await client.fetch_candles(symbol=symbol, interval=interval, limit=limit)

@@ -180,3 +180,19 @@ def test_scalp_mode_uses_tighter_reentry_cooldown(tmp_path):
 
     blocked = trader.maybe_open_trade("ETHUSDT", _plan(), allow_multiple=True)
     assert blocked is None
+
+
+def test_zero_global_reentry_cooldown_allows_immediate_reentry_in_scalp_mode(tmp_path):
+    settings = _settings(tmp_path)
+    settings.current_mode = "SCALP"
+    settings.reentry_cooldown_minutes = 0
+    settings.scalp_reentry_cooldown_minutes = 30
+    db = Database(settings)
+    trader = PaperTrader(settings, db)
+
+    trade_id = trader.maybe_open_trade("ETHUSDT", _plan(), allow_multiple=True)
+    assert trade_id is not None
+    trader.evaluate_open_trades("ETHUSDT", 2011.0, candle_high=2011.0, candle_low=2000.0)
+
+    reopened = trader.maybe_open_trade("ETHUSDT", _plan(), allow_multiple=True)
+    assert reopened is not None

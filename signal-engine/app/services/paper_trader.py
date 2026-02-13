@@ -306,6 +306,9 @@ class PaperTrader:
         return None
 
     def _is_reentry_allowed(self, symbol: str, side: str) -> bool:
+        # Global override: explicit zero disables re-entry cooldown checks in all modes.
+        if max(0, self._settings.reentry_cooldown_minutes) == 0:
+            return True
         cooldown = (
             max(0, self._settings.scalp_reentry_cooldown_minutes)
             if self._settings.current_mode == "SCALP"

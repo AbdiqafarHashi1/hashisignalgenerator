@@ -158,3 +158,12 @@ def test_scheduler_state_persists_across_requests(monkeypatch) -> None:
         assert payload["scheduler"]["last_tick_time"] is not None
         symbol = payload["symbols"][0]
         assert symbol["candles_fetched_count"] == len(snapshot.candles)
+
+
+def test_symbols_endpoint_normalizes_values() -> None:
+    from app import main as main_module
+
+    with TestClient(main_module.app) as client:
+        response = client.post("/symbols", json={"symbols": [" btcusdt ", "Ethusdt"]})
+        assert response.status_code == 200
+        assert response.json()["symbols"] == ["BTCUSDT", "ETHUSDT"]

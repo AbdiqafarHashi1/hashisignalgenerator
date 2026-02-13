@@ -239,9 +239,18 @@ class Settings(BaseSettings):
         30,
         validation_alias=AliasChoices("REENTRY_COOLDOWN_MINUTES", "reentry_cooldown_minutes"),
     )
-    funding_block_before_minutes: int = 10
-    funding_close_before_minutes: int = 2
-    funding_interval_minutes: int = 480
+    funding_block_before_minutes: int = Field(
+        10,
+        validation_alias=AliasChoices("FUNDING_BLOCK_BEFORE_MINUTES", "funding_block_before_minutes"),
+    )
+    funding_close_before_minutes: int = Field(
+        2,
+        validation_alias=AliasChoices("FUNDING_CLOSE_BEFORE_MINUTES", "funding_close_before_minutes"),
+    )
+    funding_interval_minutes: int = Field(
+        480,
+        validation_alias=AliasChoices("FUNDING_INTERVAL_MINUTES", "funding_interval_minutes"),
+    )
     funding_blackout_force_close: bool = Field(
         False,
         validation_alias=AliasChoices("FUNDING_BLACKOUT_FORCE_CLOSE", "funding_blackout_force_close"),

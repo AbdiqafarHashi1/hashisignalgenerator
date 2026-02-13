@@ -13,7 +13,7 @@ const resolveApiBase = (): string => {
 
   const isLocalhost =
     window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1";
-  return isLocalhost ? DEFAULT_DEV_API_BASE : DEFAULT_DOCKER_API_BASE;
+  return isLocalhost ? DEFAULT_DEV_API_BASE : "/api";
 };
 
 export const API_BASE = resolveApiBase();
@@ -67,6 +67,7 @@ export type EngineState = {
   consecutive_losses?: number;
   last_decision?: string | null;
   last_skip_reason?: string | null;
+  final_entry_gate?: string | null;
   regime_label?: string | null;
   allowed_side?: string | null;
   atr_pct?: number | null;

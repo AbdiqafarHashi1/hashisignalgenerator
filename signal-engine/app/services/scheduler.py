@@ -269,7 +269,15 @@ class DecisionScheduler:
                         "skip_reason": f"symbol_error:{type(exc).__name__}",
                     }
                 )
-                self._state.set_decision_meta(symbol, {"decision": "skip", "skip_reason": f"symbol_error:{type(exc).__name__}"})
+                symbol_error_reason = f"symbol_error:{type(exc).__name__}"
+                self._state.set_decision_meta(
+                    symbol,
+                    {
+                        "decision": "skip",
+                        "skip_reason": symbol_error_reason,
+                        "final_entry_gate": symbol_error_reason,
+                    },
+                )
                 self._state.record_skip_reason(f"symbol_error:{type(exc).__name__}")
                 continue
 
@@ -440,9 +448,11 @@ class DecisionScheduler:
             )
             if skip_reason is None and decision == "skip":
                 skip_reason = reason
+            final_entry_gate = skip_reason if decision == "skip" else None
             decision_meta = {
                 "decision": decision,
                 "skip_reason": skip_reason,
+                "final_entry_gate": final_entry_gate,
                 "regime_label": scalp_meta.get("regime_label"),
                 "allowed_side": scalp_meta.get("allowed_side"),
                 "atr_pct": scalp_meta.get("atr_pct"),
@@ -477,6 +487,7 @@ class DecisionScheduler:
                     "trade_id": trade_id,
                     "decision": decision,
                     "skip_reason": skip_reason,
+                    "final_entry_gate": final_entry_gate,
                     "regime_label": decision_meta.get("regime_label"),
                     "allowed_side": decision_meta.get("allowed_side"),
                     "atr_pct": decision_meta.get("atr_pct"),
@@ -760,8 +771,9 @@ def _apply_mode_overrides(
         if trend_bias is not None and plan.direction != trend_bias:
             return plan.model_copy(update={"status": Status.NO_TRADE}), "trend_mismatch", scalp_meta
 
-    if not is_scalp_setup_confirmed(snapshot, settings, plan.direction):
-        return plan.model_copy(update={"status": Status.NO_TRADE}), "setup_not_confirmed", scalp_meta
+    setup_confirmed, setup_reason = scalp_setup_gate_reason(snapshot, settings, plan.direction)
+    if not setup_confirmed:
+        return plan.model_copy(update={"status": Status.NO_TRADE}), setup_reason, scalp_meta
 
     entry = snapshot.candle.close
     if plan.direction == Direction.long:
@@ -825,13 +837,22 @@ def classify_scalp_regime(snapshot: BybitKlineSnapshot, settings: Settings) -> d
 
 
 def is_scalp_setup_confirmed(snapshot: BybitKlineSnapshot, settings: Settings, direction: Direction) -> bool:
+    confirmed, _ = scalp_setup_gate_reason(snapshot, settings, direction)
+    return confirmed
+
+
+def scalp_setup_gate_reason(
+    snapshot: BybitKlineSnapshot,
+    settings: Settings,
+    direction: Direction,
+) -> tuple[bool, str]:
     if direction not in {Direction.long, Direction.short}:
-        return False
+        return False, "setup_invalid_direction"
     if settings.scalp_setup_mode in {"pullback_engulfing", "either"} and _confirm_pullback_engulfing(snapshot, settings, direction):
-        return True
+        return True, ""
     if settings.scalp_setup_mode in {"breakout_retest", "either"} and _confirm_breakout_retest(snapshot, settings, direction):
-        return True
-    return False
+        return True, ""
+    return False, f"setup_not_confirmed:{settings.scalp_setup_mode}"
 
 
 def _confirm_pullback_engulfing(snapshot: BybitKlineSnapshot, settings: Settings, direction: Direction) -> bool:
@@ -952,6 +973,8 @@ def _plan_skip_reason(plan: TradePlan) -> str:
         return "max_consecutive_losses"
     if "daily_loss_limit" in rationale:
         return "daily_dd_limit"
+    if plan.rationale:
+        return f"setup_not_confirmed:{plan.rationale[0]}"
     return "setup_not_confirmed"
 
 

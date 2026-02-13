@@ -25,8 +25,7 @@ services:
     depends_on:
       - api
 
-    environment:
-      # frontend talks to backend container internally
-      NEXT_PUBLIC_API_BASE: "http://api:8000"
+    env_file:
+      - .env
 
     restart: unless-stopped

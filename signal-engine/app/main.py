@@ -208,6 +208,7 @@ def _build_engine_state_snapshot() -> EngineState:
         consecutive_losses=int(risk.get("consecutive_losses", 0) or 0),
         last_decision=decision_meta.get("decision"),
         last_skip_reason=decision_meta.get("skip_reason"),
+        final_entry_gate=decision_meta.get("final_entry_gate"),
         regime_label=decision_meta.get("regime_label"),
         allowed_side=decision_meta.get("allowed_side"),
         atr_pct=decision_meta.get("atr_pct"),
@@ -605,7 +606,10 @@ async def update_symbols(payload: dict) -> dict:
     symbols = payload.get("symbols", [])
     if not isinstance(symbols, list) or not all(isinstance(item, str) for item in symbols):
         raise HTTPException(status_code=400, detail="invalid_symbols")
-    state_store.set_symbols(symbols)
+    normalized = [item.strip().upper() for item in symbols if item and item.strip()]
+    if not normalized:
+        raise HTTPException(status_code=400, detail="invalid_symbols")
+    state_store.set_symbols(normalized)
     return {"symbols": state_store.get_symbols()}
 
 

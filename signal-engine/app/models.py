@@ -138,6 +138,7 @@ class EngineState(BaseModel):
     consecutive_losses: int = 0
     last_decision: str | None = None
     last_skip_reason: str | None = None
+    final_entry_gate: str | None = None
     regime_label: str | None = None
     allowed_side: str | None = None
     atr_pct: float | None = None

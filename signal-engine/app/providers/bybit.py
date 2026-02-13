@@ -7,6 +7,7 @@ import logging
 import math
 import time
 import asyncio
+import random
 from datetime import datetime, timezone
 from typing import Any
 
@@ -14,6 +15,9 @@ import httpx
 from pydantic import BaseModel, Field
 
 from ..utils.intervals import interval_to_ms
+from .binance import fetch_symbol_klines as fetch_binance_symbol_klines
+from .okx import fetch_symbol_klines as fetch_okx_symbol_klines
+from .replay import ReplayProvider
 
 DEFAULT_REST_BASE = "https://api-testnet.bybit.com"
 DEFAULT_WS_PUBLIC_LINEAR = "wss://stream-testnet.bybit.com/v5/public/linear"
@@ -21,9 +25,14 @@ PRICE_SANITY_DEVIATION = 0.10
 
 
 logger = logging.getLogger(__name__)
+_replay_providers: dict[str, ReplayProvider] = {}
 
 
 class BybitRateLimitError(ValueError):
+    pass
+
+
+class MarketDataBlockedError(ValueError):
     pass
 
 
@@ -430,18 +439,218 @@ async def fetch_symbol_klines(
     interval: str = "5m",
     limit: int = 120,
     rest_base: str = DEFAULT_REST_BASE,
+    provider: str = "bybit",
+    fallback_provider: str = "binance,okx",
+    failover_threshold: int = 3,
+    backoff_base_ms: int = 500,
+    backoff_max_ms: int = 15000,
+    replay_path: str = "data/replay",
+    replay_speed: float = 1.0,
 ) -> BybitKlineSnapshot | None:
+    provider_normalized = (provider or "bybit").lower()
+    fallback_order = _parse_fallbacks(fallback_provider)
+    if provider_normalized == "replay":
+        return await _fetch_from_replay(symbol=symbol, interval=interval, limit=limit, replay_path=replay_path, replay_speed=replay_speed)
+    if provider_normalized == "binance":
+        return await _fetch_from_binance(symbol=symbol, interval=interval, limit=limit)
+    if provider_normalized == "okx":
+        return await _fetch_from_okx(symbol=symbol, interval=interval, limit=limit)
+    if provider_normalized != "bybit":
+        raise ValueError(f"unsupported_market_data_provider:{provider_normalized}")
+
     client = BybitClient(rest_base=rest_base)
-    backoff_schedule = [0.25, 0.5, 1.0]
-    for attempt, sleep_seconds in enumerate(backoff_schedule, start=1):
+    threshold = max(1, int(failover_threshold or 1))
+    backoff_base = max(50, int(backoff_base_ms or 500))
+    backoff_cap = max(backoff_base, int(backoff_max_ms or 15000))
+
+    for attempt in range(1, threshold + 1):
         try:
-            return await client.fetch_candles(symbol=symbol, interval=interval, limit=limit)
-        except BybitRateLimitError:
+            snapshot = await client.fetch_candles(symbol=symbol, interval=interval, limit=limit)
+            if snapshot is not None:
+                snapshot.provider_name = "bybit"
+            return snapshot
+        except Exception as exc:
+            reason = _bybit_error_reason(exc)
+            blocked = _is_blocking_error(exc)
             logger.warning(
-                "bybit_rate_limit symbol=%s interval=%s attempt=%s",
+                "market_data_primary_error provider=bybit symbol=%s interval=%s attempt=%s reason=%s",
                 symbol,
                 interval,
                 attempt,
+                reason,
             )
-            await asyncio.sleep(sleep_seconds)
-    return await client.fetch_candles(symbol=symbol, interval=interval, limit=limit)
+            if blocked:
+                return await _try_fallback_chain(
+                    fallback_order,
+                    symbol=symbol,
+                    interval=interval,
+                    limit=limit,
+                    replay_path=replay_path,
+                    replay_speed=replay_speed,
+                    trigger_reason=reason,
+                )
+            if attempt >= threshold:
+                break
+            delay_ms = min(backoff_cap, backoff_base * (2 ** (attempt - 1)))
+            jitter = random.uniform(0, delay_ms * 0.2)
+            await asyncio.sleep((delay_ms + jitter) / 1000)
+
+    return await _try_fallback_chain(
+        fallback_order,
+        symbol=symbol,
+        interval=interval,
+        limit=limit,
+        replay_path=replay_path,
+        replay_speed=replay_speed,
+        trigger_reason="threshold_exceeded",
+    )
+
+
+async def _try_fallback_chain(
+    fallbacks: list[str],
+    *,
+    symbol: str,
+    interval: str,
+    limit: int,
+    replay_path: str,
+    replay_speed: float,
+    trigger_reason: str,
+) -> BybitKlineSnapshot:
+    logger.warning("market_data_failover_trigger symbol=%s reason=%s chain=%s", symbol, trigger_reason, ",".join(fallbacks))
+    errors: list[str] = []
+    for fallback in fallbacks:
+        try:
+            if fallback == "binance":
+                return await _fetch_from_binance(symbol=symbol, interval=interval, limit=limit)
+            if fallback == "okx":
+                return await _fetch_from_okx(symbol=symbol, interval=interval, limit=limit)
+            if fallback == "replay":
+                return await _fetch_from_replay(symbol=symbol, interval=interval, limit=limit, replay_path=replay_path, replay_speed=replay_speed)
+        except Exception as exc:
+            errors.append(f"{fallback}:{type(exc).__name__}")
+            continue
+    raise MarketDataBlockedError("MARKET_DATA_BLOCKED:" + "|".join(errors or ["no_fallback"]))
+
+
+def _parse_fallbacks(value: str) -> list[str]:
+    raw = (value or "binance,okx,replay").strip()
+    return [item.strip().lower() for item in raw.split(",") if item.strip()]
+
+
+def _is_blocking_error(exc: Exception) -> bool:
+    if isinstance(exc, BybitRateLimitError):
+        return True
+    if isinstance(exc, httpx.HTTPStatusError):
+        return exc.response.status_code in {401, 403, 418, 429}
+    message = str(exc)
+    return any(code in message for code in ("10006", "401", "403", "418", "429", "ProxyError", "Forbidden"))
+
+
+def _bybit_error_reason(exc: Exception) -> str:
+    if isinstance(exc, BybitRateLimitError):
+        return "BYBIT_RATE_LIMIT_10006"
+    if isinstance(exc, httpx.HTTPStatusError):
+        return f"HTTP_{exc.response.status_code}"
+    if isinstance(exc, httpx.ProxyError):
+        return "HTTP_PROXY_403"
+    txt = str(exc)
+    if "10006" in txt:
+        return "BYBIT_RATE_LIMIT_10006"
+    return type(exc).__name__
+
+
+async def _fetch_from_binance(symbol: str, interval: str, limit: int) -> BybitKlineSnapshot:
+    fallback = await fetch_binance_symbol_klines(symbol=symbol, interval=interval, limit=limit)
+    candles = [
+        BybitCandle(
+            open_time=item.open_time,
+            open=item.open,
+            high=item.high,
+            low=item.low,
+            close=item.close,
+            volume=item.volume,
+            close_time=item.close_time,
+        )
+        for item in fallback.candles
+    ]
+    candle = candles[-1]
+    return BybitKlineSnapshot(
+        symbol=fallback.symbol,
+        interval=fallback.interval,
+        price=fallback.price,
+        volume=fallback.volume,
+        kline_open_time_ms=fallback.kline_open_time_ms,
+        kline_close_time_ms=fallback.kline_close_time_ms,
+        kline_is_closed=fallback.kline_is_closed,
+        candle=candle,
+        candles=candles,
+        provider_name="binance",
+        provider_category="spot",
+        provider_endpoint="/api/v3/klines",
+    )
+
+
+async def _fetch_from_okx(symbol: str, interval: str, limit: int) -> BybitKlineSnapshot:
+    fallback = await fetch_okx_symbol_klines(symbol=symbol, interval=interval, limit=limit)
+    candles = [
+        BybitCandle(
+            open_time=item.open_time,
+            open=item.open,
+            high=item.high,
+            low=item.low,
+            close=item.close,
+            volume=item.volume,
+            close_time=item.close_time,
+        )
+        for item in fallback.candles
+    ]
+    candle = candles[-1]
+    return BybitKlineSnapshot(
+        symbol=fallback.symbol,
+        interval=fallback.interval,
+        price=fallback.price,
+        volume=fallback.volume,
+        kline_open_time_ms=fallback.kline_open_time_ms,
+        kline_close_time_ms=fallback.kline_close_time_ms,
+        kline_is_closed=fallback.kline_is_closed,
+        candle=candle,
+        candles=candles,
+        provider_name="okx",
+        provider_category="swap",
+        provider_endpoint="/api/v5/market/history-candles",
+    )
+
+
+async def _fetch_from_replay(symbol: str, interval: str, limit: int, replay_path: str, replay_speed: float) -> BybitKlineSnapshot:
+    provider = _replay_providers.get(replay_path)
+    if provider is None:
+        provider = ReplayProvider(replay_path)
+        _replay_providers[replay_path] = provider
+    replay = await provider.fetch_symbol_klines(symbol=symbol, interval=interval, limit=limit, speed=replay_speed)
+    candles = [
+        BybitCandle(
+            open_time=item.open_time,
+            open=item.open,
+            high=item.high,
+            low=item.low,
+            close=item.close,
+            volume=item.volume,
+            close_time=item.close_time,
+        )
+        for item in replay.candles
+    ]
+    candle = candles[-1]
+    return BybitKlineSnapshot(
+        symbol=replay.symbol,
+        interval=replay.interval,
+        price=replay.price,
+        volume=replay.volume,
+        kline_open_time_ms=replay.kline_open_time_ms,
+        kline_close_time_ms=replay.kline_close_time_ms,
+        kline_is_closed=True,
+        candle=candle,
+        candles=candles,
+        provider_name="replay",
+        provider_category="local",
+        provider_endpoint="replay",
+    )

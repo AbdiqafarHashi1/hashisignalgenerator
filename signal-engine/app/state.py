@@ -33,6 +33,9 @@ class StateStore:
         self._last_telegram_update_id: int | None = None
         self._decision_meta: dict[str, dict[str, object]] = {}
         self._skip_reason_counts: dict[str, int] = {}
+        self._global_realized_pnl_usd: float = 0.0
+        self._global_peak_equity_usd: float | None = None
+        self._market_data_errors: dict[str, int] = {}
 
     def _today_key(self) -> str:
         return datetime.now(timezone.utc).date().isoformat()
@@ -150,6 +153,7 @@ class StateStore:
     def record_outcome(self, symbol: str, pnl_usd: float, win: bool, timestamp: datetime) -> None:
         state = self.get_daily_state(symbol)
         with self._lock:
+            self._global_realized_pnl_usd += pnl_usd
             state.pnl_usd += pnl_usd
             if not win:
                 state.losses += 1
@@ -157,6 +161,30 @@ class StateStore:
                 state.last_loss_ts = timestamp
             else:
                 state.consecutive_losses = 0
+
+    def set_global_equity(self, equity_usd: float) -> None:
+        with self._lock:
+            if self._global_peak_equity_usd is None or equity_usd > self._global_peak_equity_usd:
+                self._global_peak_equity_usd = equity_usd
+
+    def global_drawdown(self, account_size: float) -> tuple[float, float]:
+        with self._lock:
+            peak = self._global_peak_equity_usd if self._global_peak_equity_usd is not None else account_size
+            current = account_size + self._global_realized_pnl_usd
+        dd_usd = max(0.0, peak - current)
+        dd_pct = (dd_usd / peak) if peak > 0 else 0.0
+        return dd_usd, dd_pct
+
+
+    def record_market_data_error(self, reason: str) -> None:
+        if not reason:
+            return
+        with self._lock:
+            self._market_data_errors[reason] = self._market_data_errors.get(reason, 0) + 1
+
+    def market_data_error_counts(self) -> dict[str, int]:
+        with self._lock:
+            return dict(self._market_data_errors)
 
     def reset(self) -> None:
         with self._lock:
@@ -170,6 +198,9 @@ class StateStore:
             self._last_telegram_update_id = None
             self._decision_meta.clear()
             self._skip_reason_counts.clear()
+            self._global_realized_pnl_usd = 0.0
+            self._global_peak_equity_usd = None
+            self._market_data_errors.clear()
 
     def risk_snapshot(self, symbol: str, cfg: Settings, now: datetime) -> dict[str, object]:
         state = self.get_daily_state(symbol)
@@ -182,6 +213,7 @@ class StateStore:
                 cooldown_active = True
                 cooldown_remaining_minutes = int(cfg.cooldown_minutes_after_loss - minutes_since)
         daily_loss_remaining = max(0.0, account_loss_limit + state.pnl_usd)
+        global_dd_usd, global_dd_pct = self.global_drawdown(float(cfg.account_size or 0.0))
         return {
             "trades_today": state.trades,
             "trades_remaining": max(0, cfg.max_trades_per_day - state.trades),
@@ -191,6 +223,9 @@ class StateStore:
             "daily_loss_remaining_usd": daily_loss_remaining,
             "daily_loss_limit_usd": account_loss_limit,
             "daily_loss_cap_hit": state.pnl_usd <= -account_loss_limit,
+            "global_drawdown_usd": global_dd_usd,
+            "global_drawdown_pct": global_dd_pct,
+            "global_drawdown_cap_hit": global_dd_pct >= float(cfg.global_drawdown_limit_pct or 0.0),
         }
 
     def check_limits(self, symbol: str, cfg: Settings, now: datetime) -> tuple[bool, Status, list[str]]:
@@ -201,6 +236,13 @@ class StateStore:
 
         if not cfg.debug_disable_hard_risk_gates and state.pnl_usd <= -account_loss_limit:
             rationale.append("daily_loss_limit")
+            return False, Status.RISK_OFF, rationale
+        global_dd_usd, global_dd_pct = self.global_drawdown(float(cfg.account_size or 0.0))
+        if not cfg.debug_disable_hard_risk_gates and global_dd_pct >= float(cfg.global_drawdown_limit_pct or 0.0):
+            rationale.append("global_drawdown_limit")
+            return False, Status.RISK_OFF, rationale
+        if cfg.manual_kill_switch:
+            rationale.append("manual_kill_switch")
             return False, Status.RISK_OFF, rationale
         if profit_target > 0 and state.pnl_usd >= profit_target:
             rationale.append("daily_profit_target")

@@ -199,6 +199,13 @@ class DecisionScheduler:
                         interval=self._settings.candle_interval,
                         limit=self._settings.candle_history_limit,
                         rest_base=self._settings.bybit_rest_base,
+                        provider=self._settings.market_data_provider,
+                        fallback_provider=self._settings.market_data_fallbacks,
+                        failover_threshold=self._settings.market_data_failover_threshold,
+                        backoff_base_ms=self._settings.market_data_backoff_base_ms,
+                        backoff_max_ms=self._settings.market_data_backoff_max_ms,
+                        replay_path=self._settings.market_data_replay_path,
+                        replay_speed=self._settings.market_data_replay_speed,
                     )
                 if snapshot is None:
                     logger.info("candle_fetch symbol=%s status=not_ready reason=candle_open", symbol)
@@ -223,6 +230,48 @@ class DecisionScheduler:
                     self._state.set_decision_meta(symbol, {"decision": "skip", "skip_reason": "candle_open"})
                     self._state.record_skip_reason("candle_open")
                     continue
+                last_candle_age_seconds = max(0.0, (now_ms - snapshot.kline_close_time_ms) / 1000.0)
+                stale_gate_enabled = snapshot.kline_close_time_ms >= 1_600_000_000_000
+                stale_threshold_seconds = (interval_to_ms(snapshot.interval) / 1000.0) + float(self._settings.market_data_allow_stale or 0)
+                if stale_gate_enabled and last_candle_age_seconds > stale_threshold_seconds:
+                    stale_reason = "MARKET_DATA_STALE"
+                    self._state.record_market_data_error(stale_reason)
+                    self._state.set_decision_meta(
+                        symbol,
+                        {
+                            "decision": "skip",
+                            "skip_reason": stale_reason,
+                            "final_entry_gate": stale_reason,
+                            "provider": getattr(snapshot, "provider_name", "bybit"),
+                            "last_candle_age_seconds": last_candle_age_seconds,
+                            "market_data_status": "STALE",
+                        },
+                    )
+                    self._state.record_skip_reason(stale_reason)
+                    results.append(
+                        {
+                            "symbol": symbol,
+                            "plan": None,
+                            "reason": stale_reason,
+                            "candles_fetched": len(snapshot.candles),
+                            "latest_candle_ts": snapshot.candle.close_time.isoformat(),
+                            "decision_status": None,
+                            "persisted": False,
+                            "dedupe_key": None,
+                            "telegram_sent": False,
+                            "trade_opened": False,
+                            "trade_id": None,
+                            "decision": "skip",
+                            "skip_reason": stale_reason,
+                        }
+                    )
+                    continue
+                self._state.set_decision_meta(symbol, {
+                    **self._state.get_decision_meta(symbol),
+                    "provider": getattr(snapshot, "provider_name", "bybit"),
+                    "last_candle_age_seconds": last_candle_age_seconds,
+                    "market_data_status": "OK",
+                })
                 self._last_snapshots[symbol] = snapshot
                 self._last_fetch_counts[symbol] = len(snapshot.candles)
                 self._next_fetch_after_ms[symbol] = snapshot.kline_close_time_ms + interval_to_ms(snapshot.interval)
@@ -239,6 +288,7 @@ class DecisionScheduler:
                             candle_low=snapshot.candle.low,
                         )
                         self._last_exit_eval_close_ms[symbol] = snapshot.kline_close_time_ms
+                    self._paper_trader.move_stop_to_breakeven(symbol, trigger_r=self._settings.be_trigger_r_mult)
                     self._close_time_stop_trades(symbol, snapshot.candle.close, tick_ts)
                 active_mode = self.detect_regime(snapshot)
                 if self._settings.sweet8_enabled:
@@ -261,11 +311,16 @@ class DecisionScheduler:
                 )
             except Exception as exc:
                 logger.exception("scheduler_symbol_error symbol=%s error=%s", symbol, exc)
+                error_reason = f"symbol_error:{type(exc).__name__}"
+                blocked_tokens = {"HTTP_401", "HTTP_403", "HTTP_418", "HTTP_429", "BYBIT_RATE_LIMIT_10006", "MARKET_DATA_BLOCKED", "ProxyError", "403 Forbidden"}
+                if any(token in str(exc) for token in blocked_tokens) or type(exc).__name__ in {"ProxyError", "HTTPStatusError", "MarketDataBlockedError", "BybitRateLimitError"}:
+                    error_reason = "MARKET_DATA_BLOCKED"
+                self._state.record_market_data_error(error_reason)
                 results.append(
                     {
                         "symbol": symbol,
                         "plan": None,
-                        "reason": f"symbol_error:{type(exc).__name__}",
+                        "reason": error_reason,
                         "candles_fetched": 0,
                         "latest_candle_ts": None,
                         "decision_status": None,
@@ -275,19 +330,20 @@ class DecisionScheduler:
                         "trade_opened": False,
                         "trade_id": None,
                         "decision": "skip",
-                        "skip_reason": f"symbol_error:{type(exc).__name__}",
+                        "skip_reason": error_reason,
                     }
                 )
-                symbol_error_reason = f"symbol_error:{type(exc).__name__}"
+                symbol_error_reason = error_reason
                 self._state.set_decision_meta(
                     symbol,
                     {
                         "decision": "skip",
                         "skip_reason": symbol_error_reason,
                         "final_entry_gate": symbol_error_reason,
+                        "market_data_status": "BLOCKED",
                     },
                 )
-                self._state.record_skip_reason(f"symbol_error:{type(exc).__name__}")
+                self._state.record_skip_reason(error_reason)
                 continue
 
             funding_state = _funding_blackout_state(tick_ts, self._settings)
@@ -349,6 +405,12 @@ class DecisionScheduler:
                         if plan.status != Status.TRADE:
                             reason = mode_skip_reason or "setup_not_confirmed"
                             skip_reason = mode_skip_reason or "setup_not_confirmed"
+                    if (
+                        plan.status == Status.NO_TRADE
+                        and self._paper_trader is not None
+                        and (plan.signal_score is not None and plan.signal_score < self._settings.exit_score_min)
+                    ):
+                        self._paper_trader.force_close_trades(snapshot.symbol, snapshot.candle.close, reason="weakness_exit")
                     decision_status = plan.status.value
                     self._state.set_latest_decision(snapshot.symbol, plan)
                     persisted = True
@@ -468,6 +530,15 @@ class DecisionScheduler:
                 "ema_fast": scalp_meta.get("ema_fast"),
                 "ema_slow": scalp_meta.get("ema_slow"),
                 "ema_trend": scalp_meta.get("ema_trend"),
+                "signal_score": (plan.signal_score if plan is not None else None),
+                "trend_strength": (
+                    plan.raw_input_snapshot.get("market", {}).get("trend_strength")
+                    if plan is not None and isinstance(plan.raw_input_snapshot, dict)
+                    else None
+                ),
+                "provider": getattr(snapshot, "provider_name", "bybit"),
+                "last_candle_age_seconds": max(0.0, (now_ms - snapshot.kline_close_time_ms) / 1000.0),
+                "market_data_status": "OK",
             }
             self._state.set_decision_meta(symbol, decision_meta)
             if decision == "skip":

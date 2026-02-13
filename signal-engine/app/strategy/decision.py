@@ -130,6 +130,22 @@ def _decide_scalper(request: DecisionRequest, state: StateStore, cfg: Settings) 
             raw_input_snapshot=request.model_dump(),
             )
 
+    if not scalper_engine.momentum_ok(candles, cfg):
+        rationale.append("no_momentum")
+        return TradePlan(
+            status=Status.RISK_OFF,
+            direction=request.tradingview.direction_hint,
+            entry_zone=None,
+            stop_loss=None,
+            take_profit=None,
+            risk_pct_used=None,
+            position_size_usd=None,
+            signal_score=signal_score,
+            posture=posture_snapshot.posture,
+            rationale=rationale,
+            raw_input_snapshot=request.model_dump(),
+        )
+
     trend_direction, ema = scalper_engine.trend_direction(candles, cfg.ema_length)
     if trend_direction is None or ema is None:
         rationale.append("no_trend")
@@ -147,18 +163,15 @@ def _decide_scalper(request: DecisionRequest, state: StateStore, cfg: Settings) 
             raw_input_snapshot=request.model_dump(),
         )
 
-    setup_name: str | None = None
-    if scalper_engine.pullback_continuation_trigger(candles, trend_direction, ema, cfg):
-        setup_name = "pullback_continuation"
-        rationale.append("setup_pullback_continuation")
-    elif scalper_engine.breakout_expansion_trigger(candles, trend_direction, cfg):
-        setup_name = "breakout_expansion"
-        rationale.append("setup_breakout_expansion")
-    else:
-        rationale.append("no_valid_setup")
+    if (
+        cfg.scalp_trend_filter_enabled
+        and request.tradingview.direction_hint in {Direction.long, Direction.short}
+        and request.tradingview.direction_hint != trend_direction
+    ):
+        rationale.append("no_trigger")
         return TradePlan(
-            status=Status.NO_TRADE,
-            direction=trend_direction,
+            status=Status.RISK_OFF,
+            direction=request.tradingview.direction_hint,
             entry_zone=None,
             stop_loss=None,
             take_profit=None,
@@ -170,7 +183,42 @@ def _decide_scalper(request: DecisionRequest, state: StateStore, cfg: Settings) 
             raw_input_snapshot=request.model_dump(),
         )
 
-    levels = scalper_engine.build_trade_levels(candles, trend_direction, cfg, setup_name)
+    regime_signal = scalper_engine.generate_regime_signal(candles, cfg)
+    if regime_signal is None:
+        setup_name: str | None = None
+        if scalper_engine.pullback_continuation_trigger(candles, trend_direction, ema, cfg):
+            setup_name = "pullback_continuation"
+            rationale.append("setup_pullback_continuation")
+        elif scalper_engine.breakout_expansion_trigger(candles, trend_direction, cfg):
+            setup_name = "breakout_expansion"
+            rationale.append("setup_breakout_expansion")
+        else:
+            rationale.append("no_valid_setup")
+            return TradePlan(
+                status=Status.NO_TRADE,
+                direction=trend_direction,
+                entry_zone=None,
+                stop_loss=None,
+                take_profit=None,
+                risk_pct_used=None,
+                position_size_usd=None,
+                signal_score=signal_score,
+                posture=posture_snapshot.posture,
+                rationale=rationale,
+                raw_input_snapshot=request.model_dump(),
+            )
+        levels = scalper_engine.build_trade_levels(candles, trend_direction, cfg, setup_name)
+    else:
+        setup_name = f"regime_{regime_signal.regime.lower()}"
+        trend_direction = regime_signal.direction
+        signal_score = regime_signal.signal_score
+        rationale.extend(regime_signal.rationale)
+        levels = scalper_engine.TradeLevels(
+            entry=regime_signal.entry,
+            stop_loss=regime_signal.stop_loss,
+            take_profit=regime_signal.take_profit,
+            entry_zone=(regime_signal.entry * 0.9998, regime_signal.entry * 1.0002),
+        )
 
     expected_profit_after_costs = scalper_engine.expected_pnl_after_costs(levels, trend_direction, cfg)
     if expected_profit_after_costs <= 0:

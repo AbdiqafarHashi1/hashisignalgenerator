@@ -26,7 +26,7 @@ from .services.performance import PerformanceStore, build_performance_snapshot
 from .storage.store import log_event
 from .strategy.decision import decide
 from .services.scheduler import DecisionScheduler
-from .providers.bybit import BybitClient
+from .providers.bybit import BybitClient, fetch_symbol_klines
 def _as_datetime_utc(value: Any) -> Optional[datetime]:
     """
     Normalize DB timestamps to timezone-aware UTC datetimes.
@@ -77,6 +77,16 @@ class AccountSummary(BaseModel):
     pnl_curve: list[float] = Field(default_factory=list)
     last_updated_ts: str
     equity_curve: list[float] = Field(default_factory=list)
+
+
+class DashboardOverview(BaseModel):
+    account: dict[str, Any]
+    risk: dict[str, Any]
+    activity: dict[str, Any]
+    symbols: dict[str, dict[str, Any]]
+    recent_trades: list[dict[str, Any]]
+    equity_curve: list[dict[str, Any]]
+    skip_reasons: dict[str, Any]
 
 
 logger = logging.getLogger(__name__)
@@ -171,6 +181,7 @@ def _build_engine_state_snapshot() -> EngineState:
     unrealized = trader.total_unrealized_pnl_usd()
     balance = cfg.account_size + summary.total_pnl
     equity = balance + unrealized
+    state_store.set_global_equity(equity)
     max_dd_today_pct = (summary.max_drawdown / cfg.account_size) * 100 if cfg.account_size else 0.0
 
     symbols = state_store.get_symbols()
@@ -590,6 +601,121 @@ async def risk_summary(symbol: str = Query(None)) -> dict[str, Any]:
     snapshot["daily_loss_pct"] = float(settings.max_daily_loss_pct or 0.0)
     snapshot["risk_per_trade_pct"] = float(settings.base_risk_pct or 0.0)
     return snapshot
+
+
+@app.post("/engine/kill-switch")
+async def set_kill_switch(enabled: bool = Query(...)) -> dict[str, Any]:
+    cfg = _require_settings()
+    cfg.manual_kill_switch = enabled
+    return {"status": "ok", "manual_kill_switch": cfg.manual_kill_switch}
+
+
+@app.get("/dashboard/overview", response_model=DashboardOverview)
+async def dashboard_overview() -> DashboardOverview:
+    cfg = _require_settings()
+    state_store = _require_state()
+    db = _require_database()
+    trader = _require_paper_trader()
+    scheduler = _require_scheduler()
+    now = datetime.now(timezone.utc)
+    trades = db.fetch_trades()
+    perf = build_performance_snapshot(trades, account_size=float(cfg.account_size or 0.0), skip_reason_counts=state_store.skip_reason_counts())
+
+    starting_equity = float(cfg.account_size or 0.0)
+    realized = sum(float(t.pnl_usd or 0.0) for t in trades if t.closed_at)
+    unrealized = trader.total_unrealized_pnl_usd()
+    equity = starting_equity + realized + unrealized
+    state_store.set_global_equity(equity)
+
+    start_of_day = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    realized_today = 0.0
+    fees_today = 0.0
+    rolling_fees = 0.0
+    trades_today = 0
+    for trade in trades:
+        if trade.closed_at is None or trade.exit is None:
+            continue
+        fee = ((trade.entry * trade.size) + (trade.exit * trade.size)) * (float(cfg.fee_rate_bps or 0.0) / 10000)
+        rolling_fees += fee
+        closed_at = _as_datetime_utc(trade.closed_at)
+        if closed_at and closed_at >= start_of_day:
+            trades_today += 1
+            realized_today += float(trade.pnl_usd or 0.0)
+            fees_today += fee
+
+    dd_usd, dd_pct = state_store.global_drawdown(starting_equity)
+    daily_states = [state_store.get_daily_state(symbol) for symbol in cfg.symbols]
+    today_pnl = sum(float(ds.pnl_usd or 0.0) for ds in daily_states)
+    daily_dd_usd = max(0.0, -today_pnl)
+    daily_dd_pct = (daily_dd_usd / starting_equity) if starting_equity > 0 else 0.0
+    active_reasons = _active_risk_gates(cfg.symbols[0] if cfg.symbols else "BTCUSDT", now)
+
+    symbol_data: dict[str, dict[str, Any]] = {}
+    for symbol in cfg.symbols:
+        meta = state_store.get_decision_meta(symbol)
+        symbol_data[symbol] = {
+            "regime": "TRENDING" if str(meta.get("regime_label", "")).lower() in {"bull", "bear", "trend"} else "RANGING",
+            "last_decision": meta.get("decision"),
+            "last_skip_reason": meta.get("skip_reason"),
+            "atr_pct": meta.get("atr_pct"),
+            "trend_strength": meta.get("trend_strength"),
+            "signal_score": meta.get("signal_score"),
+            "provider": meta.get("provider"),
+            "last_candle_age_seconds": meta.get("last_candle_age_seconds"),
+            "market_data_status": meta.get("market_data_status", "OK"),
+            "open_position": next((p for p in [_trade_to_dict(t) for t in db.fetch_open_trades(symbol)]), None),
+        }
+
+    skip_by_symbol: dict[str, dict[str, int]] = {symbol: {} for symbol in cfg.symbols}
+    for symbol in cfg.symbols:
+        reason = state_store.get_decision_meta(symbol).get("skip_reason")
+        if reason:
+            skip_by_symbol[symbol][str(reason)] = skip_by_symbol[symbol].get(str(reason), 0) + 1
+
+    return DashboardOverview(
+        account={
+            "live_equity": equity,
+            "starting_equity": starting_equity,
+            "balance": starting_equity + realized,
+            "unrealized_pnl": unrealized,
+            "realized_pnl_today": realized_today,
+            "daily_drawdown_usd": daily_dd_usd,
+            "daily_drawdown_pct": daily_dd_pct,
+            "global_drawdown_usd": dd_usd,
+            "global_drawdown_pct": dd_pct,
+            "status": "PAUSED" if active_reasons else "ACTIVE",
+            "pause_reasons": [item.get("reason") for item in active_reasons],
+            "engine_running": scheduler.running,
+            "last_tick_time": scheduler.last_tick_time().isoformat() if scheduler.last_tick_time() else None,
+            "last_tick_age_seconds": (now - scheduler.last_tick_time()).total_seconds() if scheduler.last_tick_time() else None,
+            "tick_interval_seconds": scheduler.tick_interval,
+        },
+        risk={
+            "risk_pct_per_trade": float(cfg.base_risk_pct or 0.0),
+            "daily_loss_limit_pct": float(cfg.max_daily_loss_pct or 0.0),
+            "global_dd_limit_pct": float(cfg.global_drawdown_limit_pct or 0.0),
+            "max_trades_per_day": int(cfg.max_trades_per_day or 0),
+            "trades_today": trades_today,
+            "consecutive_losses": max((int(ds.consecutive_losses) for ds in daily_states), default=0),
+            "cooldown_remaining_seconds": max((int((state_store.risk_snapshot(s, cfg, now).get("cooldown_remaining_minutes", 0) or 0) * 60) for s in cfg.symbols), default=0),
+        },
+        activity={
+            "trades_today": trades_today,
+            "win_rate_today": perf.win_rate,
+            "profit_factor": perf.profit_factor,
+            "expectancy": perf.expectancy_r,
+            "avg_win": perf.avg_win,
+            "avg_loss": perf.avg_loss,
+            "fees_today": fees_today,
+            "fees_rolling": rolling_fees,
+            "slippage_bps": float(cfg.slippage_bps or 0.0),
+            "market_data_errors": state_store.market_data_error_counts(),
+        },
+        symbols=symbol_data,
+        recent_trades=[_trade_to_dict(t) for t in trades[:100]],
+        equity_curve=[{"index": idx, "equity": starting_equity + val} for idx, val in enumerate(perf.equity_curve)],
+        skip_reasons={"global": state_store.skip_reason_counts(), "by_symbol": skip_by_symbol},
+    )
 @app.get("/positions")
 async def positions() -> dict:
     return {"positions": [trade.__dict__ for trade in _require_database().fetch_open_trades()]}
@@ -815,6 +941,9 @@ async def debug_runtime() -> dict:
                 "active_risk_gates": _active_risk_gates(symbol, now),
                 "last_decision_status": latest_decision.status if latest_decision else None,
                 "gate_reasons_top3": _top_gate_reasons(latest_decision),
+                "provider": state_store.get_decision_meta(symbol).get("provider"),
+                "last_candle_age_seconds": state_store.get_decision_meta(symbol).get("last_candle_age_seconds"),
+                "market_data_status": state_store.get_decision_meta(symbol).get("market_data_status", "OK"),
             }
         )
     return {
@@ -828,6 +957,7 @@ async def debug_runtime() -> dict:
             "last_tick_time": scheduler.last_tick_time().isoformat() if scheduler.last_tick_time() else None,
         },
         "symbols": symbol_data,
+        "market_data_errors": state_store.market_data_error_counts(),
         "storage": {
             "data_dir": settings.data_dir,
             "last_decision_file": _decision_log_path(settings.data_dir),
@@ -840,17 +970,49 @@ async def debug_runtime() -> dict:
 @app.get("/debug/kline")
 async def debug_kline(interval: str = Query("5m")) -> dict[str, Any]:
     settings = _require_settings()
-    client = BybitClient(
-        api_key=settings.bybit_api_key,
-        api_secret=settings.bybit_api_secret,
-        rest_base=settings.bybit_rest_base,
-    )
     symbols = ["BTCUSDT", "ETHUSDT"]
     output: list[dict[str, Any]] = []
+    scheduler = _require_scheduler()
     for symbol in symbols:
-        debug_rows = await client.fetch_kline_debug_rows(symbol=symbol, interval=interval, limit=3)
-        logger.info("bybit_kline_debug symbol=%s rows=%s", symbol, debug_rows["rows"])
-        output.append(debug_rows)
+        snapshot = None
+        provider = "none"
+        error: str | None = None
+        try:
+            snapshot = await fetch_symbol_klines(
+                symbol=symbol,
+                interval=interval,
+                limit=3,
+                rest_base=settings.bybit_rest_base,
+                provider=settings.market_data_provider,
+                fallback_provider=settings.market_data_fallbacks,
+                failover_threshold=settings.market_data_failover_threshold,
+                backoff_base_ms=settings.market_data_backoff_base_ms,
+                backoff_max_ms=settings.market_data_backoff_max_ms,
+                replay_path=settings.market_data_replay_path,
+                replay_speed=settings.market_data_replay_speed,
+            )
+        except Exception as exc:
+            error = type(exc).__name__
+            cached = scheduler.last_snapshot(symbol)
+            if cached is not None:
+                snapshot = cached
+                provider = f"cached:{cached.provider_name}"
+        if snapshot is None:
+            output.append({"symbol": symbol, "provider": provider, "rows": [], "error": error})
+            continue
+        rows = [
+            {
+                "open_time": candle.open_time.isoformat(),
+                "close_time": candle.close_time.isoformat(),
+                "open": candle.open,
+                "high": candle.high,
+                "low": candle.low,
+                "close": candle.close,
+                "volume": candle.volume,
+            }
+            for candle in snapshot.candles[-3:]
+        ]
+        output.append({"symbol": symbol, "provider": provider if provider != "none" else getattr(snapshot, "provider_name", "bybit"), "rows": rows, "error": error})
     return {"interval": interval, "symbols": output}
 
 

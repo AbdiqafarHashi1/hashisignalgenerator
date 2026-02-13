@@ -58,7 +58,7 @@ export default function LiveDashboard() {
     return () => clearInterval(timer);
   }, []);
 
-  const account = (overview?.account ?? {}) as Record<string, number | string | boolean | string[]>;
+  const account = (overview?.account ?? {}) as Record<string, unknown>;
   const risk = (overview?.risk ?? {}) as Record<string, number>;
   const activity = (overview?.activity ?? {}) as Record<string, number>;
   const symbols = overview?.symbols ?? {};
@@ -164,15 +164,29 @@ export default function LiveDashboard() {
   );
 }
 
-function Kpi({ label, value }: { label: string; value: string }) { return <div className="rounded-xl border border-slate-700 bg-slate-900 p-3"><p className="text-xs text-slate-400">{label}</p><p>{value}</p></div>; }
+function Kpi({ label, value }: { label: string; value: string | number | boolean | ReactNode }) { return <div className="rounded-xl border border-slate-700 bg-slate-900 p-3"><p className="text-xs text-slate-400">{label}</p><p>{value}</p></div>; }
 function Panel({ title, children }: { title: string; children: ReactNode }) { return <div className="rounded-xl border border-slate-700 bg-slate-900 p-4"><h3 className="mb-2">{title}</h3>{children}</div>; }
 function Table({ rows }: { rows: Array<Record<string, unknown>> }) { if (!rows.length) return <p className="text-sm text-slate-400">No trades</p>; const cols = Object.keys(rows[0]); return <div className="overflow-auto"><table className="text-xs"><thead><tr>{cols.map((c) => <th key={c} className="px-2 text-left">{c}</th>)}</tr></thead><tbody>{rows.map((r, i) => <tr key={i}>{cols.map((c) => <td key={c} className="px-2">{String(r[c] ?? "--")}</td>)}</tr>)}</tbody></table></div>; }
 function Spark({ data, color }: { data: number[]; color: string }) { if (!data.length) return <p className="text-sm text-slate-400">No data</p>; const min = Math.min(...data); const max = Math.max(...data); const range = max - min || 1; const points = data.map((v, i) => `${(i / Math.max(1, data.length - 1)) * 100},${100 - ((v - min) / range) * 100}`).join(" "); return <svg viewBox="0 0 100 100" className="h-40 w-full"><polyline points={points} fill="none" stroke={color} strokeWidth="2" /></svg>; }
 function Bars({ data }: { data: Record<string, number> }) { const entries = Object.entries(data); if (!entries.length) return <p className="text-sm text-slate-400">No data</p>; const max = Math.max(...entries.map(([, v]) => v), 1); return <div className="space-y-2 text-xs">{entries.map(([label, value]) => <div key={label}><div className="mb-1 flex justify-between"><span>{label}</span><span>{value}</span></div><div className="h-2 rounded bg-slate-800"><div className="h-2 rounded bg-cyan-500" style={{ width: `${(value / max) * 100}%` }} /></div></div>)}</div>; }
 
-const num = (v: number | undefined | null) => (v == null || Number.isNaN(v) ? "--" : v.toFixed(2));
-const fmt = (v: number | string | boolean | undefined, usd = false) => (typeof v === "number" ? `${usd ? "$" : ""}${v.toFixed(2)}` : String(v ?? "--"));
-const pct = (v: number | undefined | null) => (v == null || Number.isNaN(v) ? "--" : `${(v * 100).toFixed(2)}%`);
+const num = (v: number | undefined | null): string => (v == null || Number.isNaN(v) ? "--" : v.toFixed(2));
+const fmt = (value: unknown, usd = false): string => {
+  if (typeof value === "number") {
+    return `${usd ? "$" : ""}${value.toFixed(2)}`;
+  }
+  if (Array.isArray(value)) {
+    return value.map((entry) => String(entry)).join(", ");
+  }
+  if (typeof value === "boolean" || typeof value === "string") {
+    return String(value);
+  }
+  return "--";
+};
+const pct = (value: unknown): string => {
+  const numeric = typeof value === "number" ? value : typeof value === "string" ? Number(value) : NaN;
+  return Number.isFinite(numeric) ? `${(numeric * 100).toFixed(2)}%` : "--";
+};
 
 function toDrawdownCurve(equity: number[]): number[] {
   let peak = Number.NEGATIVE_INFINITY;

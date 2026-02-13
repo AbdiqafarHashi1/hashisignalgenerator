@@ -623,5 +623,7 @@ def test_skip_reason_is_atr_too_low_when_regime_blocks(monkeypatch, tmp_path):
         results = await scheduler.run_once(force=False)
         assert results[0]["decision"] == "skip"
         assert results[0]["skip_reason"] == "atr_too_low"
+        assert results[0]["final_entry_gate"] == "atr_too_low"
+        assert state.get_decision_meta("BTCUSDT").get("final_entry_gate") == "atr_too_low"
 
     asyncio.run(run())

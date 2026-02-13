@@ -170,6 +170,7 @@ export default function LiveDashboard() {
           <Kpi label="Realized PnL Today" value={fmtUsd(state?.realized_pnl_today_usd)} />
           <Kpi label="Open Positions" value={String(state?.open_positions?.length ?? "--")} />
           <Kpi label="Trades Today" value={String(state?.trades_today ?? "--")} />
+          <Kpi label="Final Entry Gate" value={String(state?.final_entry_gate ?? "--")} />
           </div>
         </section>
 

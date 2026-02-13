@@ -52,6 +52,38 @@ uvicorn app.main:app --reload
 
 No domain is required for the initial deployment. Add a domain + HTTPS later when ready.
 
+## Deploy to Fly (GitHub)
+This repo is configured for a simple two-app Fly setup:
+- `hashibot` (dashboard, public URL `https://hashibot.fly.dev`)
+- `hashibot-api` (FastAPI backend, private to users but reachable by dashboard)
+
+Files used:
+- `fly.toml` for dashboard
+- `fly-api.toml` for API
+
+### 1) Connect GitHub repo in Fly UI
+1. In Fly dashboard, click **Create App** and choose **Deploy from GitHub**.
+2. Create app name **`hashibot-api`** first.
+3. In advanced config, point Fly to `fly-api.toml`.
+4. Repeat and create app name **`hashibot`** with config file `fly.toml`.
+
+### 2) Set secrets in Fly UI (no secrets in git)
+Set the same required trading/runtime secrets on `hashibot-api` via Fly **Secrets**:
+- `BYBIT_API_KEY`
+- `BYBIT_API_SECRET`
+- `TELEGRAM_BOT_TOKEN`
+- `TELEGRAM_CHAT_ID`
+
+Set non-secret runtime vars in Fly app config/environment:
+- `hashibot` dashboard: `API_ORIGIN=https://hashibot-api.fly.dev`
+- `hashibot-api` backend: all strategy/risk vars from `.env.example` as needed.
+
+### 3) Verify
+After deployment completes:
+- Open `https://hashibot.fly.dev` and confirm dashboard renders.
+- Confirm dashboard calls API through same-origin `/api/*` routes.
+- Confirm performance endpoint works: `https://hashibot.fly.dev/api/metrics/performance`.
+
 ## API
 - `GET /health`
 - `GET /heartbeat`

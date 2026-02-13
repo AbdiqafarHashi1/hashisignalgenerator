@@ -103,8 +103,9 @@ class StateStore:
             return list(self._symbols)
 
     def set_symbols(self, symbols: list[str]) -> None:
+        normalized = [item.strip().upper() for item in symbols if item and item.strip()]
         with self._lock:
-            self._symbols = list(symbols)
+            self._symbols = normalized
 
     def get_last_heartbeat_ts(self) -> datetime | None:
         with self._lock:

@@ -19,9 +19,9 @@ class Settings(BaseSettings):
 
     )
 
-    MODE: Literal["prop_cfd", "personal_crypto", "paper", "signal_only"] = "prop_cfd"
+    MODE: Literal["prop_cfd", "personal_crypto", "paper", "signal_only", "live"] = "prop_cfd"
     PROFILE: Literal["profit", "diag"] = "profit"
-    engine_mode: Literal["paper", "signal_only"] = "signal_only"
+    engine_mode: Literal["paper", "signal_only", "live"] = "signal_only"
     symbols: Annotated[list[str], NoDecode] = Field(
         default_factory=lambda: ["BTCUSDT"],
         validation_alias=AliasChoices("SYMBOLS", "symbols"),
@@ -165,7 +165,7 @@ class Settings(BaseSettings):
     leverage_elevated: float = 2.5
     oi_spike_pct: float = 0.18
     trend_strength_min: float | None = None
-    candle_interval: str | None = None
+    candle_interval: Literal["1m", "3m", "5m"] | None = None
     candle_history_limit: int = 120
     tick_interval_seconds: int = Field(
         60,
@@ -323,6 +323,7 @@ class Settings(BaseSettings):
     smoke_test_force_trade: bool = Field(False, validation_alias=AliasChoices("SMOKE_TEST_FORCE_TRADE", "smoke_test_force_trade"))
     next_public_api_base: str | None = Field(None, validation_alias=AliasChoices("NEXT_PUBLIC_API_BASE", "next_public_api_base"))
     internal_api_base_url: str | None = Field(None, validation_alias=AliasChoices("INTERNAL_API_BASE_URL", "internal_api_base_url"))
+    database_url: str | None = Field(None, validation_alias=AliasChoices("DATABASE_URL", "database_url"))
 
     @field_validator("symbols", mode="before")
     @classmethod
@@ -340,14 +341,26 @@ class Settings(BaseSettings):
             raise ValueError(f"SYMBOLS must be a list of strings, got {value!r}")
         return [item.strip().upper() for item in value if item.strip()]
 
+    @field_validator("candle_interval", mode="before")
+    @classmethod
+    def validate_candle_interval(cls, value: str | None) -> str | None:
+        if value is None or value == "":
+            return None
+        normalized = str(value).strip().lower()
+        if normalized not in {"1m", "3m", "5m"}:
+            raise ValueError("CANDLE_INTERVAL must be one of: 1m, 3m, 5m")
+        return normalized
+
     @model_validator(mode="after")
     def apply_mode_defaults(self) -> "Settings":
         logger = logging.getLogger(__name__)
-        if self.MODE in {"paper", "signal_only"}:
+        if self.MODE in {"paper", "signal_only", "live"}:
             self.engine_mode = self.MODE
             self.MODE = "prop_cfd"
         if self.PROFILE == "diag":
             self.engine_mode = "signal_only"
+        if self.engine_mode == "live":
+            self.MODE = "personal_crypto"
         if self.MODE == "prop_cfd":
             defaults = {
                 "account_size": 25000,
@@ -410,7 +423,7 @@ class Settings(BaseSettings):
                 "max_trades_per_day": 50,
             }
         return {
-            "candle_interval": "1m",
+            "candle_interval": "3m",
             "min_signal_score": 60,
             "trend_strength_min": 0.45,
             "cooldown_minutes_after_loss": 10,

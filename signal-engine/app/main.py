@@ -23,7 +23,6 @@ from .services.database import Database
 from .services.paper_trader import PaperTrader
 from .services.stats import compute_stats
 from .services.performance import PerformanceStore, build_performance_snapshot
-from .storage.store import log_event
 from .strategy.decision import decide
 from .services.scheduler import DecisionScheduler
 from .providers.bybit import BybitClient, fetch_symbol_klines
@@ -183,6 +182,7 @@ def _build_engine_state_snapshot() -> EngineState:
     equity = balance + unrealized
     state_store.set_global_equity(equity)
     max_dd_today_pct = (summary.max_drawdown / cfg.account_size) * 100 if cfg.account_size else 0.0
+    db.record_equity(equity=equity, realized_pnl_today=realized_pnl_today, drawdown_pct=max_dd_today_pct)
 
     symbols = state_store.get_symbols()
     risk_symbol = symbols[0] if symbols else (cfg.symbols[0] if cfg.symbols else "BTCUSDT")
@@ -258,6 +258,7 @@ def _initialize_engine(app: FastAPI) -> None:
     state = StateStore()
     state.set_symbols(settings.symbols)
     database = Database(settings)
+    database.init_schema()
     paper_trader = PaperTrader(settings, database)
     scheduler = DecisionScheduler(
         settings,
@@ -322,6 +323,12 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+@app.on_event("startup")
+async def ensure_database_schema() -> None:
+    if database is not None:
+        database.init_schema()
+
 
 def _require_scheduler() -> DecisionScheduler:
     if scheduler is None:
@@ -787,14 +794,14 @@ async def tradingview_webhook(request: DecisionRequest) -> dict:
     _record_correlation_id(correlation_id)
     settings = _require_settings()
     state_store = _require_state()
-    log_event(settings, "webhook", request.model_dump(), correlation_id)
+    _require_database().log_event("webhook", request.model_dump(), correlation_id)
 
     plan = decide(request, state_store, settings)
     if plan.status == Status.TRADE:
         state_store.record_trade(request.tradingview.symbol)
     state_store.set_latest_decision(request.tradingview.symbol, plan)
 
-    log_event(settings, "decision", plan.model_dump(), correlation_id)
+    _require_database().log_event("decision", plan.model_dump(), correlation_id)
     return {"correlation_id": correlation_id, "plan": plan}
 
 
@@ -944,6 +951,10 @@ async def debug_runtime() -> dict:
                 "provider": state_store.get_decision_meta(symbol).get("provider"),
                 "last_candle_age_seconds": state_store.get_decision_meta(symbol).get("last_candle_age_seconds"),
                 "market_data_status": state_store.get_decision_meta(symbol).get("market_data_status", "OK"),
+                "latest_candle_ts": state_store.get_decision_meta(symbol).get("latest_candle_ts"),
+                "last_processed_candle_ts_ms": state_store.get_decision_meta(symbol).get("last_processed_candle_ts"),
+                "should_process": state_store.get_decision_meta(symbol).get("should_process"),
+                "should_process_reason": state_store.get_decision_meta(symbol).get("should_process_reason"),
             }
         )
     return {
@@ -1052,7 +1063,7 @@ async def debug_force_signal(payload: DebugForceSignalRequest) -> dict:
     state_store.set_latest_decision(symbol, plan)
     correlation_id = str(uuid4())
     _record_correlation_id(correlation_id)
-    log_event(settings, "decision", plan.model_dump(), correlation_id)
+    _require_database().log_event("decision", plan.model_dump(), correlation_id)
     if plan.status == Status.TRADE and settings.telegram_enabled:
         message = format_trade_message(symbol, plan)
         await send_telegram_message(message, settings)
@@ -1098,7 +1109,7 @@ async def debug_smoke_run_full_cycle(payload: DebugSmokeCycleRequest) -> dict:
     )
     correlation_id = str(uuid4())
     _record_correlation_id(correlation_id)
-    log_event(settings, "decision", plan.model_dump(), correlation_id)
+    _require_database().log_event("decision", plan.model_dump(), correlation_id)
     state_store.set_latest_decision(symbol, plan)
     before_stats = compute_stats(database.fetch_trades())
     trade_id = trader.maybe_open_trade(symbol, plan, allow_multiple=True)

@@ -274,7 +274,8 @@ class DecisionScheduler:
                 })
                 self._last_snapshots[symbol] = snapshot
                 self._last_fetch_counts[symbol] = len(snapshot.candles)
-                self._next_fetch_after_ms[symbol] = snapshot.kline_close_time_ms + interval_to_ms(snapshot.interval)
+                next_refresh = snapshot.kline_close_time_ms if not snapshot.kline_is_closed else snapshot.kline_close_time_ms + interval_to_ms(snapshot.interval)
+                self._next_fetch_after_ms[symbol] = next_refresh
                 if self._settings.force_trade_mode or self._settings.smoke_test_force_trade:
                     self._auto_close_forced_trades(symbol, snapshot, tick_ts)
                 if self._paper_trader is not None:
@@ -372,126 +373,132 @@ class DecisionScheduler:
             decision = "skip"
             skip_reason: str | None = None
             scalp_meta: dict[str, object] = {}
-            if not snapshot.kline_is_closed:
-                reason = "candle_open"
-                skip_reason = "candle_open"
-            elif funding_state["block_new_entries"]:
+            latest_closed_ms = snapshot.kline_close_time_ms
+            if not snapshot.kline_is_closed and snapshot.candles:
+                latest_closed_ms = int(snapshot.candles[-1].close_time.timestamp() * 1000)
+            last_processed = self._state.get_last_processed_close_time_ms(snapshot.symbol)
+            should_process = bool(force_mode or dedupe_bypass or (latest_closed_ms and latest_closed_ms != last_processed))
+
+            if funding_state["block_new_entries"]:
                 reason = "funding_blackout_entries_blocked"
                 skip_reason = "funding_blackout_entries_blocked"
+                should_process = False
+            elif not should_process:
+                reason = "candle_already_processed" if latest_closed_ms == last_processed else "candle_open"
+                skip_reason = reason
             else:
-                last_processed = self._state.get_last_processed_close_time_ms(snapshot.symbol)
-                if (
-                    not dedupe_bypass
-                    and last_processed == snapshot.kline_close_time_ms
-                ):
-                    reason = "candle_already_processed"
-                    skip_reason = "candle_already_processed"
+                forced_trade = False
+                if (self._settings.force_trade_mode or self._settings.smoke_test_force_trade) and self._force_trade_due(snapshot.symbol, tick_ts):
+                    plan = _build_forced_trade_plan(snapshot, self._settings)
+                    self._last_force_trade_ts[snapshot.symbol] = tick_ts
+                    forced_trade = True
                 else:
-                    forced_trade = False
-                    if (self._settings.force_trade_mode or self._settings.smoke_test_force_trade) and self._force_trade_due(snapshot.symbol, tick_ts):
-                        plan = _build_forced_trade_plan(snapshot, self._settings)
-                        self._last_force_trade_ts[snapshot.symbol] = tick_ts
-                        forced_trade = True
-                    else:
-                        request = _build_decision_request(snapshot)
-                        settings_for_decision = self._settings
-                        if self._settings.sweet8_enabled:
-                            settings_for_decision = self._settings.model_copy(
-                                update={"strategy": "scalper" if active_mode == "scalper" else "baseline"}
-                            )
-                        plan = decide(request, self._state, settings_for_decision)
-                    if plan.status == Status.TRADE:
-                        plan, mode_skip_reason, scalp_meta = _apply_mode_overrides(plan, snapshot, self._settings)
-                        if plan.status != Status.TRADE:
-                            reason = mode_skip_reason or "setup_not_confirmed"
-                            skip_reason = mode_skip_reason or "setup_not_confirmed"
-                    if (
-                        plan.status == Status.NO_TRADE
-                        and self._paper_trader is not None
-                        and (plan.signal_score is not None and plan.signal_score < self._settings.exit_score_min)
-                    ):
-                        self._paper_trader.force_close_trades(snapshot.symbol, snapshot.candle.close, reason="weakness_exit")
-                    decision_status = plan.status.value
-                    self._state.set_latest_decision(snapshot.symbol, plan)
-                    persisted = True
+                    request = _build_decision_request(snapshot)
+                    settings_for_decision = self._settings
+                    if self._settings.sweet8_enabled:
+                        settings_for_decision = self._settings.model_copy(
+                            update={"strategy": "scalper" if active_mode == "scalper" else "baseline"}
+                        )
+                    plan = decide(request, self._state, settings_for_decision)
+                if plan.status == Status.TRADE:
+                    plan, mode_skip_reason, scalp_meta = _apply_mode_overrides(plan, snapshot, self._settings)
+                    if plan.status != Status.TRADE:
+                        reason = mode_skip_reason or "setup_not_confirmed"
+                        skip_reason = mode_skip_reason or "setup_not_confirmed"
+                if (
+                    plan.status == Status.NO_TRADE
+                    and self._paper_trader is not None
+                    and (plan.signal_score is not None and plan.signal_score < self._settings.exit_score_min)
+                ):
+                    self._paper_trader.force_close_trades(snapshot.symbol, snapshot.candle.close, reason="weakness_exit")
+                decision_status = plan.status.value
+                self._state.set_latest_decision(snapshot.symbol, plan)
+                persisted = True
+                if forced_trade:
+                    logger.info(
+                        "force_trade_decision symbol=%s status=%s rationale=%s",
+                        snapshot.symbol,
+                        plan.status.value,
+                        ",".join(plan.rationale),
+                    )
+                else:
+                    logger.info(
+                        "decision_computed symbol=%s status=%s rationale=%s",
+                        snapshot.symbol,
+                        plan.status.value,
+                        ",".join(plan.rationale),
+                    )
+                if self._database is not None:
+                    entry = None
+                    if plan.entry_zone is not None:
+                        entry = sum(plan.entry_zone) / 2.0
+                    self._database.add_signal(
+                        timestamp=datetime.now(timezone.utc),
+                        symbol=snapshot.symbol,
+                        score=plan.signal_score,
+                        status=plan.status.value,
+                        rationale=",".join(plan.rationale),
+                        entry=entry,
+                        stop=plan.stop_loss,
+                        take_profit=plan.take_profit,
+                        decision=("enter_long" if plan.status == Status.TRADE and plan.direction == Direction.long else "enter_short" if plan.status == Status.TRADE else "skip"),
+                        skip_reason=_plan_skip_reason(plan) if plan.status != Status.TRADE else None,
+                        regime=active_mode,
+                        scores={"signal_score": plan.signal_score},
+                        inputs_snapshot=plan.raw_input_snapshot,
+                    )
+                self._state.set_last_processed_close_time_ms(snapshot.symbol, latest_closed_ms)
+                if self._database is not None:
+                    self._database.set_runtime_state(
+                        key=f"last_processed_candle:{snapshot.symbol}",
+                        value_number=float(latest_closed_ms),
+                        symbol=snapshot.symbol,
+                    )
+                if plan.status == Status.TRADE:
+                    decision = "enter_long" if plan.direction == Direction.long else "enter_short"
                     if forced_trade:
-                        logger.info(
-                            "force_trade_decision symbol=%s status=%s rationale=%s",
-                            snapshot.symbol,
-                            plan.status.value,
-                            ",".join(plan.rationale),
-                        )
+                        dedupe_key = _force_trade_key(snapshot.symbol, plan, tick_ts)
                     else:
-                        logger.info(
-                            "decision_computed symbol=%s status=%s rationale=%s",
-                            snapshot.symbol,
-                            plan.status.value,
-                            ",".join(plan.rationale),
-                        )
-                    if self._database is not None:
-                        entry = None
-                        if plan.entry_zone is not None:
-                            entry = sum(plan.entry_zone) / 2.0
-                        self._database.add_signal(
-                            timestamp=datetime.now(timezone.utc),
-                            symbol=snapshot.symbol,
-                            score=plan.signal_score,
-                            status=plan.status.value,
-                            rationale=",".join(plan.rationale),
-                            entry=entry,
-                            stop=plan.stop_loss,
-                            take_profit=plan.take_profit,
-                        )
-                    if snapshot.kline_is_closed:
-                        self._state.set_last_processed_close_time_ms(
-                            snapshot.symbol,
-                            snapshot.kline_close_time_ms,
-                        )
-                    if plan.status == Status.TRADE:
-                        decision = "enter_long" if plan.direction == Direction.long else "enter_short"
-                        if forced_trade:
-                            dedupe_key = _force_trade_key(snapshot.symbol, plan, tick_ts)
-                        else:
-                            dedupe_key = _trade_key(snapshot, plan)
-                        last_trade_key = self._state.get_last_trade_key(snapshot.symbol)
-                        if dedupe_key != last_trade_key:
-                            message = format_trade_message(snapshot.symbol, plan, snapshot)
-                            telegram_sent = await send_telegram_message(message, self._settings)
-                            if telegram_sent:
-                                logger.info(
-                                    "telegram_sent symbol=%s dedupe_key=%s",
-                                    snapshot.symbol,
-                                    dedupe_key,
-                                )
-                            if self._settings.engine_mode in {"paper", "live"} and self._paper_trader is not None:
-                                allow_multiple = (
-                                    (self._settings.force_trade_mode or self._settings.smoke_test_force_trade)
-                                    and self._settings.force_trade_auto_close_seconds == 0
-                                    and self._settings.current_mode != "SCALP"
-                                )
-                                trade_id = self._paper_trader.maybe_open_trade(
-                                    snapshot.symbol,
-                                    plan,
-                                    allow_multiple=allow_multiple,
-                                    snapshot=snapshot,
-                                    regime=active_mode,
-                                )
-                                if trade_id is not None:
-                                    trade_opened = True
-                                    self._state.record_trade(snapshot.symbol)
-                                    logger.info(
-                                        "paper_trade_created id=%s symbol=%s dedupe_key=%s",
-                                        trade_id,
-                                        snapshot.symbol,
-                                        dedupe_key,
-                                    )
-                            self._state.set_last_trade_key(snapshot.symbol, dedupe_key)
-                        else:
+                        dedupe_key = _trade_key(snapshot, plan)
+                    last_trade_key = self._state.get_last_trade_key(snapshot.symbol)
+                    if dedupe_key != last_trade_key:
+                        message = format_trade_message(snapshot.symbol, plan, snapshot)
+                        telegram_sent = await send_telegram_message(message, self._settings)
+                        if telegram_sent:
                             logger.info(
-                                "trade_deduped symbol=%s dedupe_key=%s",
+                                "telegram_sent symbol=%s dedupe_key=%s",
                                 snapshot.symbol,
                                 dedupe_key,
                             )
+                        if self._settings.engine_mode in {"paper", "live"} and self._paper_trader is not None:
+                            allow_multiple = (
+                                (self._settings.force_trade_mode or self._settings.smoke_test_force_trade)
+                                and self._settings.force_trade_auto_close_seconds == 0
+                                and self._settings.current_mode != "SCALP"
+                            )
+                            trade_id = self._paper_trader.maybe_open_trade(
+                                snapshot.symbol,
+                                plan,
+                                allow_multiple=allow_multiple,
+                                snapshot=snapshot,
+                                regime=active_mode,
+                            )
+                            if trade_id is not None:
+                                trade_opened = True
+                                self._state.record_trade(snapshot.symbol)
+                                logger.info(
+                                    "paper_trade_created id=%s symbol=%s dedupe_key=%s",
+                                    trade_id,
+                                    snapshot.symbol,
+                                    dedupe_key,
+                                )
+                        self._state.set_last_trade_key(snapshot.symbol, dedupe_key)
+                    else:
+                        logger.info(
+                            "trade_deduped symbol=%s dedupe_key=%s",
+                            snapshot.symbol,
+                            dedupe_key,
+                        )
                 if plan is not None and decision_status is None:
                     decision_status = plan.status.value
                 if plan is not None and plan.status != Status.TRADE and skip_reason is None:
@@ -517,10 +524,25 @@ class DecisionScheduler:
                 ",".join(reasons),
                 persisted,
             )
+            debug_reason = skip_reason if skip_reason is not None else ("ready" if should_process else "candle_open")
+            self._state.set_decision_meta(
+                snapshot.symbol,
+                {
+                    **self._state.get_decision_meta(snapshot.symbol),
+                    "latest_candle_ts": snapshot.kline_close_time_ms,
+                    "last_processed_candle_ts": last_processed,
+                    "should_process": should_process,
+                    "should_process_reason": debug_reason,
+                },
+            )
+            if self._database is not None:
+                self._database.set_runtime_state(key=f"latest_candle:{snapshot.symbol}", value_number=float(snapshot.kline_close_time_ms), symbol=snapshot.symbol)
+
             if skip_reason is None and decision == "skip":
                 skip_reason = reason
             final_entry_gate = skip_reason if decision == "skip" else None
             decision_meta = {
+                **self._state.get_decision_meta(symbol),
                 "decision": decision,
                 "skip_reason": skip_reason,
                 "final_entry_gate": final_entry_gate,

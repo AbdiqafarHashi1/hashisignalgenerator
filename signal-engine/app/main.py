@@ -918,6 +918,34 @@ async def state_today(symbol: str = Query(..., min_length=1)) -> dict:
 
     return {"symbol": symbol, "state": state}
 
+
+
+@app.get("/debug/config")
+def debug_config() -> dict[str, Any]:
+    cfg = _require_settings()
+    effective = cfg.resolved_settings()
+    for secret_key in ("bybit_api_key", "bybit_api_secret", "telegram_bot_token"):
+        if secret_key in effective:
+            effective[secret_key] = "***"
+    return {
+        "effective": effective,
+        "sources": cfg.config_sources(),
+        "env_keys": cfg.env_alias_map(),
+    }
+
+
+@app.get("/debug/db")
+def debug_db() -> dict[str, Any]:
+    db = _require_database()
+    cfg = _require_settings()
+    database_url = cfg.database_url or f"sqlite:///{Path(cfg.data_dir) / 'trades.db'}"
+    trades = db.fetch_trades()
+    return {
+        "database_url": database_url,
+        "database_type": "sqlite" if database_url.startswith("sqlite") else "postgresql",
+        "connected": True,
+        "trade_count": len(trades),
+    }
 @app.get("/debug/runtime")
 async def debug_runtime() -> dict:
     now = datetime.now(timezone.utc)

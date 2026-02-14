@@ -12,7 +12,7 @@ def test_risk_bump_and_clamp() -> None:
     assert risk_pct == cfg.max_risk_pct
 
     risk = position_size(100.0, 99.0, risk_pct, cfg)
-    assert risk.position_size_usd <= cfg.account_size * 3.0
+    assert risk.position_size_usd <= cfg.account_size * cfg.max_notional_account_multiplier
 
 
 def test_global_drawdown_limit_locks_state() -> None:
@@ -35,3 +35,13 @@ def test_manual_kill_switch_locks_state() -> None:
     assert allowed is False
     assert status.value == "RISK_OFF"
     assert "manual_kill_switch" in reasons
+
+
+def test_risk_env_knobs_override_defaults(monkeypatch) -> None:
+    monkeypatch.setenv("ACCOUNT_SIZE", "5000")
+    monkeypatch.setenv("BASE_RISK_PCT", "0.01")
+    cfg = Settings(_env_file=None)
+    risk = position_size(100.0, 99.0, cfg.base_risk_pct, cfg)
+    assert risk.position_size_usd > 0
+    assert cfg.account_size == 5000
+    assert cfg.base_risk_pct == 0.01

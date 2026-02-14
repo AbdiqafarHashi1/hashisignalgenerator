@@ -4,6 +4,7 @@ from datetime import datetime, time
 from functools import lru_cache
 import json
 import logging
+import os
 from typing import Annotated, Literal
 
 from pydantic import AliasChoices, Field, field_validator, model_validator
@@ -19,9 +20,10 @@ class Settings(BaseSettings):
 
     )
 
-    MODE: Literal["prop_cfd", "personal_crypto", "paper", "signal_only", "live"] = "prop_cfd"
-    PROFILE: Literal["profit", "diag"] = "profit"
-    engine_mode: Literal["paper", "signal_only", "live"] = "signal_only"
+    MODE: Literal["prop_cfd", "personal_crypto", "paper", "signal_only", "live"] = Field("prop_cfd", validation_alias=AliasChoices("MODE", "mode"))
+    PROFILE: Literal["profit", "diag"] = Field("profit", validation_alias=AliasChoices("PROFILE", "profile"))
+    strategy_profile: Literal["SCALPER_FAST", "SCALPER_STABLE", "RANGE_MEAN_REVERT"] = Field("SCALPER_STABLE", validation_alias=AliasChoices("STRATEGY_PROFILE", "strategy_profile"))
+    engine_mode: Literal["paper", "signal_only", "live"] = Field("signal_only", validation_alias=AliasChoices("ENGINE_MODE", "engine_mode"))
     symbols: Annotated[list[str], NoDecode] = Field(
         default_factory=lambda: ["BTCUSDT"],
         validation_alias=AliasChoices("SYMBOLS", "symbols"),
@@ -141,15 +143,15 @@ class Settings(BaseSettings):
     bybit_rest_base: str = Field("https://api.bybit.com", validation_alias=AliasChoices("BYBIT_REST_BASE", "bybit_rest_base"))
     bybit_ws_public_linear: str = Field("wss://stream.bybit.com/v5/public/linear", validation_alias=AliasChoices("BYBIT_WS_PUBLIC_LINEAR", "bybit_ws_public_linear"))
 
-    account_size: float | None = None
-    base_risk_pct: float | None = None
-    max_risk_pct: float | None = None
-    max_trades_per_day: int | None = None
-    max_daily_loss_pct: float | None = None
-    min_signal_score: int | None = None
-    daily_profit_target_pct: float | None = None
-    max_consecutive_losses: int | None = None
-    cooldown_minutes_after_loss: int | None = None
+    account_size: float | None = Field(None, validation_alias=AliasChoices("ACCOUNT_SIZE", "account_size"))
+    base_risk_pct: float | None = Field(None, validation_alias=AliasChoices("BASE_RISK_PCT", "base_risk_pct"))
+    max_risk_pct: float | None = Field(None, validation_alias=AliasChoices("MAX_RISK_PCT", "max_risk_pct"))
+    max_trades_per_day: int | None = Field(None, validation_alias=AliasChoices("MAX_TRADES_PER_DAY", "max_trades_per_day"))
+    max_daily_loss_pct: float | None = Field(None, validation_alias=AliasChoices("MAX_DAILY_LOSS_PCT", "max_daily_loss_pct"))
+    min_signal_score: int | None = Field(None, validation_alias=AliasChoices("MIN_SIGNAL_SCORE", "min_signal_score"))
+    daily_profit_target_pct: float | None = Field(None, validation_alias=AliasChoices("DAILY_PROFIT_TARGET_PCT", "daily_profit_target_pct"))
+    max_consecutive_losses: int | None = Field(None, validation_alias=AliasChoices("MAX_CONSECUTIVE_LOSSES", "max_consecutive_losses"))
+    cooldown_minutes_after_loss: int | None = Field(None, validation_alias=AliasChoices("COOLDOWN_MINUTES_AFTER_LOSS", "cooldown_minutes_after_loss"))
     global_drawdown_limit_pct: float = Field(
         0.08,
         validation_alias=AliasChoices("GLOBAL_DD_LIMIT_PCT", "global_drawdown_limit_pct"),
@@ -159,14 +161,14 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("MANUAL_KILL_SWITCH", "manual_kill_switch"),
     )
 
-    funding_extreme_abs: float = 0.03
-    funding_elevated_abs: float = 0.02
-    leverage_extreme: float = 3.0
-    leverage_elevated: float = 2.5
-    oi_spike_pct: float = 0.18
-    trend_strength_min: float | None = None
-    candle_interval: Literal["1m", "3m", "5m"] | None = None
-    candle_history_limit: int = 120
+    funding_extreme_abs: float = Field(0.03, validation_alias=AliasChoices("FUNDING_EXTREME_ABS", "funding_extreme_abs"))
+    funding_elevated_abs: float = Field(0.02, validation_alias=AliasChoices("FUNDING_ELEVATED_ABS", "funding_elevated_abs"))
+    leverage_extreme: float = Field(3.0, validation_alias=AliasChoices("LEVERAGE_EXTREME", "leverage_extreme"))
+    leverage_elevated: float = Field(2.5, validation_alias=AliasChoices("LEVERAGE_ELEVATED", "leverage_elevated"))
+    oi_spike_pct: float = Field(0.18, validation_alias=AliasChoices("OI_SPIKE_PCT", "oi_spike_pct"))
+    trend_strength_min: float | None = Field(None, validation_alias=AliasChoices("TREND_STRENGTH_MIN", "trend_strength_min"))
+    candle_interval: Literal["1m", "3m", "5m"] | None = Field(None, validation_alias=AliasChoices("CANDLE_INTERVAL", "candle_interval"))
+    candle_history_limit: int = Field(120, validation_alias=AliasChoices("CANDLE_HISTORY_LIMIT", "candle_history_limit"))
     tick_interval_seconds: int = Field(
         60,
         validation_alias=AliasChoices(
@@ -175,6 +177,31 @@ class Settings(BaseSettings):
             "tick_interval_seconds",
         ),
     )
+
+    trend_rsi_midline: float = Field(50.0, validation_alias=AliasChoices("TREND_RSI_MIDLINE", "trend_rsi_midline"))
+    range_rsi_long_max: float = Field(35.0, validation_alias=AliasChoices("RANGE_RSI_LONG_MAX", "range_rsi_long_max"))
+    range_rsi_short_min: float = Field(65.0, validation_alias=AliasChoices("RANGE_RSI_SHORT_MIN", "range_rsi_short_min"))
+    trend_strength_scale: float = Field(2000.0, validation_alias=AliasChoices("TREND_STRENGTH_SCALE", "trend_strength_scale"))
+    trend_score_slope_scale: float = Field(40000.0, validation_alias=AliasChoices("TREND_SCORE_SLOPE_SCALE", "trend_score_slope_scale"))
+    trend_score_max_boost: int = Field(25, validation_alias=AliasChoices("TREND_SCORE_MAX_BOOST", "trend_score_max_boost"))
+    atr_score_scale: float = Field(3000.0, validation_alias=AliasChoices("ATR_SCORE_SCALE", "atr_score_scale"))
+    atr_score_max_boost: int = Field(15, validation_alias=AliasChoices("ATR_SCORE_MAX_BOOST", "atr_score_max_boost"))
+    trend_confirm_score_boost: int = Field(10, validation_alias=AliasChoices("TREND_CONFIRM_SCORE_BOOST", "trend_confirm_score_boost"))
+    range_base_score_boost: int = Field(8, validation_alias=AliasChoices("RANGE_BASE_SCORE_BOOST", "range_base_score_boost"))
+    min_breakout_window: int = Field(25, validation_alias=AliasChoices("MIN_BREAKOUT_WINDOW", "min_breakout_window"))
+    trend_bias_lookback: int = Field(20, validation_alias=AliasChoices("TREND_BIAS_LOOKBACK", "trend_bias_lookback"))
+    setup_min_candles: int = Field(3, validation_alias=AliasChoices("SETUP_MIN_CANDLES", "setup_min_candles"))
+    trend_min_candles: int = Field(4, validation_alias=AliasChoices("TREND_MIN_CANDLES", "trend_min_candles"))
+    funding_guard_tail_minute: int = Field(0, validation_alias=AliasChoices("FUNDING_GUARD_TAIL_MINUTE", "funding_guard_tail_minute"))
+    tp_cap_long_pct: float = Field(0.02, validation_alias=AliasChoices("TP_CAP_LONG_PCT", "tp_cap_long_pct"))
+    tp_cap_short_pct: float = Field(0.02, validation_alias=AliasChoices("TP_CAP_SHORT_PCT", "tp_cap_short_pct"))
+    max_notional_account_multiplier: float = Field(3.0, validation_alias=AliasChoices("MAX_NOTIONAL_ACCOUNT_MULTIPLIER", "max_notional_account_multiplier"))
+    move_to_breakeven_trigger_r: float = Field(0.6, validation_alias=AliasChoices("MOVE_TO_BREAKEVEN_TRIGGER_R", "move_to_breakeven_trigger_r"))
+    breakout_tp_multiplier: float = Field(1.2, validation_alias=AliasChoices("BREAKOUT_TP_MULTIPLIER", "breakout_tp_multiplier"))
+    regime_entry_buffer_pct: float = Field(0.0002, validation_alias=AliasChoices("REGIME_ENTRY_BUFFER_PCT", "regime_entry_buffer_pct"))
+    prop_score_threshold: int = Field(80, validation_alias=AliasChoices("PROP_SCORE_THRESHOLD", "prop_score_threshold"))
+    personal_score_threshold: int = Field(75, validation_alias=AliasChoices("PERSONAL_SCORE_THRESHOLD", "personal_score_threshold"))
+
     force_trade_mode: bool = Field(False, validation_alias=AliasChoices("FORCE_TRADE_MODE", "force_trade_mode"))
     force_trade_every_seconds: int = Field(
         5,
@@ -258,19 +285,19 @@ class Settings(BaseSettings):
     sweet8_current_mode: Literal["auto", "scalper", "swing"] = "auto"
     ema_length: int = 50
     momentum_mode: Literal["adx", "atr"] = "adx"
-    adx_period: int = 14
-    adx_threshold: float = 20.0
-    atr_period: int = 14
+    adx_period: int = Field(14, validation_alias=AliasChoices("ADX_PERIOD", "adx_period"))
+    adx_threshold: float = Field(20.0, validation_alias=AliasChoices("ADX_THRESHOLD", "adx_threshold"))
+    atr_period: int = Field(14, validation_alias=AliasChoices("ATR_PERIOD", "atr_period"))
     atr_sma_period: int = 20
-    ema_pullback_pct: float = 0.0015
-    engulfing_wick_ratio: float = 0.5
+    ema_pullback_pct: float = Field(0.0015, validation_alias=AliasChoices("EMA_PULLBACK_PCT", "ema_pullback_pct"))
+    engulfing_wick_ratio: float = Field(0.5, validation_alias=AliasChoices("ENGULFING_WICK_RATIO", "engulfing_wick_ratio"))
     volume_confirm_enabled: bool = True
     volume_sma_period: int = 20
     volume_confirm_multiplier: float = 1.0
     max_stop_pct: float = 0.0025
     take_profit_pct: float = 0.003
     fee_rate_bps: float = Field(5.5, validation_alias=AliasChoices("FEE_BPS", "fee_rate_bps"))
-    spread_bps: float = 1.5
+    spread_bps: float = Field(1.5, validation_alias=AliasChoices("SPREAD_BPS", "spread_bps"))
     slippage_bps: float = Field(1.5, validation_alias=AliasChoices("SLIPPAGE_BPS", "slippage_bps"))
     breakout_volume_multiplier: float = 1.5
     breakout_atr_multiplier: float = 1.2
@@ -312,7 +339,7 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("FUNDING_BLACKOUT_MAX_LOSS_USD", "funding_blackout_max_loss_usd"),
     )
 
-    max_losses_per_day: int = 3
+    max_losses_per_day: int = Field(3, validation_alias=AliasChoices("MAX_LOSSES_PER_DAY", "max_losses_per_day"))
 
     news_blackouts: str = ""
     data_dir: str = "data"
@@ -354,44 +381,22 @@ class Settings(BaseSettings):
     @model_validator(mode="after")
     def apply_mode_defaults(self) -> "Settings":
         logger = logging.getLogger(__name__)
-        if self.MODE in {"paper", "signal_only", "live"}:
-            self.engine_mode = self.MODE
-            self.MODE = "prop_cfd"
-        if self.PROFILE == "diag":
-            self.engine_mode = "signal_only"
-        if self.engine_mode == "live":
-            self.MODE = "personal_crypto"
-        if self.MODE == "prop_cfd":
-            defaults = {
-                "account_size": 25000,
-                "base_risk_pct": 0.0025,
-                "max_risk_pct": 0.0025,
-                "max_daily_loss_pct": 0.015,
-                "daily_profit_target_pct": 0.015,
-                "max_consecutive_losses": 2,
-            }
-        else:
-            defaults = {
-                "account_size": 2000,
-                "base_risk_pct": 0.0025,
-                "max_risk_pct": 0.0025,
-                "max_daily_loss_pct": 0.015,
-                "daily_profit_target_pct": 0.015,
-                "max_consecutive_losses": 2,
-            }
-        for key, value in defaults.items():
-            if getattr(self, key) is None:
-                setattr(self, key, value)
         profile_defaults = self._profile_defaults()
         for key, value in profile_defaults.items():
             if getattr(self, key) is None:
                 setattr(self, key, value)
+        if "ENGINE_MODE" not in os.environ and self.MODE in {"paper", "signal_only", "live"}:
+            self.engine_mode = self.MODE
+
         if self.sweet8_enabled:
             self.debug_loosen = False
             self.debug_disable_hard_risk_gates = False
-            self.base_risk_pct = self.sweet8_base_risk_pct
-            self.max_risk_pct = self.sweet8_max_risk_pct
-            self.max_daily_loss_pct = self.sweet8_max_daily_loss_pct
+            if "BASE_RISK_PCT" not in os.environ:
+                self.base_risk_pct = self.sweet8_base_risk_pct
+            if "MAX_RISK_PCT" not in os.environ:
+                self.max_risk_pct = self.sweet8_max_risk_pct
+            if "MAX_DAILY_LOSS_PCT" not in os.environ:
+                self.max_daily_loss_pct = self.sweet8_max_daily_loss_pct
         if self.debug_loosen:
             changes: list[str] = []
             if self.min_signal_score is not None:
@@ -416,19 +421,87 @@ class Settings(BaseSettings):
     def _profile_defaults(self) -> dict[str, object]:
         if self.PROFILE == "diag":
             return {
+                "account_size": 25000,
+                "base_risk_pct": 0.0025,
+                "max_risk_pct": 0.0025,
+                "max_daily_loss_pct": 0.015,
+                "daily_profit_target_pct": 0.015,
+                "max_consecutive_losses": 2,
                 "candle_interval": "1m",
                 "min_signal_score": 35,
                 "trend_strength_min": 0.30,
                 "cooldown_minutes_after_loss": 0,
                 "max_trades_per_day": 50,
             }
-        return {
-            "candle_interval": "3m",
-            "min_signal_score": 60,
-            "trend_strength_min": 0.45,
-            "cooldown_minutes_after_loss": 10,
-            "max_trades_per_day": 8,
+        profiles: dict[str, dict[str, object]] = {
+            "SCALPER_FAST": {
+                "account_size": 25000,
+                "base_risk_pct": 0.0025,
+                "max_risk_pct": 0.0025,
+                "max_daily_loss_pct": 0.015,
+                "daily_profit_target_pct": 0.015,
+                "max_consecutive_losses": 2,
+                "candle_interval": "1m",
+                "tick_interval_seconds": 30,
+                "min_signal_score": 55,
+                "trend_strength_min": 0.35,
+                "cooldown_minutes_after_loss": 0,
+                "max_trades_per_day": 50,
+            },
+            "SCALPER_STABLE": {
+                "account_size": 25000,
+                "base_risk_pct": 0.0025,
+                "max_risk_pct": 0.0025,
+                "max_daily_loss_pct": 0.015,
+                "daily_profit_target_pct": 0.015,
+                "max_consecutive_losses": 2,
+                "candle_interval": "1m",
+                "tick_interval_seconds": 60,
+                "min_signal_score": 60,
+                "trend_strength_min": 0.45,
+                "cooldown_minutes_after_loss": 10,
+                "max_trades_per_day": 8,
+            },
+            "RANGE_MEAN_REVERT": {
+                "account_size": 25000,
+                "base_risk_pct": 0.0020,
+                "max_risk_pct": 0.0025,
+                "max_daily_loss_pct": 0.012,
+                "daily_profit_target_pct": 0.012,
+                "max_consecutive_losses": 2,
+                "candle_interval": "5m",
+                "tick_interval_seconds": 60,
+                "min_signal_score": 58,
+                "trend_strength_min": 0.35,
+                "cooldown_minutes_after_loss": 10,
+                "max_trades_per_day": 6,
+            },
         }
+        return profiles[self.strategy_profile]
+
+    def config_sources(self) -> dict[str, str]:
+        profile_keys = set(self._profile_defaults().keys())
+        aliases = self.env_alias_map()
+        sources: dict[str, str] = {}
+        for name in self.__class__.model_fields:
+            env_key = aliases.get(name, name.upper())
+            if env_key in os.environ:
+                sources[name] = "env"
+            elif name in profile_keys:
+                sources[name] = "profile_default"
+            else:
+                sources[name] = "default"
+        return sources
+
+    def env_alias_map(self) -> dict[str, str]:
+        aliases: dict[str, str] = {}
+        for name, field in self.__class__.model_fields.items():
+            alias = field.validation_alias
+            if isinstance(alias, AliasChoices) and alias.choices:
+                aliases[name] = str(alias.choices[0])
+            else:
+                aliases[name] = name.upper()
+        return aliases
 
     def blackout_windows(self) -> list[tuple[time, time]]:
         windows: list[tuple[time, time]] = []
@@ -455,8 +528,10 @@ class Settings(BaseSettings):
     def resolved_settings(self) -> dict[str, object]:
         return {
             "profile": self.PROFILE,
+            "strategy_profile": self.strategy_profile,
             "mode": self.MODE,
             "engine_mode": self.engine_mode,
+            "account_size": self.account_size,
             "symbols": list(self.symbols),
             "candle_interval": self.candle_interval,
             "tick_interval_seconds": self.tick_interval_seconds,
@@ -531,6 +606,7 @@ class Settings(BaseSettings):
             "bybit_ws_public_linear": self.bybit_ws_public_linear,
             "manual_kill_switch": self.manual_kill_switch,
             "smoke_test_force_trade": self.smoke_test_force_trade,
+            "database_url": self.database_url,
             "sweet8_enabled": self.sweet8_enabled,
             "sweet8_mode": self.sweet8_mode,
             "sweet8_current_mode": self.sweet8_current_mode,

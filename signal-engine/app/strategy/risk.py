@@ -11,9 +11,9 @@ def choose_risk_pct(posture: Posture, score: int, cfg: Settings) -> float:
     """
     risk_pct = cfg.base_risk_pct
     if posture == Posture.OPPORTUNISTIC:
-        if cfg.MODE == "prop_cfd" and score >= 80:
+        if cfg.MODE == "prop_cfd" and score >= cfg.prop_score_threshold:
             risk_pct = cfg.max_risk_pct
-        if cfg.MODE == "personal_crypto" and score >= 75:
+        if cfg.MODE == "personal_crypto" and score >= cfg.personal_score_threshold:
             risk_pct = cfg.max_risk_pct
     return min(risk_pct, cfg.max_risk_pct)
 
@@ -41,7 +41,7 @@ def position_size(entry_price: float, stop_loss: float, risk_pct: float, cfg: Se
         return RiskResult(risk_pct_used=risk_pct, stop_distance_pct=stop_distance_pct, position_size_usd=0.0)
 
     position_usd = (cfg.account_size * risk_pct) / stop_distance_pct
-    max_notional = cfg.account_size * 3.0
+    max_notional = cfg.account_size * cfg.max_notional_account_multiplier
     position_usd = min(position_usd, max_notional)
 
     return RiskResult(

@@ -217,7 +217,10 @@ def _decide_scalper(request: DecisionRequest, state: StateStore, cfg: Settings) 
             entry=regime_signal.entry,
             stop_loss=regime_signal.stop_loss,
             take_profit=regime_signal.take_profit,
-            entry_zone=(regime_signal.entry * 0.9998, regime_signal.entry * 1.0002),
+            entry_zone=(
+                regime_signal.entry * (1 - cfg.regime_entry_buffer_pct),
+                regime_signal.entry * (1 + cfg.regime_entry_buffer_pct),
+            ),
         )
 
     expected_profit_after_costs = scalper_engine.expected_pnl_after_costs(levels, trend_direction, cfg)

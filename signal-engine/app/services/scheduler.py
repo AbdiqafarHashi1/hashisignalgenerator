@@ -397,7 +397,11 @@ class DecisionScheduler:
             last_processed = self._state.get_last_processed_close_time_ms(snapshot.symbol)
             should_process = bool(force_mode or dedupe_bypass or (latest_closed_ms and latest_closed_ms != last_processed))
 
-            if funding_state["block_new_entries"]:
+            if not snapshot.kline_is_closed and not force_mode:
+                reason = "candle_open"
+                skip_reason = "candle_open"
+                should_process = False
+            elif funding_state["block_new_entries"]:
                 reason = "funding_blackout_entries_blocked"
                 skip_reason = "funding_blackout_entries_blocked"
                 should_process = False
@@ -887,7 +891,7 @@ def _apply_mode_overrides(
             return plan.model_copy(update={"status": Status.NO_TRADE}), "trend_mismatch", scalp_meta
 
     if settings.scalp_trend_filter_enabled:
-        trend_bias = _derive_trend_bias(snapshot)
+        trend_bias = _derive_trend_bias(snapshot, settings=settings)
         if trend_bias is not None and plan.direction != trend_bias:
             return plan.model_copy(update={"status": Status.NO_TRADE}), "trend_mismatch", scalp_meta
 
@@ -978,7 +982,7 @@ def scalp_setup_gate_reason(
 
 def _confirm_pullback_engulfing(snapshot: BybitKlineSnapshot, settings: Settings, direction: Direction) -> bool:
     candles = snapshot.candles
-    if len(candles) < 3:
+    if len(candles) < settings.setup_min_candles:
         return False
     closes = [c.close for c in candles]
     ema_pull = _ema(closes, settings.scalp_pullback_ema)
@@ -1013,7 +1017,7 @@ def _confirm_pullback_engulfing(snapshot: BybitKlineSnapshot, settings: Settings
 
 def _confirm_breakout_retest(snapshot: BybitKlineSnapshot, settings: Settings, direction: Direction) -> bool:
     candles = snapshot.candles
-    lookback = max(3, settings.scalp_breakout_lookback)
+    lookback = max(settings.setup_min_candles, settings.scalp_breakout_lookback)
     if len(candles) < lookback + 2:
         return False
     window = candles[-(lookback + settings.scalp_retest_max_bars + 1):]
@@ -1029,9 +1033,11 @@ def _confirm_breakout_retest(snapshot: BybitKlineSnapshot, settings: Settings, d
     return False
 
 
-def _derive_trend_bias(snapshot: BybitKlineSnapshot, lookback: int = 20) -> Direction | None:
+def _derive_trend_bias(snapshot: BybitKlineSnapshot, lookback: int | None = None, settings: Settings | None = None) -> Direction | None:
+    if lookback is None:
+        lookback = settings.trend_bias_lookback if settings is not None else 20
     closes = [candle.close for candle in snapshot.candles[-lookback:] if candle.close > 0]
-    if len(closes) < 4:
+    if len(closes) < (settings.trend_min_candles if settings is not None else 4):
         return None
     midpoint = len(closes) // 2
     first_avg = sum(closes[:midpoint]) / midpoint
@@ -1119,7 +1125,7 @@ def _funding_blackout_state(now: datetime, settings: Settings) -> dict[str, bool
     minute_in_window = minutes % interval
     block_start = max(0, interval - settings.funding_block_before_minutes)
     close_start = max(0, interval - settings.funding_close_before_minutes)
-    block_new_entries = minute_in_window >= block_start or minute_in_window <= 1
+    block_new_entries = minute_in_window >= block_start or minute_in_window <= settings.funding_guard_tail_minute
     close_positions = minute_in_window >= close_start
     return {"block_new_entries": block_new_entries, "close_positions": close_positions}
 

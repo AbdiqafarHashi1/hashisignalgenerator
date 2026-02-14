@@ -13,7 +13,7 @@ const resolveApiBase = (): string => {
 
   const isLocalhost =
     window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1";
-  return isLocalhost ? DEFAULT_DEV_API_BASE : "/api";
+  return isLocalhost ? DEFAULT_DEV_API_BASE : "https://hashibot-api.fly.dev";
 };
 
 export const API_BASE = resolveApiBase();

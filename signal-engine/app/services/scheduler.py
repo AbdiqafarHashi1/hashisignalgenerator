@@ -27,6 +27,24 @@ from .notifier import format_trade_message, send_telegram_message
 
 logger = logging.getLogger(__name__)
 
+# ---- JSON SAFE HELPERS ----
+import json
+from datetime import date
+from decimal import Decimal
+from enum import Enum
+
+def _jsonable(obj):
+    if isinstance(obj, (datetime, date)):
+        return obj.isoformat()
+    if isinstance(obj, Decimal):
+        return float(obj)
+    if isinstance(obj, Enum):
+        return obj.value
+    return str(obj)
+
+def _to_json_dict(x):
+    return json.loads(json.dumps(x, default=_jsonable))
+# ---------------------------
 
 class DecisionScheduler:
     def __init__(
@@ -445,7 +463,7 @@ class DecisionScheduler:
                         skip_reason=_plan_skip_reason(plan) if plan.status != Status.TRADE else None,
                         regime=active_mode,
                         scores={"signal_score": plan.signal_score},
-                        inputs_snapshot=plan.raw_input_snapshot,
+                        inputs_snapshot=_to_json_dict(plan.raw_input_snapshot),
                     )
                 self._state.set_last_processed_close_time_ms(snapshot.symbol, latest_closed_ms)
                 if self._database is not None:

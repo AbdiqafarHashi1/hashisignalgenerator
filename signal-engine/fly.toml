@@ -1,3 +1,4 @@
+# Environment values are injected via `fly secrets` / Fly app env; keep business logic in app/config.py + .env keys.
 # fly.toml app configuration file generated for hashibot-api on 2026-02-14T03:46:27+03:00
 #
 # See https://fly.io/docs/reference/configuration/ for information about how to use this file.

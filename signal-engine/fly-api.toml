@@ -1,3 +1,4 @@
+# Environment values are injected via `fly secrets` / Fly app env; keep business logic in app/config.py + .env keys.
 app = "hashibot-api"
 primary_region = "iad"
 

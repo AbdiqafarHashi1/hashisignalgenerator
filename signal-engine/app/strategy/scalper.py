@@ -89,7 +89,7 @@ def pullback_continuation_trigger(candles: list[Candle], direction: Direction, e
 
 
 def breakout_expansion_trigger(candles: list[Candle], direction: Direction, cfg: Settings) -> bool:
-    if len(candles) < max(cfg.atr_period + cfg.atr_sma_period, 25):
+    if len(candles) < max(cfg.atr_period + cfg.atr_sma_period, cfg.min_breakout_window):
         return False
     atr_values = compute_atr_series(candles, cfg.atr_period)
     if len(atr_values) < cfg.atr_sma_period + 1:
@@ -114,13 +114,13 @@ def build_trade_levels(candles: list[Candle], direction: Direction, cfg: Setting
         structure_sl = min(current.low, previous.low)
         cap_sl = entry * (1 - cfg.max_stop_pct)
         stop_loss = max(structure_sl, cap_sl)
-        tp_mult = 1.2 if setup == "breakout_expansion" else 1.0
+        tp_mult = cfg.breakout_tp_multiplier if setup == "breakout_expansion" else 1.0
         take_profit = entry * (1 + cfg.take_profit_pct * tp_mult)
     else:
         structure_sl = max(current.high, previous.high)
         cap_sl = entry * (1 + cfg.max_stop_pct)
         stop_loss = min(structure_sl, cap_sl)
-        tp_mult = 1.2 if setup == "breakout_expansion" else 1.0
+        tp_mult = cfg.breakout_tp_multiplier if setup == "breakout_expansion" else 1.0
         take_profit = entry * (1 - cfg.take_profit_pct * tp_mult)
     entry_zone = (min(current.open, current.close), max(current.open, current.close))
     return TradeLevels(entry=entry, stop_loss=stop_loss, take_profit=take_profit, entry_zone=entry_zone)
@@ -243,7 +243,7 @@ def _regime_from_metrics(candles: list[Candle], cfg: Settings) -> tuple[str, flo
     atr = atr_values[-1]
     atr_pct = atr / candles[-1].close if candles[-1].close > 0 else 0.0
     slope = (fast - slow) / slow
-    trend_strength = min(1.0, abs(slope) * 2000)
+    trend_strength = min(1.0, abs(slope) * cfg.trend_strength_scale)
     regime = "TRENDING" if abs(slope) >= cfg.scalp_trend_slope_min and trend_strength >= cfg.trend_strength_min else "RANGING"
     return regime, atr, atr_pct, slope
 
@@ -270,8 +270,8 @@ def generate_regime_signal(candles: list[Candle], cfg: Settings) -> RegimeSignal
         return None
     vwap = _rolling_vwap(candles)
     score = 50
-    score += int(min(25, abs(slope) * 40000))
-    score += int(min(15, max(0.0, (atr_pct - cfg.scalp_atr_pct_min) * 3000)))
+    score += int(min(cfg.trend_score_max_boost, abs(slope) * cfg.trend_score_slope_scale))
+    score += int(min(cfg.atr_score_max_boost, max(0.0, (atr_pct - cfg.scalp_atr_pct_min) * cfg.atr_score_scale)))
 
     if regime == "TRENDING":
         direction = Direction.long if ema_fast > ema_slow else Direction.short
@@ -279,12 +279,12 @@ def generate_regime_signal(candles: list[Candle], cfg: Settings) -> RegimeSignal
         if pullback_distance > atr * cfg.pullback_atr_mult:
             return None
         if direction == Direction.long:
-            confirm = rsi_now >= 50 and close > prev_close and rsi_now >= rsi_prev
+            confirm = rsi_now >= cfg.trend_rsi_midline and close > prev_close and rsi_now >= rsi_prev
         else:
-            confirm = rsi_now <= 50 and close < prev_close and rsi_now <= rsi_prev
+            confirm = rsi_now <= cfg.trend_rsi_midline and close < prev_close and rsi_now <= rsi_prev
         if not confirm:
             return None
-        score += 10 if confirm else 0
+        score += cfg.trend_confirm_score_boost if confirm else 0
         threshold = cfg.min_signal_score_trend
         if score < threshold:
             return None
@@ -301,11 +301,11 @@ def generate_regime_signal(candles: list[Candle], cfg: Settings) -> RegimeSignal
     if abs(deviation) < atr * cfg.dev_atr_mult:
         return None
     direction = Direction.long if deviation < 0 else Direction.short
-    if direction == Direction.long and rsi_now >= 35:
+    if direction == Direction.long and rsi_now >= cfg.range_rsi_long_max:
         return None
-    if direction == Direction.short and rsi_now <= 65:
+    if direction == Direction.short and rsi_now <= cfg.range_rsi_short_min:
         return None
-    score += 8
+    score += cfg.range_base_score_boost
     threshold = cfg.min_signal_score_range
     if score < threshold:
         return None

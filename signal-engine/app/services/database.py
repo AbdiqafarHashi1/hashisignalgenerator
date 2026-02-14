@@ -115,6 +115,26 @@ class TradeRecord:
     trade_mode: str
 
 
+
+
+class _CompatConn:
+    def __init__(self, database: "Database") -> None:
+        self._database = database
+
+    def __enter__(self):
+        self._conn = self._database._engine.raw_connection()
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        if exc_type is None:
+            self._conn.commit()
+        self._conn.close()
+
+    def execute(self, sql: str, params: tuple[object, ...] = ()):
+        cursor = self._conn.cursor()
+        cursor.execute(sql, params)
+        return cursor
+
 class Database:
     def __init__(self, settings: Settings) -> None:
         self._settings = settings
@@ -125,6 +145,7 @@ class Database:
             future=True,
         )
         self._Session = sessionmaker(bind=self._engine, expire_on_commit=False, future=True)
+        self._conn = _CompatConn(self)
         self.init_schema()
 
     def init_schema(self) -> None:

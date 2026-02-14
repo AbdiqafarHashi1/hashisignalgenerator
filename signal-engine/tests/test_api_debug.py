@@ -227,3 +227,25 @@ def test_debug_kline_includes_provider(monkeypatch) -> None:
         assert response.status_code == 200
         payload = response.json()
         assert payload["symbols"][0]["provider"] in {"bybit", "binance"}
+
+
+def test_debug_config_sources(monkeypatch) -> None:
+    main_module = _fresh_main(monkeypatch, {"ACCOUNT_SIZE": "9999", "STRATEGY_PROFILE": "SCALPER_STABLE"})
+    with TestClient(main_module.app) as client:
+        response = client.get("/debug/config")
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["effective"]["account_size"] == 9999.0
+        assert payload["sources"]["account_size"] == "env"
+        assert payload["env_keys"]["account_size"] == "ACCOUNT_SIZE"
+
+
+def test_debug_db_endpoint() -> None:
+    from app import main as main_module
+
+    with TestClient(main_module.app) as client:
+        response = client.get("/debug/db")
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["connected"] is True
+        assert "database_type" in payload

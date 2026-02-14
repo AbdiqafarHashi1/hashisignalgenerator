@@ -78,7 +78,7 @@ class PaperTrader:
                 return None
             score = plan.signal_score or 0
             active_regime = regime or self._settings.sweet8_current_mode
-            atr = _compute_atr(snapshot, period=14)
+            atr = _compute_atr(snapshot, period=self._settings.atr_period)
             if atr is None or atr <= 0:
                 return None
             entry = snapshot.candle.close
@@ -214,7 +214,8 @@ class PaperTrader:
         return results
 
 
-    def move_stop_to_breakeven(self, symbol: str, trigger_r: float = 0.6) -> int:
+    def move_stop_to_breakeven(self, symbol: str, trigger_r: float | None = None) -> int:
+        trigger_r = self._settings.move_to_breakeven_trigger_r if trigger_r is None else trigger_r
         moved = 0
         for trade in self._db.fetch_open_trades(symbol):
             risk = abs(trade.entry - trade.stop)
@@ -328,8 +329,8 @@ class PaperTrader:
 
     def _cap_take_profit(self, entry: float, take_profit: float, side: str) -> float:
         if side == "long":
-            return min(take_profit, entry * 1.02)
-        return max(take_profit, entry * 0.98)
+            return min(take_profit, entry * (1 + self._settings.tp_cap_long_pct))
+        return max(take_profit, entry * (1 - self._settings.tp_cap_short_pct))
 
     def _calculate_pnl(
         self,

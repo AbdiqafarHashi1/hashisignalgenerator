@@ -161,3 +161,10 @@ export async function apiFetch<T>(
 export async function fetchEngineStatus(): Promise<EngineStatus> {
   return apiFetch<EngineStatus>("/engine/status");
 }
+
+
+export type DebugConfigResponse = {
+  effective: Record<string, unknown>;
+  sources: Record<string, string>;
+  env_keys: Record<string, string>;
+};

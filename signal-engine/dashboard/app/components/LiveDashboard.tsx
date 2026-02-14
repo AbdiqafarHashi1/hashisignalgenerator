@@ -2,7 +2,7 @@
 
 import type { ReactNode } from "react";
 import { useCallback, useEffect, useState } from "react";
-import { apiFetch, API_BASE, DashboardOverview, EngineState, stateEventsUrl } from "../../lib/api";
+import { apiFetch, API_BASE, DashboardOverview, DebugConfigResponse, EngineState, stateEventsUrl } from "../../lib/api";
 
 const UI_REFRESH_MS = 3000;
 const HEAVY_REFRESH_MS = 15000;
@@ -18,11 +18,13 @@ export default function LiveDashboard() {
   const [overview, setOverview] = useState<DashboardOverview | null>(null);
   const [error, setError] = useState("");
   const [selectedSymbol, setSelectedSymbol] = useState<string>("ALL");
+  const [debugConfig, setDebugConfig] = useState<DebugConfigResponse | null>(null);
 
   const loadOverview = useCallback(async () => {
     try {
       const payload = await apiFetch<DashboardOverview>("/dashboard/overview");
       setOverview(payload);
+      setDebugConfig(await apiFetch<DebugConfigResponse>("/debug/config"));
       setError("");
     } catch (err) {
       setError((err as Error).message);
@@ -145,6 +147,18 @@ export default function LiveDashboard() {
               </Panel>
             );
           })}
+        </section>
+
+
+
+        <section className="rounded-xl border border-slate-700 bg-slate-900 p-4">
+          <h3 className="mb-2">Config (read-only)</h3>
+          <div className="text-xs text-slate-300">
+            <p>Engine mode: {String(debugConfig?.effective?.engine_mode ?? "--")}</p>
+            <p>Strategy profile: {String(debugConfig?.effective?.strategy_profile ?? "--")}</p>
+            <p>Account size: {String(debugConfig?.effective?.account_size ?? "--")} (source: {String(debugConfig?.sources?.account_size ?? "--")})</p>
+            <p>Min signal score: {String(debugConfig?.effective?.min_signal_score ?? "--")} (source: {String(debugConfig?.sources?.min_signal_score ?? "--")})</p>
+          </div>
         </section>
 
         <section className="grid gap-4 lg:grid-cols-2">

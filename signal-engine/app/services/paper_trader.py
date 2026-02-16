@@ -232,7 +232,18 @@ class PaperTrader:
     def move_stop_to_breakeven(self, symbol: str, trigger_r: float | None = None) -> int:
         trigger_r = self._settings.move_to_breakeven_trigger_r if trigger_r is None else trigger_r
         moved = 0
+        now = datetime.now(timezone.utc)
+        impact = (self._settings.spread_bps + self._settings.slippage_bps) / 10_000
+        fee_rate = self._settings.fee_rate_bps / 10_000
+        buffer_bps = self._settings.move_to_breakeven_buffer_bps
+        offset_bps = self._settings.move_to_breakeven_offset_bps
+
         for trade in self._db.fetch_open_trades(symbol):
+            opened_at = datetime.fromisoformat(trade.opened_at)
+            seconds_open = (now - opened_at).total_seconds()
+            if seconds_open < self._settings.move_to_breakeven_min_seconds_open:
+                continue
+
             risk = abs(trade.entry - trade.stop)
             if risk <= 0:
                 continue
@@ -240,13 +251,46 @@ class PaperTrader:
             progress = ((mark - trade.entry) / risk) if trade.side == "long" else ((trade.entry - mark) / risk)
             if progress < trigger_r:
                 continue
-            breakeven = trade.entry
-            if trade.side == "long" and trade.stop < breakeven:
-                self._db.update_trade_stop(trade.id, breakeven)
-                moved += 1
-            elif trade.side == "short" and trade.stop > breakeven:
-                self._db.update_trade_stop(trade.id, breakeven)
-                moved += 1
+
+            true_be_exit_with_costs = self._true_be_exit_with_costs(trade.side, trade.entry, fee_rate)
+            buffer_price_r = self._settings.move_to_breakeven_buffer_r * risk
+            buffer_price_bps = trade.entry * (buffer_bps / 10_000)
+            offset_price = trade.entry * (offset_bps / 10_000)
+            directional_shift = buffer_price_r + buffer_price_bps + offset_price
+            target_exit_with_costs = (
+                true_be_exit_with_costs + directional_shift
+                if trade.side == "long"
+                else true_be_exit_with_costs - directional_shift
+            )
+            new_stop = self._invert_exit_impact(trade.side, target_exit_with_costs, impact)
+            if new_stop is None:
+                continue
+
+            old_stop = trade.stop
+            should_move = old_stop < new_stop if trade.side == "long" else old_stop > new_stop
+            if not should_move:
+                continue
+
+            self._db.update_trade_stop(trade.id, new_stop)
+            self._db.log_event(
+                "stop_moved",
+                {
+                    "trade_id": trade.id,
+                    "symbol": trade.symbol,
+                    "old_stop": old_stop,
+                    "new_stop": new_stop,
+                    "trigger_r": trigger_r,
+                    "mark": mark,
+                    "entry": trade.entry,
+                    "impact_bps": self._settings.spread_bps + self._settings.slippage_bps,
+                    "fee_rate_bps": self._settings.fee_rate_bps,
+                    "buffer_r": self._settings.move_to_breakeven_buffer_r,
+                    "buffer_bps": buffer_bps,
+                    "offset_bps": offset_bps,
+                },
+                f"trade:{trade.id}",
+            )
+            moved += 1
         return moved
 
     def _effective_leverage(self) -> float:
@@ -278,6 +322,28 @@ class PaperTrader:
         if side == "long":
             return price * (1 - impact)
         return price * (1 + impact)
+
+    def _true_be_exit_with_costs(self, side: str, entry: float, fee_rate: float) -> float:
+        if side == "long":
+            denominator = 1 - fee_rate
+            if denominator <= 0:
+                return entry
+            return entry * (1 + fee_rate) / denominator
+        denominator = 1 + fee_rate
+        if denominator <= 0:
+            return entry
+        return entry * (1 - fee_rate) / denominator
+
+    def _invert_exit_impact(self, side: str, target_exit_with_costs: float, impact: float) -> float | None:
+        if side == "long":
+            denominator = 1 - impact
+            if denominator <= 0:
+                return None
+            return target_exit_with_costs / denominator
+        denominator = 1 + impact
+        if denominator <= 0:
+            return None
+        return target_exit_with_costs / denominator
 
     def _fees_usd(self, entry: float, exit_price: float, qty_base: float) -> float:
         fee_rate = self._settings.fee_rate_bps / 10_000

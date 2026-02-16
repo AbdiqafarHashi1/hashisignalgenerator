@@ -196,3 +196,97 @@ def test_zero_global_reentry_cooldown_allows_immediate_reentry_in_scalp_mode(tmp
 
     reopened = trader.maybe_open_trade("ETHUSDT", _plan(), allow_multiple=True)
     assert reopened is not None
+
+
+def test_breakeven_stop_closes_near_flat_after_fees_and_impact_for_long_and_short(tmp_path):
+    settings = _settings(tmp_path)
+    settings.fee_rate_bps = 5.5
+    settings.spread_bps = 1.5
+    settings.slippage_bps = 1.5
+    settings.move_to_breakeven_min_seconds_open = 0
+    settings.move_to_breakeven_buffer_r = 0.0
+    settings.move_to_breakeven_buffer_bps = 0.0
+    settings.move_to_breakeven_offset_bps = 0.0
+    db = Database(settings)
+    trader = PaperTrader(settings, db)
+
+    long_id = trader.maybe_open_trade("ETHUSDT", _plan(), allow_multiple=True)
+    assert long_id is not None
+    trader.update_mark_price("ETHUSDT", 2010.0)
+    assert trader.move_stop_to_breakeven("ETHUSDT") == 1
+    long_stop = db.fetch_open_trades("ETHUSDT")[0].stop
+    long_results = trader.evaluate_open_trades("ETHUSDT", long_stop, candle_high=long_stop, candle_low=long_stop)
+    assert len(long_results) == 1
+    assert long_results[0].result == "sl_close"
+    assert long_results[0].pnl_usd >= -1e-6
+
+    short_id = trader.maybe_open_trade("ETHUSDT", _short_plan(), allow_multiple=True)
+    assert short_id is not None
+    trader.update_mark_price("ETHUSDT", 1990.0)
+    assert trader.move_stop_to_breakeven("ETHUSDT") == 1
+    short_stop = db.fetch_open_trades("ETHUSDT")[0].stop
+    short_results = trader.evaluate_open_trades("ETHUSDT", short_stop, candle_high=short_stop, candle_low=short_stop)
+    assert len(short_results) == 1
+    assert short_results[0].result == "sl_close"
+    assert short_results[0].pnl_usd >= -1e-6
+
+
+def test_breakeven_respects_minimum_seconds_open(tmp_path):
+    settings = _settings(tmp_path)
+    settings.move_to_breakeven_min_seconds_open = 3600
+    settings.move_to_breakeven_buffer_r = 0.0
+    settings.move_to_breakeven_buffer_bps = 0.0
+    settings.move_to_breakeven_offset_bps = 0.0
+    db = Database(settings)
+    trader = PaperTrader(settings, db)
+
+    trade_id = trader.maybe_open_trade("ETHUSDT", _plan(), allow_multiple=True)
+    assert trade_id is not None
+    original_stop = db.fetch_open_trades("ETHUSDT")[0].stop
+
+    trader.update_mark_price("ETHUSDT", 2012.0)
+    moved = trader.move_stop_to_breakeven("ETHUSDT")
+    assert moved == 0
+    assert db.fetch_open_trades("ETHUSDT")[0].stop == original_stop
+
+
+def test_breakeven_buffer_bps_and_offset_shift_stop_direction_and_single_fire(tmp_path):
+    settings = _settings(tmp_path)
+    settings.move_to_breakeven_min_seconds_open = 0
+    settings.move_to_breakeven_buffer_r = 0.0
+    settings.move_to_breakeven_buffer_bps = 10.0
+    settings.move_to_breakeven_offset_bps = 5.0
+    db = Database(settings)
+    trader = PaperTrader(settings, db)
+
+    long_id = trader.maybe_open_trade("ETHUSDT", _plan(), allow_multiple=True)
+    assert long_id is not None
+    long_before = db.fetch_open_trades("ETHUSDT")[0]
+    long_true_be = trader._true_be_exit_with_costs("long", long_before.entry, settings.fee_rate_bps / 10_000)
+    trader.update_mark_price("ETHUSDT", 2012.0)
+    assert trader.move_stop_to_breakeven("ETHUSDT") == 1
+    long_after = db.fetch_open_trades("ETHUSDT")[0]
+    assert long_after.stop > long_before.stop
+    assert trader._apply_exit_price("long", long_after.stop) > long_true_be
+    assert trader.move_stop_to_breakeven("ETHUSDT") == 0
+
+    events = [event for event in db.fetch_events() if event["event_type"] == "stop_moved"]
+    assert len(events) == 1
+    payload = events[0]["payload"]
+    assert payload["trade_id"] == long_before.id
+    assert payload["old_stop"] == long_before.stop
+    assert payload["new_stop"] == long_after.stop
+    assert payload["buffer_bps"] == settings.move_to_breakeven_buffer_bps
+    assert payload["offset_bps"] == settings.move_to_breakeven_offset_bps
+
+    trader.force_close_trades("ETHUSDT", long_after.entry, reason="manual_close")
+
+    short_id = trader.maybe_open_trade("ETHUSDT", _short_plan(), allow_multiple=True)
+    assert short_id is not None
+    short_before = db.fetch_open_trades("ETHUSDT")[0]
+    short_true_be = trader._true_be_exit_with_costs("short", short_before.entry, settings.fee_rate_bps / 10_000)
+    trader.update_mark_price("ETHUSDT", 1988.0)
+    assert trader.move_stop_to_breakeven("ETHUSDT") == 1
+    short_after = db.fetch_open_trades("ETHUSDT")[0]
+    assert short_after.stop < short_before.stop
+    assert trader._apply_exit_price("short", short_after.stop) < short_true_be

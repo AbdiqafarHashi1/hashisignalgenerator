@@ -1359,6 +1359,18 @@ def _execute_trade_plan(symbol: str, plan: TradePlan) -> tuple[bool, int | None]
     settings = _require_settings()
     if settings.engine_mode not in {"paper", "live"} or paper_trader is None:
         return False, None
+
+    now = datetime.now(timezone.utc)
+    closed_today = 0
+    for trade in _require_database().fetch_trades():
+        closed_at = _as_datetime_utc(getattr(trade, "closed_at", None))
+        if closed_at is not None and closed_at.date() == now.date() and str(getattr(trade, "symbol", "")).upper() == symbol.upper():
+            closed_today += 1
+    risk_ok, risk_reason = _require_state().risk_check(symbol, settings, now, trades_today_closed=closed_today)
+    if not risk_ok:
+        _require_state().record_skip_reason(risk_reason)
+        return False, None
+
     trade_id = paper_trader.maybe_open_trade(symbol, plan)
     if trade_id is None:
         return False, None
@@ -1368,23 +1380,26 @@ def _execute_trade_plan(symbol: str, plan: TradePlan) -> tuple[bool, int | None]
 
 def _hard_risk_gate_reasons(symbol: str, now: datetime) -> list[str]:
     settings = _require_settings()
-    daily_state = _require_state().get_daily_state(symbol)
-    account_loss_limit = settings.account_size * settings.max_daily_loss_pct
+    state_store = _require_state()
     reasons: list[str] = []
     for start_t, end_t in settings.blackout_windows():
         if start_t <= now.time() <= end_t:
             reasons.append("news_blackout")
             break
-    if daily_state.pnl_usd <= -account_loss_limit:
-        reasons.append("daily_loss_limit")
+
+    closed_today = 0
+    for trade in _require_database().fetch_trades():
+        closed_at = _as_datetime_utc(getattr(trade, "closed_at", None))
+        if closed_at is not None and closed_at.date() == now.date() and str(getattr(trade, "symbol", "")).upper() == symbol.upper():
+            closed_today += 1
+
+    risk_ok, risk_reason = state_store.risk_check(symbol, settings, now, trades_today_closed=closed_today)
+    if not risk_ok and risk_reason:
+        reasons.append(risk_reason)
+
+    daily_state = state_store.get_daily_state(symbol)
     if settings.max_losses_per_day and daily_state.losses >= settings.max_losses_per_day:
         reasons.append("max_losses_per_day")
-    if daily_state.trades >= settings.max_trades_per_day:
-        reasons.append("max_trades")
-    if daily_state.last_loss_ts is not None:
-        minutes_since = (now - daily_state.last_loss_ts).total_seconds() / 60.0
-        if minutes_since < settings.cooldown_minutes_after_loss:
-            reasons.append("cooldown")
     return reasons
 
 
@@ -1407,9 +1422,11 @@ def _fallback_decision(symbol: str) -> TradePlan:
 def _contains_hard_gate(rationale: list[str]) -> bool:
     hard_gates = {
         "news_blackout",
-        "daily_loss_limit",
+        "daily_loss_limit_hit",
+        "global_dd_limit_hit",
         "max_losses_per_day",
-        "max_trades",
+        "max_trades_exceeded",
         "cooldown",
+        "max_consecutive_losses",
     }
     return any(reason in hard_gates for reason in rationale)

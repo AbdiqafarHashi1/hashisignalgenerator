@@ -161,6 +161,31 @@ class DecisionScheduler:
         logger.info("scheduler_stop status=stopped")
         return True
 
+    def _closed_trades_today_by_symbol(self, now: datetime) -> dict[str, int]:
+        if self._database is None:
+            return {}
+        start_of_day = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        counts: dict[str, int] = {}
+        for trade in self._database.fetch_trades():
+            closed_at = getattr(trade, "closed_at", None)
+            if closed_at is None:
+                continue
+            closed_dt = closed_at if isinstance(closed_at, datetime) else datetime.fromisoformat(str(closed_at).replace("Z", "+00:00"))
+            if closed_dt.tzinfo is None:
+                closed_dt = closed_dt.replace(tzinfo=timezone.utc)
+            if closed_dt < start_of_day:
+                continue
+            symbol = str(getattr(trade, "symbol", "") or "")
+            if not symbol:
+                continue
+            counts[symbol] = counts.get(symbol, 0) + 1
+        return counts
+
+    def _risk_gate_reason(self, symbol: str, now: datetime, closed_trades_today: dict[str, int]) -> str | None:
+        closed_count = closed_trades_today.get(symbol)
+        allowed, reason = self._state.risk_check(symbol, self._settings, now, trades_today_closed=closed_count)
+        return None if allowed else reason
+
     async def run_once(self, force: bool = False) -> list[dict[str, object]]:
         self.last_tick_ts = time.time()
         if self._heartbeat_cb is not None:
@@ -203,9 +228,32 @@ class DecisionScheduler:
                 self._state.record_skip_reason("market_data_disabled")
             self._notify_tick_listeners()
             return results
+        closed_trades_today = self._closed_trades_today_by_symbol(self._last_tick_time)
         for symbol in symbols:
             tick_ts = datetime.now(timezone.utc)
             self._last_symbol_tick_time[symbol] = tick_ts
+            gate_reason = self._risk_gate_reason(symbol, tick_ts, closed_trades_today)
+            if gate_reason:
+                self._state.set_decision_meta(symbol, {"decision": "skip", "skip_reason": gate_reason, "final_entry_gate": gate_reason})
+                self._state.record_skip_reason(gate_reason)
+                results.append(
+                    {
+                        "symbol": symbol,
+                        "plan": None,
+                        "reason": gate_reason,
+                        "candles_fetched": 0,
+                        "latest_candle_ts": None,
+                        "decision_status": None,
+                        "persisted": False,
+                        "dedupe_key": None,
+                        "telegram_sent": False,
+                        "trade_opened": False,
+                        "trade_id": None,
+                        "decision": "skip",
+                        "skip_reason": gate_reason,
+                    }
+                )
+                continue
             try:
                 snapshot = self._last_snapshots.get(symbol)
                 now_ms = int(tick_ts.timestamp() * 1000)

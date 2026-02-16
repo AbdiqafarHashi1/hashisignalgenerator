@@ -228,37 +228,54 @@ class StateStore:
             "global_drawdown_cap_hit": global_dd_pct >= float(cfg.global_drawdown_limit_pct or 0.0),
         }
 
+    def risk_check(
+        self,
+        symbol: str,
+        cfg: Settings,
+        now: datetime,
+        trades_today_closed: int | None = None,
+    ) -> tuple[bool, str | None]:
+        state = self.get_daily_state(symbol)
+        account_loss_limit = cfg.account_size * cfg.max_daily_loss_pct
+
+        if not cfg.debug_disable_hard_risk_gates and state.pnl_usd <= -account_loss_limit:
+            return False, "daily_loss_limit_hit"
+
+        _, global_dd_pct = self.global_drawdown(float(cfg.account_size or 0.0))
+        if not cfg.debug_disable_hard_risk_gates and global_dd_pct >= float(cfg.global_drawdown_limit_pct or 0.0):
+            return False, "global_dd_limit_hit"
+
+        trades_today = state.trades if trades_today_closed is None else int(trades_today_closed)
+        if trades_today >= cfg.max_trades_per_day:
+            return False, "max_trades_exceeded"
+
+        if not cfg.debug_loosen and state.last_loss_ts is not None:
+            minutes_since = (now - state.last_loss_ts).total_seconds() / 60.0
+            if minutes_since < cfg.cooldown_minutes_after_loss:
+                return False, "cooldown"
+
+        if cfg.max_consecutive_losses and state.consecutive_losses >= cfg.max_consecutive_losses:
+            return False, "max_consecutive_losses"
+
+        return True, None
+
     def check_limits(self, symbol: str, cfg: Settings, now: datetime) -> tuple[bool, Status, list[str]]:
         state = self.get_daily_state(symbol)
         rationale: list[str] = []
-        account_loss_limit = cfg.account_size * cfg.max_daily_loss_pct
         profit_target = cfg.account_size * (cfg.daily_profit_target_pct or 0.0)
 
-        if not cfg.debug_disable_hard_risk_gates and state.pnl_usd <= -account_loss_limit:
-            rationale.append("daily_loss_limit")
+        allowed, gate_reason = self.risk_check(symbol, cfg, now)
+        if not allowed and gate_reason:
+            rationale.append(gate_reason)
             return False, Status.RISK_OFF, rationale
-        global_dd_usd, global_dd_pct = self.global_drawdown(float(cfg.account_size or 0.0))
-        if not cfg.debug_disable_hard_risk_gates and global_dd_pct >= float(cfg.global_drawdown_limit_pct or 0.0):
-            rationale.append("global_drawdown_limit")
-            return False, Status.RISK_OFF, rationale
+
         if cfg.manual_kill_switch:
             rationale.append("manual_kill_switch")
             return False, Status.RISK_OFF, rationale
         if profit_target > 0 and state.pnl_usd >= profit_target:
             rationale.append("daily_profit_target")
             return False, Status.RISK_OFF, rationale
-        if cfg.max_consecutive_losses and state.consecutive_losses >= cfg.max_consecutive_losses:
-            rationale.append("max_losses")
-            return False, Status.RISK_OFF, rationale
         if not cfg.debug_disable_hard_risk_gates and cfg.max_losses_per_day and state.losses >= cfg.max_losses_per_day:
             rationale.append("max_losses_per_day")
             return False, Status.RISK_OFF, rationale
-        if state.trades >= cfg.max_trades_per_day:
-            rationale.append("max_trades")
-            return False, Status.RISK_OFF, rationale
-        if not cfg.debug_loosen and state.last_loss_ts is not None:
-            minutes_since = (now - state.last_loss_ts).total_seconds() / 60.0
-            if minutes_since < cfg.cooldown_minutes_after_loss:
-                rationale.append("cooldown")
-                return False, Status.RISK_OFF, rationale
         return True, Status.NO_TRADE, rationale

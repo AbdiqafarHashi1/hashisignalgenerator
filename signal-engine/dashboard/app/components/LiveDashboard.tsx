@@ -131,7 +131,7 @@ export default function LiveDashboard() {
         <Card>
           <div className="flex flex-wrap items-start justify-between gap-3">
             <div>
-              <h1 className="text-3xl font-semibold tracking-tight">Signal Engine Dashboard</h1>
+              <h1 className="text-3xl font-semibold tracking-tight">HASHI'S BOT</h1>
               <p className="mt-1 text-sm text-slate-400">API: {API_BASE}</p>
             </div>
             <div className="flex flex-col items-end gap-1">

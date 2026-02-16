@@ -145,3 +145,17 @@ class EngineState(BaseModel):
     ema_fast: float | None = None
     ema_slow: float | None = None
     ema_trend: float | None = None
+    starting_equity: float | None = None
+    realized_pnl: float | None = None
+    unrealized_pnl: float | None = None
+    fees_total: float | None = None
+    fees_today: float | None = None
+    equity_reconcile_delta: float | None = None
+    daily_start_equity: float | None = None
+    daily_peak_equity: float | None = None
+    global_peak_equity: float | None = None
+    daily_dd_pct: float | None = None
+    global_dd_pct: float | None = None
+    trades_today_by_symbol: dict[str, int] = Field(default_factory=dict)
+    realized_pnl_by_symbol: dict[str, float] = Field(default_factory=dict)
+    fees_by_symbol: dict[str, float] = Field(default_factory=dict)

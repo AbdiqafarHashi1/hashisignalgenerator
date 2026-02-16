@@ -129,7 +129,30 @@ def _funding_blackout_active(now: datetime, cfg: Settings) -> bool:
     return minute_in_window >= block_start or minute_in_window <= 1
 
 
-def _trade_to_dict(trade: Any) -> dict[str, Any]:
+def _mark_price_for_trade(trader: PaperTrader, trade: Any) -> float:
+    return float(trader._last_mark_prices.get(trade.symbol, trade.entry))
+
+
+def _trade_fee(trade: Any, cfg: Settings) -> float:
+    if getattr(trade, "fees", None) is not None:
+        return float(trade.fees or 0.0)
+    if trade.exit is None:
+        return 0.0
+    return ((trade.entry * trade.size) + (trade.exit * trade.size)) * (float(cfg.fee_rate_bps or 0.0) / 10000)
+
+
+def _trade_to_dict(trade: Any, trader: PaperTrader | None = None, cfg: Settings | None = None) -> dict[str, Any]:
+    mark = _mark_price_for_trade(trader, trade) if trader is not None else None
+    unrealized = None
+    unrealized_r = None
+    if trade.closed_at is None and mark is not None:
+        side_sign = 1.0 if trade.side == "long" else -1.0
+        unrealized = (mark - trade.entry) * trade.size * side_sign
+        risk = abs(trade.entry - trade.stop)
+        unrealized_r = ((mark - trade.entry) * side_sign) / risk if risk > 0 else None
+
+    fee_value = _trade_fee(trade, cfg) if cfg is not None else (float(getattr(trade, "fees", 0.0) or 0.0) if getattr(trade, "fees", None) is not None else None)
+
     return {
         "id": trade.id,
         "symbol": trade.symbol,
@@ -139,11 +162,121 @@ def _trade_to_dict(trade: Any) -> dict[str, Any]:
         "take_profit": trade.take_profit,
         "size": trade.size,
         "pnl_usd": trade.pnl_usd,
+        "fees": fee_value,
         "side": trade.side,
         "opened_at": trade.opened_at,
         "closed_at": trade.closed_at,
         "result": trade.result,
         "trade_mode": trade.trade_mode,
+        "mark_price": mark,
+        "unrealized_pnl": unrealized,
+        "unrealized_r": unrealized_r,
+    }
+
+
+def _get_runtime_float(db: Database, key: str, default: float) -> float:
+    row = db.get_runtime_state(key)
+    if row is None or row.value_number is None:
+        return default
+    return float(row.value_number)
+
+
+def _get_runtime_text(db: Database, key: str, default: str) -> str:
+    row = db.get_runtime_state(key)
+    if row is None or row.value_text is None:
+        return default
+    return str(row.value_text)
+
+
+def _build_accounting_snapshot(cfg: Settings, db: Database, trader: PaperTrader, state_store: StateStore, now: datetime) -> dict[str, Any]:
+    trades = db.fetch_trades()
+    start_of_day = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    day_key = start_of_day.date().isoformat()
+
+    starting_equity = float(cfg.account_size or 0.0)
+    realized_net = 0.0
+    realized_gross = 0.0
+    unrealized = 0.0
+    fees_total = 0.0
+    fees_today = 0.0
+    trades_today = 0
+    wins_today = 0
+    losses_today = 0
+    realized_today_net = 0.0
+    trades_today_by_symbol: dict[str, int] = {}
+    realized_pnl_by_symbol: dict[str, float] = {}
+    fees_by_symbol: dict[str, float] = {}
+
+    for trade in trades:
+        symbol = str(getattr(trade, "symbol", ""))
+        if trade.closed_at is not None:
+            pnl_net = float(getattr(trade, "pnl_usd", 0.0) or 0.0)
+            fee = _trade_fee(trade, cfg)
+            realized_net += pnl_net
+            fees_total += fee
+            realized_gross += (pnl_net + fee)
+            realized_pnl_by_symbol[symbol] = realized_pnl_by_symbol.get(symbol, 0.0) + pnl_net
+            fees_by_symbol[symbol] = fees_by_symbol.get(symbol, 0.0) + fee
+            closed_at = _as_datetime_utc(getattr(trade, "closed_at", None))
+            if closed_at and closed_at >= start_of_day:
+                trades_today += 1
+                trades_today_by_symbol[symbol] = trades_today_by_symbol.get(symbol, 0) + 1
+                realized_today_net += pnl_net
+                fees_today += fee
+                if pnl_net > 0:
+                    wins_today += 1
+                elif pnl_net < 0:
+                    losses_today += 1
+        else:
+            mark = _mark_price_for_trade(trader, trade)
+            side_sign = 1.0 if trade.side == "long" else -1.0
+            unrealized += (mark - trade.entry) * trade.size * side_sign
+
+    equity = starting_equity + realized_net + unrealized
+    reconcile_expected = starting_equity + realized_gross + unrealized - fees_total
+    reconcile_delta = equity - reconcile_expected
+
+    prev_day_key = _get_runtime_text(db, "accounting.day_key", day_key)
+    if prev_day_key != day_key:
+        db.set_runtime_state("accounting.day_key", value_text=day_key)
+        db.set_runtime_state("accounting.daily_start_equity", value_number=equity)
+        db.set_runtime_state("accounting.daily_peak_equity", value_number=equity)
+
+    daily_start_equity = _get_runtime_float(db, "accounting.daily_start_equity", equity)
+    daily_peak_equity = max(_get_runtime_float(db, "accounting.daily_peak_equity", equity), equity)
+    db.set_runtime_state("accounting.daily_peak_equity", value_number=daily_peak_equity)
+
+    global_peak_equity = max(_get_runtime_float(db, "accounting.global_peak_equity", equity), equity)
+    db.set_runtime_state("accounting.global_peak_equity", value_number=global_peak_equity)
+
+    daily_dd_pct = ((daily_peak_equity - equity) / daily_peak_equity) if daily_peak_equity > 0 else 0.0
+    global_dd_pct = ((global_peak_equity - equity) / global_peak_equity) if global_peak_equity > 0 else 0.0
+
+    state_store.set_global_equity(equity)
+
+    return {
+        "trades": trades,
+        "starting_equity": starting_equity,
+        "equity": equity,
+        "balance": starting_equity + realized_net,
+        "realized_pnl": realized_gross,
+        "realized_pnl_net": realized_net,
+        "unrealized_pnl": unrealized,
+        "fees_total": fees_total,
+        "fees_today": fees_today,
+        "equity_reconcile_delta": reconcile_delta,
+        "trades_today": trades_today,
+        "wins_today": wins_today,
+        "losses_today": losses_today,
+        "realized_pnl_today": realized_today_net,
+        "trades_today_by_symbol": trades_today_by_symbol,
+        "realized_pnl_by_symbol": realized_pnl_by_symbol,
+        "fees_by_symbol": fees_by_symbol,
+        "daily_start_equity": daily_start_equity,
+        "daily_peak_equity": daily_peak_equity,
+        "daily_dd_pct": daily_dd_pct,
+        "global_peak_equity": global_peak_equity,
+        "global_dd_pct": global_dd_pct,
     }
 
 
@@ -155,33 +288,19 @@ def _build_engine_state_snapshot() -> EngineState:
     trader = _require_paper_trader()
     now = datetime.now(timezone.utc)
 
-    trades = db.fetch_trades()
+    acct = _build_accounting_snapshot(cfg, db, trader, state_store, now)
+    trades = acct["trades"]
     summary = compute_stats(trades)
-    start_of_day = now.replace(hour=0, minute=0, second=0, microsecond=0)
 
-    wins = 0
-    losses = 0
-    trades_today = 0
-    realized_pnl_today = 0.0
-    for trade in trades:
-        closed_at_dt = _as_datetime_utc(getattr(trade, "closed_at", None))
-        if closed_at_dt is None or closed_at_dt < start_of_day:
-            continue
-        if getattr(trade, "trade_mode", "paper") == "test":
-            continue
-        pnl = float(getattr(trade, "pnl_usd", None) or 0.0)
-        realized_pnl_today += pnl
-        trades_today += 1
-        if pnl > 0:
-            wins += 1
-        elif pnl < 0:
-            losses += 1
+    wins = int(acct["wins_today"])
+    losses = int(acct["losses_today"])
+    trades_today = int(acct["trades_today"])
+    realized_pnl_today = float(acct["realized_pnl_today"])
 
-    unrealized = trader.total_unrealized_pnl_usd()
-    balance = cfg.account_size + summary.total_pnl
-    equity = balance + unrealized
-    state_store.set_global_equity(equity)
-    max_dd_today_pct = (summary.max_drawdown / cfg.account_size) * 100 if cfg.account_size else 0.0
+    unrealized = float(acct["unrealized_pnl"])
+    balance = float(acct["balance"])
+    equity = float(acct["equity"])
+    max_dd_today_pct = float(acct["daily_dd_pct"]) * 100
     db.record_equity(equity=equity, realized_pnl_today=realized_pnl_today, drawdown_pct=max_dd_today_pct)
 
     symbols = state_store.get_symbols()
@@ -226,6 +345,20 @@ def _build_engine_state_snapshot() -> EngineState:
         ema_fast=decision_meta.get("ema_fast"),
         ema_slow=decision_meta.get("ema_slow"),
         ema_trend=decision_meta.get("ema_trend"),
+        starting_equity=float(acct["starting_equity"]),
+        realized_pnl=float(acct["realized_pnl"]),
+        unrealized_pnl=float(acct["unrealized_pnl"]),
+        fees_total=float(acct["fees_total"]),
+        fees_today=float(acct["fees_today"]),
+        equity_reconcile_delta=float(acct["equity_reconcile_delta"]),
+        daily_start_equity=float(acct["daily_start_equity"]),
+        daily_peak_equity=float(acct["daily_peak_equity"]),
+        global_peak_equity=float(acct["global_peak_equity"]),
+        daily_dd_pct=float(acct["daily_dd_pct"]),
+        global_dd_pct=float(acct["global_dd_pct"]),
+        trades_today_by_symbol=dict(acct["trades_today_by_symbol"]),
+        realized_pnl_by_symbol=dict(acct["realized_pnl_by_symbol"]),
+        fees_by_symbol=dict(acct["fees_by_symbol"]),
     )
 
 
@@ -625,37 +758,43 @@ async def dashboard_overview() -> DashboardOverview:
     trader = _require_paper_trader()
     scheduler = _require_scheduler()
     now = datetime.now(timezone.utc)
-    trades = db.fetch_trades()
+    acct = _build_accounting_snapshot(cfg, db, trader, state_store, now)
+    trades = acct["trades"]
     perf = build_performance_snapshot(trades, account_size=float(cfg.account_size or 0.0), skip_reason_counts=state_store.skip_reason_counts())
 
-    starting_equity = float(cfg.account_size or 0.0)
-    realized = sum(float(t.pnl_usd or 0.0) for t in trades if t.closed_at)
-    unrealized = trader.total_unrealized_pnl_usd()
-    equity = starting_equity + realized + unrealized
-    state_store.set_global_equity(equity)
+    starting_equity = float(acct["starting_equity"])
+    realized_net = float(acct["realized_pnl_net"])
+    realized = float(acct["realized_pnl"])
+    unrealized = float(acct["unrealized_pnl"])
+    equity = float(acct["equity"])
+    fees_total = float(acct["fees_total"])
+    fees_today = float(acct["fees_today"])
+    trades_today = int(acct["trades_today"])
 
-    start_of_day = now.replace(hour=0, minute=0, second=0, microsecond=0)
-    realized_today = 0.0
-    fees_today = 0.0
-    rolling_fees = 0.0
-    trades_today = 0
-    for trade in trades:
-        if trade.closed_at is None or trade.exit is None:
-            continue
-        fee = ((trade.entry * trade.size) + (trade.exit * trade.size)) * (float(cfg.fee_rate_bps or 0.0) / 10000)
-        rolling_fees += fee
-        closed_at = _as_datetime_utc(trade.closed_at)
-        if closed_at and closed_at >= start_of_day:
-            trades_today += 1
-            realized_today += float(trade.pnl_usd or 0.0)
-            fees_today += fee
+    daily_dd_pct = float(acct["daily_dd_pct"])
+    global_dd_pct = float(acct["global_dd_pct"])
+    daily_dd_usd = max(0.0, float(acct["daily_peak_equity"]) - equity)
+    global_dd_usd = max(0.0, float(acct["global_peak_equity"]) - equity)
 
-    dd_usd, dd_pct = state_store.global_drawdown(starting_equity)
-    daily_states = [state_store.get_daily_state(symbol) for symbol in cfg.symbols]
-    today_pnl = sum(float(ds.pnl_usd or 0.0) for ds in daily_states)
-    daily_dd_usd = max(0.0, -today_pnl)
-    daily_dd_pct = (daily_dd_usd / starting_equity) if starting_equity > 0 else 0.0
     active_reasons = _active_risk_gates(cfg.symbols[0] if cfg.symbols else "BTCUSDT", now)
+
+    open_trades = db.fetch_open_trades()
+    open_positions = [_trade_to_dict(t, trader, cfg) for t in open_trades]
+    open_orders: list[dict[str, Any]] = []
+    executions = [
+        {
+            "id": t.id,
+            "symbol": t.symbol,
+            "side": t.side,
+            "price": t.exit,
+            "qty": t.size,
+            "fee": _trade_fee(t, cfg),
+            "status": t.result,
+            "time": t.closed_at,
+        }
+        for t in trades[:200]
+        if t.closed_at is not None and t.exit is not None
+    ]
 
     symbol_data: dict[str, dict[str, Any]] = {}
     for symbol in cfg.symbols:
@@ -670,7 +809,7 @@ async def dashboard_overview() -> DashboardOverview:
             "provider": meta.get("provider"),
             "last_candle_age_seconds": meta.get("last_candle_age_seconds"),
             "market_data_status": meta.get("market_data_status", "OK"),
-            "open_position": next((p for p in [_trade_to_dict(t) for t in db.fetch_open_trades(symbol)]), None),
+            "open_position": next((p for p in [_trade_to_dict(t, trader, cfg) for t in db.fetch_open_trades(symbol)]), None),
         }
 
     skip_by_symbol: dict[str, dict[str, int]] = {symbol: {} for symbol in cfg.symbols}
@@ -679,17 +818,42 @@ async def dashboard_overview() -> DashboardOverview:
         if reason:
             skip_by_symbol[symbol][str(reason)] = skip_by_symbol[symbol].get(str(reason), 0) + 1
 
+    raw_events = db.fetch_events(limit=200)
+    event_tape = [
+        {
+            "time": item.get("timestamp"),
+            "type": item.get("event_type"),
+            "correlation_id": item.get("correlation_id"),
+            "payload": item.get("payload", {}),
+        }
+        for item in raw_events
+    ]
+
     return DashboardOverview(
         account={
             "live_equity": equity,
             "starting_equity": starting_equity,
-            "balance": starting_equity + realized,
+            "balance": starting_equity + realized_net,
             "unrealized_pnl": unrealized,
-            "realized_pnl_today": realized_today,
+            "realized_pnl": realized,
+            "realized_pnl_today": float(acct["realized_pnl_today"]),
+            "fees_total": fees_total,
+            "fees_today": fees_today,
+            "equity_reconcile_delta": float(acct["equity_reconcile_delta"]),
+            "daily_start_equity": float(acct["daily_start_equity"]),
+            "daily_peak_equity": float(acct["daily_peak_equity"]),
+            "global_peak_equity": float(acct["global_peak_equity"]),
             "daily_drawdown_usd": daily_dd_usd,
             "daily_drawdown_pct": daily_dd_pct,
-            "global_drawdown_usd": dd_usd,
-            "global_drawdown_pct": dd_pct,
+            "global_drawdown_usd": global_dd_usd,
+            "global_drawdown_pct": global_dd_pct,
+            "trades_today_by_symbol": dict(acct["trades_today_by_symbol"]),
+            "realized_pnl_by_symbol": dict(acct["realized_pnl_by_symbol"]),
+            "fees_by_symbol": dict(acct["fees_by_symbol"]),
+            "open_positions_detail": open_positions,
+            "open_orders": open_orders,
+            "executions": executions,
+            "event_tape": event_tape,
             "status": "PAUSED" if active_reasons else "ACTIVE",
             "pause_reasons": [item.get("reason") for item in active_reasons],
             "engine_running": scheduler.running,
@@ -699,11 +863,12 @@ async def dashboard_overview() -> DashboardOverview:
         },
         risk={
             "risk_pct_per_trade": float(cfg.base_risk_pct or 0.0),
+            "risk_per_trade_usd": float(cfg.risk_per_trade_usd or 0.0),
             "daily_loss_limit_pct": float(cfg.max_daily_loss_pct or 0.0),
             "global_dd_limit_pct": float(cfg.global_drawdown_limit_pct or 0.0),
             "max_trades_per_day": int(cfg.max_trades_per_day or 0),
             "trades_today": trades_today,
-            "consecutive_losses": max((int(ds.consecutive_losses) for ds in daily_states), default=0),
+            "consecutive_losses": max((int(ds.consecutive_losses) for ds in [state_store.get_daily_state(s) for s in cfg.symbols]), default=0),
             "cooldown_remaining_seconds": max((int((state_store.risk_snapshot(s, cfg, now).get("cooldown_remaining_minutes", 0) or 0) * 60) for s in cfg.symbols), default=0),
         },
         activity={
@@ -714,12 +879,12 @@ async def dashboard_overview() -> DashboardOverview:
             "avg_win": perf.avg_win,
             "avg_loss": perf.avg_loss,
             "fees_today": fees_today,
-            "fees_rolling": rolling_fees,
+            "fees_rolling": fees_total,
             "slippage_bps": float(cfg.slippage_bps or 0.0),
             "market_data_errors": state_store.market_data_error_counts(),
         },
         symbols=symbol_data,
-        recent_trades=[_trade_to_dict(t) for t in trades[:100]],
+        recent_trades=[_trade_to_dict(t, trader, cfg) for t in trades[:100]],
         equity_curve=[{"index": idx, "equity": starting_equity + val} for idx, val in enumerate(perf.equity_curve)],
         skip_reasons={"global": state_store.skip_reason_counts(), "by_symbol": skip_by_symbol},
     )

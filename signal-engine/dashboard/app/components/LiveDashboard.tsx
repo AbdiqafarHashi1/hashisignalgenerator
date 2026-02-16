@@ -123,7 +123,12 @@ export default function LiveDashboard() {
   const btcCard = findSymbol(symbols, "BTCUSDT");
 
   const pnlToday = num(account.realized_pnl_today ?? state?.realized_pnl_today_usd);
+  const unrealizedPnl = num(account.unrealized_pnl ?? state?.unrealized_pnl_usd);
   const statusText = running ? "ACTIVE" : "STOPPED";
+  const openPositions = Array.isArray(account.open_positions_detail) ? (account.open_positions_detail as Array<Record<string, unknown>>) : [];
+  const openOrders = Array.isArray(account.open_orders) ? (account.open_orders as Array<Record<string, unknown>>) : [];
+  const executions = Array.isArray(account.executions) ? (account.executions as Array<Record<string, unknown>>) : [];
+  const eventTape = Array.isArray(account.event_tape) ? (account.event_tape as Array<Record<string, unknown>>) : [];
 
   return (
     <div className="min-h-screen bg-gradient-to-b from-[#01040c] via-[#020712] to-[#090f1c] px-3 py-5 text-slate-100 md:px-6">
@@ -162,8 +167,14 @@ export default function LiveDashboard() {
 
         {error ? <p className="text-sm text-rose-300">{error}</p> : null}
 
-        <section className="grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-6">
+        <section className="grid grid-cols-2 gap-3 md:grid-cols-4 xl:grid-cols-7">
           <Kpi loading={loading} label="Equity" value={money(account.live_equity ?? state?.equity)} />
+          <Kpi
+            loading={loading}
+            label="Unrealized PnL"
+            value={money(unrealizedPnl)}
+            valueClass={unrealizedPnl == null ? "" : unrealizedPnl < 0 ? "text-rose-300" : "text-emerald-300"}
+          />
           <Kpi
             loading={loading}
             label="PnL Today"
@@ -231,6 +242,7 @@ export default function LiveDashboard() {
               <Metric label="Expectancy" value={fmt(activity.expectancy)} />
               <Metric label="Avg win/loss" value={`${money(activity.avg_win)} / ${money(activity.avg_loss)}`} />
               <Metric label="Fees today/rolling" value={`${money(activity.fees_today)} / ${money(activity.fees_rolling)}`} />
+              <Metric label="Equity reconcile Δ" value={money(account.equity_reconcile_delta)} />
             </Card>
 
             <SymbolCard symbol={ethCard} fallback="ETHUSDT" />
@@ -248,6 +260,61 @@ export default function LiveDashboard() {
             </div>
           </Card>
         ) : null}
+
+
+        <section className="grid gap-4 lg:grid-cols-2">
+          <Card title="Open Positions">
+            {openPositions.length ? (
+              <div className="space-y-2 text-xs">
+                {openPositions.map((row, idx) => (
+                  <div key={`${String(row.id ?? idx)}`} className="rounded-lg border border-slate-700/60 p-2">
+                    <p>{String(row.symbol ?? "—")} {String(row.side ?? "—")} qty {fmt(row.size)} @ {fmt(row.entry)}</p>
+                    <p className="text-slate-300">mark {fmt(row.mark_price)} | uPnL {money(row.unrealized_pnl)} | R {fmt(row.unrealized_r)} | SL {fmt(row.stop)} | TP {fmt(row.take_profit)}</p>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <p className="text-sm text-slate-400">No open positions</p>
+            )}
+          </Card>
+          <Card title="Open Orders">
+            {openOrders.length ? (
+              <div className="space-y-2 text-xs">
+                {openOrders.map((row, idx) => (
+                  <div key={`${String(row.id ?? idx)}`} className="rounded-lg border border-slate-700/60 p-2">
+                    <p>ID {String(row.id ?? "—")} | {String(row.symbol ?? "—")} {String(row.side ?? "—")}</p>
+                    <p className="text-slate-300">price {fmt(row.price)} qty {fmt(row.qty)} status {String(row.status ?? "—")}</p>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <p className="text-sm text-slate-400">No open orders</p>
+            )}
+          </Card>
+        </section>
+
+        <section className="grid gap-4 lg:grid-cols-2">
+          <Card title="Executions">
+            <div className="max-h-60 space-y-2 overflow-auto text-xs">
+              {executions.length ? executions.slice(-50).reverse().map((row, idx) => (
+                <div key={`${String(row.id ?? idx)}-${idx}`} className="rounded-lg border border-slate-700/60 p-2">
+                  <p>{String(row.symbol ?? "—")} {String(row.side ?? "—")} @ {fmt(row.price)} x {fmt(row.qty)}</p>
+                  <p className="text-slate-300">fee {money(row.fee)} | {String(row.status ?? "—")} | {formatTime(String(row.time ?? ""))}</p>
+                </div>
+              )) : <p className="text-sm text-slate-400">No executions</p>}
+            </div>
+          </Card>
+          <Card title="Live Event Tape">
+            <div className="max-h-60 space-y-2 overflow-auto text-xs">
+              {eventTape.length ? eventTape.slice(-200).reverse().map((row, idx) => (
+                <div key={`${String(row.correlation_id ?? idx)}-${idx}`} className="rounded-lg border border-slate-700/60 p-2">
+                  <p>{formatTime(String(row.time ?? ""))} | {String(row.type ?? "event")}</p>
+                  <p className="truncate text-slate-300">{JSON.stringify(row.payload ?? {})}</p>
+                </div>
+              )) : <p className="text-sm text-slate-400">No events</p>}
+            </div>
+          </Card>
+        </section>
 
         <Card title="Trade Log" className="w-full p-6 lg:p-7">
           <div className="mb-4 grid gap-2 md:grid-cols-2">

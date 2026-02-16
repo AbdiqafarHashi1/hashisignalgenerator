@@ -113,6 +113,7 @@ class TradeRecord:
     closed_at: str | None
     result: str | None
     trade_mode: str
+    fees: float | None = None
 
 
 
@@ -200,7 +201,7 @@ class Database:
             self._upsert_position(session, symbol=trade.symbol, side=trade.side, qty=trade.size, entry=trade.entry, stop=stop, take_profit=trade.take_profit)
             session.commit()
 
-    def close_trade(self, trade_id: int, exit_price: float, pnl_usd: float, pnl_r: float, closed_at: datetime, result: str) -> None:
+    def close_trade(self, trade_id: int, exit_price: float, pnl_usd: float, pnl_r: float, closed_at: datetime, result: str, fees: float = 0.0) -> None:
         with self._Session() as session:
             trade = session.get(TradeRow, trade_id)
             if trade is None:
@@ -208,6 +209,7 @@ class Database:
             trade.exit = exit_price
             trade.pnl_usd = pnl_usd
             trade.pnl_r = pnl_r
+            trade.fees = fees
             trade.closed_at = _as_utc(closed_at)
             trade.result = result
             trade.status = "closed"
@@ -234,6 +236,20 @@ class Database:
                 stmt = stmt.limit(limit)
             rows = session.execute(stmt).scalars().all()
             return [self._to_trade_record(row) for row in rows]
+
+    def fetch_events(self, limit: int = 200) -> list[dict[str, Any]]:
+        with self._Session() as session:
+            rows = session.execute(select(EventRow).order_by(EventRow.timestamp.desc()).limit(limit)).scalars().all()
+            return [
+                {
+                    "id": row.id,
+                    "timestamp": row.timestamp.isoformat(),
+                    "event_type": row.event_type,
+                    "correlation_id": row.correlation_id,
+                    "payload": row.payload or {},
+                }
+                for row in reversed(rows)
+            ]
 
     def record_equity(self, equity: float, realized_pnl_today: float, drawdown_pct: float) -> None:
         with self._Session() as session:
@@ -309,6 +325,7 @@ class Database:
             size=row.size,
             pnl_usd=row.pnl_usd,
             pnl_r=row.pnl_r,
+            fees=row.fees,
             side=row.side,
             opened_at=_iso_utc(row.opened_at) or "",
             closed_at=_iso_utc(row.closed_at),

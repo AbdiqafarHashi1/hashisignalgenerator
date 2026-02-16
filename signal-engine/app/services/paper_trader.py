@@ -93,7 +93,9 @@ class PaperTrader:
             if score < min_score:
                 return None
             risk_pct = min(self._settings.sweet8_base_risk_pct, self._settings.sweet8_max_risk_pct)
-            size = (self._settings.account_size * risk_pct / sl_distance) if sl_distance > 0 else 0.0
+            configured_risk_usd = float(getattr(self._settings, "risk_per_trade_usd", 0.0) or 0.0)
+            risk_usd = configured_risk_usd if configured_risk_usd > 0 else (self._settings.account_size * risk_pct)
+            size = (risk_usd / sl_distance) if sl_distance > 0 else 0.0
             if size <= 0:
                 return None
             if plan.direction == Direction.long:
@@ -129,7 +131,8 @@ class PaperTrader:
             return None
         side = "long" if plan.direction == Direction.long else "short"
         entry_with_costs = self._apply_entry_price(side, entry)
-        risk_usd = self._settings.account_size * float(plan.risk_pct_used or self._settings.base_risk_pct or 0.0)
+        configured_risk_usd = float(getattr(self._settings, "risk_per_trade_usd", 0.0) or 0.0)
+        risk_usd = configured_risk_usd if configured_risk_usd > 0 else (self._settings.account_size * float(plan.risk_pct_used or self._settings.base_risk_pct or 0.0))
         stop_distance = abs(entry_with_costs - stop)
         size = (risk_usd / stop_distance) if stop_distance > 0 else 0.0
         if plan.position_size_usd:
@@ -166,14 +169,20 @@ class PaperTrader:
         results: list[PaperTradeResult] = []
         for trade in self._db.fetch_open_trades(symbol):
             exit_price = self._apply_exit_price(trade.side, price)
-            pnl_usd, pnl_r = self._calculate_pnl(trade.side, trade.entry, exit_price, trade.stop, trade.size)
+            pnl_usd, pnl_r, fees = self._calculate_pnl(trade.side, trade.entry, exit_price, trade.stop, trade.size)
             self._db.close_trade(
                 trade_id=trade.id,
                 exit_price=exit_price,
                 pnl_usd=pnl_usd,
                 pnl_r=pnl_r,
+                fees=fees,
                 closed_at=datetime.now(timezone.utc),
                 result=reason,
+            )
+            self._db.log_event(
+                "execution_fill",
+                {"trade_id": trade.id, "symbol": trade.symbol, "price": exit_price, "qty": trade.size, "fee": fees, "reason": reason},
+                f"trade:{trade.id}",
             )
             results.append(PaperTradeResult(trade.id, trade.symbol, exit_price, pnl_usd, pnl_r, reason))
         return results
@@ -201,14 +210,20 @@ class PaperTrader:
                 continue
             exit_price, result = hit_result
             exit_with_costs = self._apply_exit_price(trade.side, exit_price)
-            pnl_usd, pnl_r = self._calculate_pnl(trade.side, trade.entry, exit_with_costs, trade.stop, trade.size)
+            pnl_usd, pnl_r, fees = self._calculate_pnl(trade.side, trade.entry, exit_with_costs, trade.stop, trade.size)
             self._db.close_trade(
                 trade_id=trade.id,
                 exit_price=exit_with_costs,
                 pnl_usd=pnl_usd,
                 pnl_r=pnl_r,
+                fees=fees,
                 closed_at=datetime.now(timezone.utc),
                 result=result,
+            )
+            self._db.log_event(
+                "execution_fill",
+                {"trade_id": trade.id, "symbol": trade.symbol, "price": exit_with_costs, "qty": trade.size, "fee": fees, "reason": result},
+                f"trade:{trade.id}",
             )
             results.append(PaperTradeResult(trade.id, trade.symbol, exit_with_costs, pnl_usd, pnl_r, result))
         return results
@@ -339,14 +354,14 @@ class PaperTrader:
         exit_price: float,
         stop: float,
         size: float,
-    ) -> tuple[float, float]:
+    ) -> tuple[float, float, float]:
         side_sign = 1.0 if side == "long" else -1.0
         gross_pnl = (exit_price - entry) * size * side_sign
         fees = self._fees_usd(entry, exit_price, size)
         pnl_usd = gross_pnl - fees
         risk_per_unit = abs(entry - stop)
         pnl_r = ((exit_price - entry) * side_sign) / risk_per_unit if risk_per_unit else 0.0
-        return pnl_usd, pnl_r
+        return pnl_usd, pnl_r, fees
 
 
 def _compute_atr(snapshot: BybitKlineSnapshot, period: int = 14) -> float | None:

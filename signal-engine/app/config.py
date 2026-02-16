@@ -95,6 +95,27 @@ class Settings(BaseSettings):
     min_signal_score_trend: int = Field(78, validation_alias=AliasChoices("MIN_SIGNAL_SCORE_TREND", "min_signal_score_trend"))
     min_signal_score_range: int = Field(70, validation_alias=AliasChoices("MIN_SIGNAL_SCORE_RANGE", "min_signal_score_range"))
     be_trigger_r_mult: float = Field(0.6, validation_alias=AliasChoices("BE_TRIGGER_R_MULT", "be_trigger_r_mult"))
+    risk_reduction_trigger_r: float = Field(
+        0.5,
+        validation_alias=AliasChoices(
+            "RISK_REDUCTION_TRIGGER_R",
+            "risk_reduction_trigger_r",
+        ),
+    )
+    risk_reduction_target_r: float = Field(
+        0.6,
+        validation_alias=AliasChoices(
+            "RISK_REDUCTION_TARGET_R",
+            "risk_reduction_target_r",
+        ),
+    )
+    risk_reduction_enabled: bool = Field(
+        True,
+        validation_alias=AliasChoices(
+            "RISK_REDUCTION_ENABLED",
+            "risk_reduction_enabled",
+        ),
+    )
     exit_score_min: int = Field(55, validation_alias=AliasChoices("EXIT_SCORE_MIN", "exit_score_min"))
     pullback_atr_mult: float = Field(0.5, validation_alias=AliasChoices("PULLBACK_ATR_MULT", "pullback_atr_mult"))
     sl_atr_mult: float = Field(1.0, validation_alias=AliasChoices("SL_ATR_MULT", "sl_atr_mult"))
@@ -597,6 +618,9 @@ class Settings(BaseSettings):
             "min_signal_score_trend": self.min_signal_score_trend,
             "min_signal_score_range": self.min_signal_score_range,
             "be_trigger_r_mult": self.be_trigger_r_mult,
+            "risk_reduction_trigger_r": self.risk_reduction_trigger_r,
+            "risk_reduction_target_r": self.risk_reduction_target_r,
+            "risk_reduction_enabled": self.risk_reduction_enabled,
             "move_to_breakeven_trigger_r": self.move_to_breakeven_trigger_r,
             "move_to_breakeven_buffer_r": self.move_to_breakeven_buffer_r,
             "move_to_breakeven_buffer_bps": self.move_to_breakeven_buffer_bps,

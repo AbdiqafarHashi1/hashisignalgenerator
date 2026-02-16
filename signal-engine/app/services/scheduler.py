@@ -355,7 +355,7 @@ class DecisionScheduler:
                             candle_low=snapshot.candle.low,
                         )
                         self._last_exit_eval_close_ms[symbol] = snapshot.kline_close_time_ms
-                    self._paper_trader.move_stop_to_breakeven(symbol, trigger_r=self._settings.be_trigger_r_mult)
+                    self._paper_trader.adjust_stop_dynamic(symbol, trigger_r=self._settings.risk_reduction_trigger_r, target_r=self._settings.risk_reduction_target_r)
                     self._close_time_stop_trades(symbol, snapshot.candle.close, tick_ts)
                 active_mode = self.detect_regime(snapshot)
                 if self._settings.sweet8_enabled:

@@ -37,18 +37,21 @@ def test_range_regime_generates_mean_reversion_entry() -> None:
     assert sig.direction == Direction.short
 
 
-def test_break_even_moves_stop() -> None:
+def test_risk_reduction_moves_stop() -> None:
     cfg = Settings(_env_file=None, data_dir="data/test_strategy_v2")
     db = Database(cfg)
     db.reset_all()
     trader = PaperTrader(cfg, db)
     trade_id = db.open_trade("BTCUSDT", entry=100.0, stop=99.0, take_profit=102.0, size=1.0, side="long", opened_at=datetime.now(timezone.utc))
     assert trade_id > 0
+    cfg.risk_reduction_enabled = True
+    cfg.risk_reduction_trigger_r = 0.6
+    cfg.risk_reduction_target_r = 0.6
     trader.update_mark_price("BTCUSDT", 100.8)
-    moved = trader.move_stop_to_breakeven("BTCUSDT", trigger_r=0.6)
+    moved = trader.adjust_stop_dynamic("BTCUSDT")
     assert moved == 1
     trade = db.fetch_open_trades("BTCUSDT")[0]
-    assert trade.stop == 100.0
+    assert trade.stop == 99.4
 
 
 def test_time_stop_exits_after_max_hold_minutes() -> None:

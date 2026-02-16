@@ -97,7 +97,7 @@ const normalizeTrades = (input: unknown): NormalizedTrade[] => {
   return input.map((item, index) => {
     const row = asObject(item);
     const fee = asNumber(row.fee ?? row.fees ?? row.commission);
-    const pnlUsd = asNumber(row.pnl_usd ?? row.pnl ?? row.realized_pnl);
+    const pnlUsd = asNumber(row.pnl_usd ?? row.pnl ?? row.realized_pnl ?? row.unrealized_pnl);
     const rawResult = asString(row.result ?? row.close_reason ?? row.exit_reason, "unknown");
     return {
       id: asString(row.trade_id ?? row.id ?? `${index}`),
@@ -115,7 +115,7 @@ const normalizeTrades = (input: unknown): NormalizedTrade[] => {
       reason: asString(row.reason),
       tp: asNumber(row.tp ?? row.take_profit ?? row.tp_price),
       sl: asNumber(row.sl ?? row.stop ?? row.stop_loss ?? row.stop_price ?? row.sl_price),
-      rMultiple: asNumber(row.r_multiple),
+      rMultiple: asNumber(row.r_multiple ?? row.unrealized_r),
       feeBreakdown: asString(row.fee_breakdown ?? row.fees_detail, "--"),
       trigger: asString(row.trigger ?? row.entry_trigger, "--"),
       skipReason: asString(row.skip_reason, "--"),

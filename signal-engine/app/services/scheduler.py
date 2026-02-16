@@ -499,6 +499,11 @@ class DecisionScheduler:
                         ",".join(plan.rationale),
                     )
                 if self._database is not None:
+                    self._database.log_event(
+                        "signal_generated",
+                        {"symbol": snapshot.symbol, "status": plan.status.value, "rationale": list(plan.rationale)},
+                        f"tick:{int(tick_ts.timestamp())}:{snapshot.symbol}",
+                    )
                     entry = None
                     if plan.entry_zone is not None:
                         entry = sum(plan.entry_zone) / 2.0
@@ -546,6 +551,11 @@ class DecisionScheduler:
                                 and self._settings.force_trade_auto_close_seconds == 0
                                 and self._settings.current_mode != "SCALP"
                             )
+                            self._database.log_event(
+                                "order_sent",
+                                {"symbol": snapshot.symbol, "side": ("long" if plan.direction == Direction.long else "short")},
+                                f"tick:{int(tick_ts.timestamp())}:{snapshot.symbol}",
+                            ) if self._database is not None else None
                             trade_id = self._paper_trader.maybe_open_trade(
                                 snapshot.symbol,
                                 plan,
@@ -554,6 +564,11 @@ class DecisionScheduler:
                                 regime=active_mode,
                             )
                             if trade_id is not None:
+                                self._database.log_event(
+                                    "order_accepted",
+                                    {"symbol": snapshot.symbol, "trade_id": trade_id},
+                                    f"tick:{int(tick_ts.timestamp())}:{snapshot.symbol}",
+                                ) if self._database is not None else None
                                 trade_opened = True
                                 self._state.record_trade(snapshot.symbol)
                                 logger.info(

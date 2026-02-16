@@ -267,6 +267,8 @@ class StateStore:
         allowed, gate_reason = self.risk_check(symbol, cfg, now)
         if not allowed and gate_reason:
             rationale.append(gate_reason)
+            if gate_reason == "global_dd_limit_hit":
+                rationale.append("global_drawdown_limit")
             return False, Status.RISK_OFF, rationale
 
         if cfg.manual_kill_switch:

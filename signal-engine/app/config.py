@@ -197,7 +197,30 @@ class Settings(BaseSettings):
     tp_cap_long_pct: float = Field(0.02, validation_alias=AliasChoices("TP_CAP_LONG_PCT", "tp_cap_long_pct"))
     tp_cap_short_pct: float = Field(0.02, validation_alias=AliasChoices("TP_CAP_SHORT_PCT", "tp_cap_short_pct"))
     max_notional_account_multiplier: float = Field(3.0, validation_alias=AliasChoices("MAX_NOTIONAL_ACCOUNT_MULTIPLIER", "max_notional_account_multiplier"))
-    move_to_breakeven_trigger_r: float = Field(0.6, validation_alias=AliasChoices("MOVE_TO_BREAKEVEN_TRIGGER_R", "move_to_breakeven_trigger_r"))
+    move_to_breakeven_trigger_r: float = Field(
+        0.6,
+        validation_alias=AliasChoices(
+            "MOVE_TO_BREAKEVEN_TRIGGER_R",
+            "BE_TRIGGER_R_MULT",
+            "move_to_breakeven_trigger_r",
+        ),
+    )
+    move_to_breakeven_buffer_r: float = Field(
+        0.05,
+        validation_alias=AliasChoices("BE_BUFFER_R", "move_to_breakeven_buffer_r"),
+    )
+    move_to_breakeven_buffer_bps: float = Field(
+        0.0,
+        validation_alias=AliasChoices("BE_BUFFER_BPS", "move_to_breakeven_buffer_bps"),
+    )
+    move_to_breakeven_min_seconds_open: int = Field(
+        60,
+        validation_alias=AliasChoices("BE_MIN_SECONDS_OPEN", "move_to_breakeven_min_seconds_open"),
+    )
+    move_to_breakeven_offset_bps: float = Field(
+        0.0,
+        validation_alias=AliasChoices("BE_OFFSET_BPS", "move_to_breakeven_offset_bps"),
+    )
     breakout_tp_multiplier: float = Field(1.2, validation_alias=AliasChoices("BREAKOUT_TP_MULTIPLIER", "breakout_tp_multiplier"))
     regime_entry_buffer_pct: float = Field(0.0002, validation_alias=AliasChoices("REGIME_ENTRY_BUFFER_PCT", "regime_entry_buffer_pct"))
     prop_score_threshold: int = Field(80, validation_alias=AliasChoices("PROP_SCORE_THRESHOLD", "prop_score_threshold"))
@@ -574,6 +597,11 @@ class Settings(BaseSettings):
             "min_signal_score_trend": self.min_signal_score_trend,
             "min_signal_score_range": self.min_signal_score_range,
             "be_trigger_r_mult": self.be_trigger_r_mult,
+            "move_to_breakeven_trigger_r": self.move_to_breakeven_trigger_r,
+            "move_to_breakeven_buffer_r": self.move_to_breakeven_buffer_r,
+            "move_to_breakeven_buffer_bps": self.move_to_breakeven_buffer_bps,
+            "move_to_breakeven_min_seconds_open": self.move_to_breakeven_min_seconds_open,
+            "move_to_breakeven_offset_bps": self.move_to_breakeven_offset_bps,
             "exit_score_min": self.exit_score_min,
             "pullback_atr_mult": self.pullback_atr_mult,
             "sl_atr_mult": self.sl_atr_mult,

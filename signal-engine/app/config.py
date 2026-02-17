@@ -21,6 +21,7 @@ class Settings(BaseSettings):
     )
 
     MODE: Literal["prop_cfd", "personal_crypto", "paper", "signal_only", "live"] = Field("prop_cfd", validation_alias=AliasChoices("MODE", "mode"))
+    run_mode: Literal["live", "replay"] = Field("live", validation_alias=AliasChoices("RUN_MODE", "run_mode"))
     PROFILE: Literal["profit", "diag"] = Field("profit", validation_alias=AliasChoices("PROFILE", "profile"))
     strategy_profile: Literal["SCALPER_FAST", "SCALPER_STABLE", "RANGE_MEAN_REVERT"] = Field("SCALPER_STABLE", validation_alias=AliasChoices("STRATEGY_PROFILE", "strategy_profile"))
     engine_mode: Literal["paper", "signal_only", "live"] = Field("signal_only", validation_alias=AliasChoices("ENGINE_MODE", "engine_mode"))
@@ -158,6 +159,11 @@ class Settings(BaseSettings):
         1.0,
         validation_alias=AliasChoices("MARKET_DATA_REPLAY_SPEED", "market_data_replay_speed"),
     )
+    replay_max_trades: int = Field(120, validation_alias=AliasChoices("REPLAY_MAX_TRADES", "replay_max_trades"))
+    replay_max_bars: int = Field(5000, validation_alias=AliasChoices("REPLAY_MAX_BARS", "replay_max_bars"))
+    replay_start_ts: str | None = Field(None, validation_alias=AliasChoices("REPLAY_START_TS", "replay_start_ts"))
+    replay_end_ts: str | None = Field(None, validation_alias=AliasChoices("REPLAY_END_TS", "replay_end_ts"))
+    replay_seed: int | None = Field(None, validation_alias=AliasChoices("REPLAY_SEED", "replay_seed"))
     market_data_allow_stale: int = Field(
         60,
         validation_alias=AliasChoices("MARKET_DATA_ALLOW_STALE", "market_data_allow_stale"),
@@ -450,6 +456,8 @@ class Settings(BaseSettings):
                 setattr(self, key, value)
         if "ENGINE_MODE" not in os.environ and self.MODE in {"paper", "signal_only", "live"}:
             self.engine_mode = self.MODE
+        if self.run_mode == "replay":
+            self.market_data_provider = "replay"
 
         if self.sweet8_enabled:
             self.debug_loosen = False
@@ -593,6 +601,7 @@ class Settings(BaseSettings):
             "profile": self.PROFILE,
             "strategy_profile": self.strategy_profile,
             "mode": self.MODE,
+            "run_mode": self.run_mode,
             "engine_mode": self.engine_mode,
             "account_size": self.account_size,
             "symbols": list(self.symbols),
@@ -668,6 +677,11 @@ class Settings(BaseSettings):
             "market_data_fallbacks": self.market_data_fallbacks,
             "market_data_replay_path": self.market_data_replay_path,
             "market_data_replay_speed": self.market_data_replay_speed,
+            "replay_max_trades": self.replay_max_trades,
+            "replay_max_bars": self.replay_max_bars,
+            "replay_start_ts": self.replay_start_ts,
+            "replay_end_ts": self.replay_end_ts,
+            "replay_seed": self.replay_seed,
             "market_data_allow_stale": self.market_data_allow_stale,
             "market_data_failover_threshold": self.market_data_failover_threshold,
             "market_data_backoff_base_ms": self.market_data_backoff_base_ms,

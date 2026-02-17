@@ -37,8 +37,8 @@ class Settings(BaseSettings):
         "SWING",
         validation_alias=AliasChoices("CURRENT_MODE", "current_mode"),
     )
-    scalp_tp_pct: float = Field(0.005, validation_alias=AliasChoices("SCALP_TP_PCT", "scalp_tp_pct"))
-    scalp_sl_pct: float = Field(0.0025, validation_alias=AliasChoices("SCALP_SL_PCT", "scalp_sl_pct"))
+    scalp_tp_pct: float = Field(0.010, validation_alias=AliasChoices("SCALP_TP_PCT", "scalp_tp_pct"))
+    scalp_sl_pct: float = Field(0.005, validation_alias=AliasChoices("SCALP_SL_PCT", "scalp_sl_pct"))
     scalp_max_hold_minutes: int = Field(
         60,
         validation_alias=AliasChoices("SCALP_MAX_HOLD_MINUTES", "scalp_max_hold_minutes"),
@@ -96,14 +96,14 @@ class Settings(BaseSettings):
     min_signal_score_range: int = Field(70, validation_alias=AliasChoices("MIN_SIGNAL_SCORE_RANGE", "min_signal_score_range"))
     be_trigger_r_mult: float = Field(0.6, validation_alias=AliasChoices("BE_TRIGGER_R_MULT", "be_trigger_r_mult"))
     risk_reduction_trigger_r: float = Field(
-        0.5,
+        0.6,
         validation_alias=AliasChoices(
             "RISK_REDUCTION_TRIGGER_R",
             "risk_reduction_trigger_r",
         ),
     )
     risk_reduction_target_r: float = Field(
-        0.6,
+        0.7,
         validation_alias=AliasChoices(
             "RISK_REDUCTION_TARGET_R",
             "risk_reduction_target_r",
@@ -118,8 +118,8 @@ class Settings(BaseSettings):
     )
     exit_score_min: int = Field(55, validation_alias=AliasChoices("EXIT_SCORE_MIN", "exit_score_min"))
     pullback_atr_mult: float = Field(0.5, validation_alias=AliasChoices("PULLBACK_ATR_MULT", "pullback_atr_mult"))
-    sl_atr_mult: float = Field(1.0, validation_alias=AliasChoices("SL_ATR_MULT", "sl_atr_mult"))
-    tp_atr_mult: float = Field(1.2, validation_alias=AliasChoices("TP_ATR_MULT", "tp_atr_mult"))
+    sl_atr_mult: float = Field(1.4, validation_alias=AliasChoices("SL_ATR_MULT", "sl_atr_mult"))
+    tp_atr_mult: float = Field(2.2, validation_alias=AliasChoices("TP_ATR_MULT", "tp_atr_mult"))
     dev_atr_mult: float = Field(1.0, validation_alias=AliasChoices("DEV_ATR_MULT", "dev_atr_mult"))
     range_sl_atr_mult: float = Field(0.8, validation_alias=AliasChoices("RANGE_SL_ATR_MULT", "range_sl_atr_mult"))
     range_tp_atr_mult: float = Field(1.0, validation_alias=AliasChoices("RANGE_TP_ATR_MULT", "range_tp_atr_mult"))
@@ -285,7 +285,7 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("SWEET8_DISABLE_FORCE_AUTO_CLOSE", "sweet8_disable_force_auto_close"),
     )
     sweet8_max_open_positions_total: int = Field(
-        1,
+        2,
         validation_alias=AliasChoices("SWEET8_MAX_OPEN_POSITIONS_TOTAL", "sweet8_max_open_positions_total"),
     )
     sweet8_max_open_positions_per_symbol: int = Field(

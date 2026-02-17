@@ -102,14 +102,13 @@ class PaperTrader:
                 return None
             if plan.direction == Direction.long:
                 stop = entry - sl_distance
-                take_profit = self._cap_take_profit(entry, entry + tp_distance, "long")
+                take_profit = entry + tp_distance
                 side = "long"
             else:
                 stop = entry + sl_distance
-                take_profit = self._cap_take_profit(entry, entry - tp_distance, "short")
+                take_profit = entry - tp_distance
                 side = "short"
             entry_with_costs = self._apply_entry_price(side, entry)
-            take_profit = self._cap_take_profit(entry_with_costs, take_profit, side)
             if not self._can_open_trade(entry_with_costs, size):
                 logger.info("paper_trade_rejected symbol=%s reason=insufficient_margin", symbol)
                 return None
@@ -141,7 +140,7 @@ class PaperTrader:
             size = min(size, float(plan.position_size_usd) / entry_with_costs)
         if size <= 0:
             return None
-        take_profit = self._cap_take_profit(entry_with_costs, plan.take_profit, side)
+        take_profit = plan.take_profit
         if not self._is_reentry_allowed(symbol, side):
             logger.info("paper_trade_rejected symbol=%s reason=reentry_cooldown", symbol)
             return None
@@ -384,11 +383,6 @@ class PaperTrader:
             elapsed_minutes = (datetime.now(timezone.utc) - closed_at).total_seconds() / 60.0
             return elapsed_minutes >= cooldown
         return True
-
-    def _cap_take_profit(self, entry: float, take_profit: float, side: str) -> float:
-        if side == "long":
-            return min(take_profit, entry * (1 + self._settings.tp_cap_long_pct))
-        return max(take_profit, entry * (1 - self._settings.tp_cap_short_pct))
 
     def _calculate_pnl(
         self,

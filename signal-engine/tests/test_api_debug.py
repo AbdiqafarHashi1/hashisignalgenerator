@@ -131,7 +131,7 @@ def test_force_signal_respects_hard_gates(monkeypatch) -> None:
         assert response.status_code == 200
         decision = response.json()["decision"]
         assert decision["status"] == "RISK_OFF"
-        assert "daily_loss_limit" in decision["rationale"]
+        assert "daily_loss_limit_hit" in decision["rationale"]
 
 
 def test_scheduler_state_persists_across_requests(monkeypatch) -> None:

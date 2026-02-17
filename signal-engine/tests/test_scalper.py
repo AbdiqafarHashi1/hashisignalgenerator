@@ -102,4 +102,4 @@ def test_risk_gate_blocks_with_reason() -> None:
 
     plan = decide(request, state, cfg)
     assert plan.status.value == "RISK_OFF"
-    assert "daily_loss_limit" in plan.rationale
+    assert "daily_loss_limit_hit" in plan.rationale

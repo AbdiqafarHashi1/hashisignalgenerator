@@ -419,10 +419,8 @@ class DecisionScheduler:
                 unrealized = self._paper_trader.symbol_unrealized_pnl_usd(symbol)
                 should_force_close = (
                     funding_state["close_positions"]
-                    and (
-                        util_pct >= self._settings.funding_blackout_max_util_pct
-                        or unrealized <= -abs(self._settings.funding_blackout_max_loss_usd)
-                    )
+                    and util_pct >= self._settings.funding_blackout_max_util_pct
+                    and unrealized <= -abs(self._settings.funding_blackout_max_loss_usd)
                 )
                 if should_force_close:
                     self._paper_trader.force_close_trades(symbol, snapshot.candle.close, reason="funding_blackout_close")
@@ -475,12 +473,6 @@ class DecisionScheduler:
                     if plan.status != Status.TRADE:
                         reason = mode_skip_reason or "setup_not_confirmed"
                         skip_reason = mode_skip_reason or "setup_not_confirmed"
-                if (
-                    plan.status == Status.NO_TRADE
-                    and self._paper_trader is not None
-                    and (plan.signal_score is not None and plan.signal_score < self._settings.exit_score_min)
-                ):
-                    self._paper_trader.force_close_trades(snapshot.symbol, snapshot.candle.close, reason="weakness_exit")
                 decision_status = plan.status.value
                 self._state.set_latest_decision(snapshot.symbol, plan)
                 persisted = True
@@ -964,12 +956,25 @@ def _apply_mode_overrides(
         return plan.model_copy(update={"status": Status.NO_TRADE}), setup_reason, scalp_meta
 
     entry = snapshot.candle.close
+    closes = [candle.close for candle in snapshot.candles if candle.close > 0]
+    highs = [candle.high for candle in snapshot.candles]
+    lows = [candle.low for candle in snapshot.candles]
+    atr_value = _atr(highs, lows, closes, settings.scalp_atr_period)
+    atr_stop_distance = atr_value * settings.sl_atr_mult if atr_value > 0 else float("inf")
+    pct_stop_distance = entry * settings.scalp_sl_pct
+    risk_distance = min(pct_stop_distance, atr_stop_distance)
+
+    atr_tp_distance = atr_value * settings.tp_atr_mult if atr_value > 0 else float("inf")
+    pct_tp_distance = entry * settings.scalp_tp_pct
+    capped_tp_distance = min(pct_tp_distance, atr_tp_distance)
+    target_distance = min(2.0 * risk_distance, capped_tp_distance)
+
     if plan.direction == Direction.long:
-        stop_loss = entry * (1 - settings.scalp_sl_pct)
-        take_profit = entry * (1 + settings.scalp_tp_pct)
+        stop_loss = entry - risk_distance
+        take_profit = entry + target_distance
     else:
-        stop_loss = entry * (1 + settings.scalp_sl_pct)
-        take_profit = entry * (1 - settings.scalp_tp_pct)
+        stop_loss = entry + risk_distance
+        take_profit = entry - target_distance
 
     updated = plan.model_copy(
         update={

@@ -69,6 +69,10 @@ class PaperTrader:
         snapshot: BybitKlineSnapshot | None = None,
         regime: str | None = None,
     ) -> int | None:
+        direction_limit_reason = self._direction_limit_reason(plan.direction)
+        if direction_limit_reason is not None:
+            logger.info("paper_trade_rejected symbol=%s reason=%s", symbol, direction_limit_reason)
+            return None
         if self._settings.sweet8_enabled:
             open_total = len(self._db.fetch_open_trades())
             open_symbol = len(self._db.fetch_open_trades(symbol))
@@ -157,6 +161,19 @@ class PaperTrader:
             opened_at=datetime.now(timezone.utc),
             trade_mode=self._settings.engine_mode if self._settings.engine_mode in {"paper", "live"} else "paper",
         )
+
+    def _direction_limit_reason(self, direction: Direction) -> str | None:
+        limit = int(self._settings.max_open_positions_per_direction or 0)
+        if limit <= 0:
+            return None
+        open_trades = self._db.fetch_open_trades()
+        open_longs = sum(1 for trade in open_trades if trade.side == "long")
+        open_shorts = sum(1 for trade in open_trades if trade.side == "short")
+        if direction == Direction.long and open_longs >= limit:
+            return "dir_limit_long"
+        if direction == Direction.short and open_shorts >= limit:
+            return "dir_limit_short"
+        return None
 
     def force_close_trades(self, symbol: str, price: float, reason: str = "force_close") -> list[PaperTradeResult]:
         if self._settings.sweet8_enabled and reason in {"time_stop_close", "force_trade_auto_close"}:

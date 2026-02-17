@@ -660,6 +660,9 @@ class DecisionScheduler:
                 "ema_fast": scalp_meta.get("ema_fast"),
                 "ema_slow": scalp_meta.get("ema_slow"),
                 "ema_trend": scalp_meta.get("ema_trend"),
+                "htf_bias_reject": scalp_meta.get("htf_bias_reject"),
+                "trigger_body_ratio_reject": scalp_meta.get("trigger_body_ratio_reject"),
+                "trigger_close_location_reject": scalp_meta.get("trigger_close_location_reject"),
                 "signal_score": (plan.signal_score if plan is not None else None),
                 "trend_strength": (
                     plan.raw_input_snapshot.get("market", {}).get("trend_strength")
@@ -676,11 +679,14 @@ class DecisionScheduler:
             if self._settings.telegram_debug_skips and decision == "skip":
                 await self._maybe_send_skip_debug(symbol, skip_reason)
             logger.info(
-                "tick symbol=%s ts=%s decision=%s skip_reason=%s",
+                "tick symbol=%s ts=%s decision=%s skip_reason=%s htf_bias_reject=%s trigger_body_ratio_reject=%s trigger_close_location_reject=%s",
                 symbol,
                 tick_ts.isoformat(),
                 decision,
                 skip_reason,
+                decision_meta.get("htf_bias_reject"),
+                decision_meta.get("trigger_body_ratio_reject"),
+                decision_meta.get("trigger_close_location_reject"),
             )
             results.append(
                 {
@@ -701,6 +707,9 @@ class DecisionScheduler:
                     "regime_label": decision_meta.get("regime_label"),
                     "allowed_side": decision_meta.get("allowed_side"),
                     "atr_pct": decision_meta.get("atr_pct"),
+                    "htf_bias_reject": decision_meta.get("htf_bias_reject"),
+                    "trigger_body_ratio_reject": decision_meta.get("trigger_body_ratio_reject"),
+                    "trigger_close_location_reject": decision_meta.get("trigger_close_location_reject"),
                 }
             )
         self._notify_tick_listeners()
@@ -979,6 +988,9 @@ def _apply_mode_overrides(
         "ema_fast": regime["ema_fast"],
         "ema_slow": regime["ema_slow"],
         "ema_trend": regime["ema_trend"],
+        "htf_bias_reject": False,
+        "trigger_body_ratio_reject": False,
+        "trigger_close_location_reject": False,
     }
 
     if settings.scalp_regime_enabled:
@@ -1000,10 +1012,23 @@ def _apply_mode_overrides(
         if trend_bias is not None and plan.direction != trend_bias:
             return plan.model_copy(update={"status": Status.NO_TRADE}), "trend_mismatch", scalp_meta
 
+    if settings.htf_bias_enabled:
+        if not _passes_htf_bias(snapshot, settings, plan.direction):
+            scalp_meta["htf_bias_reject"] = True
+            return plan.model_copy(update={"status": Status.NO_TRADE}), "htf_bias_reject", scalp_meta
+
     setup_confirmed = is_scalp_setup_confirmed(snapshot, settings, plan.direction)
     if not setup_confirmed:
         _, setup_reason = scalp_setup_gate_reason(snapshot, settings, plan.direction)
         return plan.model_copy(update={"status": Status.NO_TRADE}), setup_reason, scalp_meta
+
+    trigger_ok, trigger_reason = _trigger_quality_gate(snapshot, settings, plan.direction)
+    if not trigger_ok:
+        if trigger_reason == "trigger_body_ratio_reject":
+            scalp_meta["trigger_body_ratio_reject"] = True
+        if trigger_reason == "trigger_close_location_reject":
+            scalp_meta["trigger_close_location_reject"] = True
+        return plan.model_copy(update={"status": Status.NO_TRADE}), trigger_reason, scalp_meta
 
     entry = snapshot.candle.close
     closes = [candle.close for candle in snapshot.candles if candle.close > 0]
@@ -1107,6 +1132,70 @@ def scalp_setup_gate_reason(
         return False, breakout_reason
 
     return False, f"setup_not_confirmed:{settings.scalp_setup_mode}"
+
+
+def _passes_htf_bias(snapshot: BybitKlineSnapshot, settings: Settings, direction: Direction) -> bool:
+    htf_closes = _aggregate_closes_for_interval(snapshot, settings.htf_interval)
+    needed = max(settings.htf_ema_fast, settings.htf_ema_slow) + 2
+    if len(htf_closes) < needed:
+        return False
+
+    ema_fast = _ema(htf_closes, settings.htf_ema_fast)
+    ema_slow = _ema(htf_closes, settings.htf_ema_slow)
+    if direction == Direction.long and ema_fast <= ema_slow:
+        return False
+    if direction == Direction.short and ema_fast >= ema_slow:
+        return False
+
+    if not settings.htf_bias_require_slope:
+        return True
+
+    slope = _ema_slope(htf_closes, settings.htf_ema_slow)
+    if direction == Direction.long:
+        return slope > 0
+    return slope < 0
+
+
+def _aggregate_closes_for_interval(snapshot: BybitKlineSnapshot, interval: str) -> list[float]:
+    target_ms = interval_to_ms(interval)
+    source_ms = interval_to_ms(snapshot.interval)
+    if target_ms <= source_ms or source_ms <= 0:
+        return [candle.close for candle in snapshot.candles if candle.close > 0]
+
+    merged: list[float] = []
+    candles = [candle for candle in snapshot.candles if candle.close > 0]
+    if not candles:
+        return merged
+
+    current_bucket = (int(candles[0].close_time.timestamp() * 1000) // target_ms) * target_ms
+    last_close = candles[0].close
+    for candle in candles:
+        close_ms = int(candle.close_time.timestamp() * 1000)
+        bucket = (close_ms // target_ms) * target_ms
+        if bucket != current_bucket:
+            merged.append(last_close)
+            current_bucket = bucket
+        last_close = candle.close
+    merged.append(last_close)
+    return merged
+
+
+def _trigger_quality_gate(snapshot: BybitKlineSnapshot, settings: Settings, direction: Direction) -> tuple[bool, str | None]:
+    current = snapshot.candle
+    candle_range = max(current.high - current.low, 1e-12)
+    body_ratio = abs(current.close - current.open) / candle_range
+    if settings.trigger_body_ratio_min > 0 and body_ratio < settings.trigger_body_ratio_min:
+        return False, "trigger_body_ratio_reject"
+
+    if settings.trigger_close_location_min > 0:
+        if direction == Direction.long:
+            close_loc = (current.close - current.low) / candle_range
+        else:
+            close_loc = (current.high - current.close) / candle_range
+        if close_loc < settings.trigger_close_location_min:
+            return False, "trigger_close_location_reject"
+
+    return True, None
 
 
 def _confirm_pullback_engulfing(snapshot: BybitKlineSnapshot, settings: Settings, direction: Direction) -> tuple[bool, str]:

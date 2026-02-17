@@ -33,3 +33,13 @@ def test_profile_env_overrides(monkeypatch) -> None:
     settings = Settings(_env_file=None)
     assert settings.min_signal_score == 92
     assert settings.trend_strength_min == 0.9
+
+
+def test_intraday_trend_selective_profile_defaults(monkeypatch) -> None:
+    monkeypatch.setenv("STRATEGY_PROFILE", "INTRADAY_TREND_SELECTIVE")
+    settings = Settings(_env_file=None)
+    assert settings.strategy_profile == "INTRADAY_TREND_SELECTIVE"
+    assert settings.min_signal_score == 65
+    assert settings.trend_strength_min == 0.50
+    assert settings.cooldown_minutes_after_loss == 15
+    assert settings.max_trades_per_day == 6

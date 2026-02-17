@@ -805,3 +805,81 @@ def test_scalp_rsi_exhaustion_caps_block_long_and_short():
     )
 
     assert scalp_setup_gate_reason(short_snapshot, short_settings, Direction.short) == (False, "rsi_exhausted_short")
+
+
+def test_htf_bias_gate_blocks_misaligned_and_allows_aligned(monkeypatch):
+    long_plan = _trade_plan().model_copy(update={"direction": Direction.long, "signal_score": 90})
+
+    down_snapshot = _snapshot_from_closes([300 - (i * 0.5) for i in range(300)])
+    up_snapshot = _snapshot_from_closes([100 + (i * 0.5) for i in range(300)])
+
+    monkeypatch.setattr(scheduler_module, "is_scalp_setup_confirmed", lambda *args, **kwargs: True)
+
+    settings = Settings(
+        current_mode="SCALP",
+        scalp_regime_enabled=False,
+        scalp_trend_filter_enabled=False,
+        scalp_rsi_confirm=False,
+        htf_bias_enabled=True,
+        htf_interval="1h",
+        htf_ema_fast=10,
+        htf_ema_slow=20,
+        _env_file=None,
+    )
+
+    blocked_plan, blocked_reason, blocked_meta = scheduler_module._apply_mode_overrides(long_plan, down_snapshot, settings)
+    allowed_plan, allowed_reason, allowed_meta = scheduler_module._apply_mode_overrides(long_plan, up_snapshot, settings)
+
+    assert blocked_plan.status == Status.NO_TRADE
+    assert blocked_reason == "htf_bias_reject"
+    assert blocked_meta["htf_bias_reject"] is True
+
+    assert allowed_plan.status == Status.TRADE
+    assert allowed_reason is None
+    assert allowed_meta["htf_bias_reject"] is False
+
+
+def test_trigger_quality_filter_rejects_weak_candle(monkeypatch):
+    snapshot = _snapshot_from_closes([100 + (i * 0.2) for i in range(80)])
+    current = snapshot.candle
+    current.open = current.close - 0.02
+    current.high = current.close + 0.20
+    current.low = current.close - 0.20
+
+    monkeypatch.setattr(scheduler_module, "is_scalp_setup_confirmed", lambda *args, **kwargs: True)
+
+    settings = Settings(
+        current_mode="SCALP",
+        scalp_regime_enabled=False,
+        scalp_trend_filter_enabled=False,
+        trigger_body_ratio_min=0.4,
+        trigger_close_location_min=0.9,
+        _env_file=None,
+    )
+
+    _, reason, meta = scheduler_module._apply_mode_overrides(_trade_plan(), snapshot, settings)
+
+    assert reason in {"trigger_body_ratio_reject", "trigger_close_location_reject"}
+    assert meta["trigger_body_ratio_reject"] or meta["trigger_close_location_reject"]
+
+
+def test_new_filters_disabled_preserve_default_trade_path(monkeypatch):
+    snapshot = _snapshot_from_closes([100 + (i * 0.2) for i in range(80)])
+    monkeypatch.setattr(scheduler_module, "is_scalp_setup_confirmed", lambda *args, **kwargs: True)
+
+    settings = Settings(
+        current_mode="SCALP",
+        scalp_regime_enabled=False,
+        scalp_trend_filter_enabled=False,
+        htf_bias_enabled=False,
+        trigger_body_ratio_min=0.0,
+        trigger_close_location_min=0.0,
+        _env_file=None,
+    )
+
+    plan, reason, meta = scheduler_module._apply_mode_overrides(_trade_plan(), snapshot, settings)
+    assert plan.status == Status.TRADE
+    assert reason is None
+    assert meta["htf_bias_reject"] is False
+    assert meta["trigger_body_ratio_reject"] is False
+    assert meta["trigger_close_location_reject"] is False

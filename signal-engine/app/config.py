@@ -23,7 +23,7 @@ class Settings(BaseSettings):
     MODE: Literal["prop_cfd", "personal_crypto", "paper", "signal_only", "live"] = Field("prop_cfd", validation_alias=AliasChoices("MODE", "mode"))
     run_mode: Literal["live", "replay"] = Field("live", validation_alias=AliasChoices("RUN_MODE", "run_mode"))
     PROFILE: Literal["profit", "diag"] = Field("profit", validation_alias=AliasChoices("PROFILE", "profile"))
-    strategy_profile: Literal["SCALPER_FAST", "SCALPER_STABLE", "RANGE_MEAN_REVERT"] = Field("SCALPER_STABLE", validation_alias=AliasChoices("STRATEGY_PROFILE", "strategy_profile"))
+    strategy_profile: Literal["SCALPER_FAST", "SCALPER_STABLE", "RANGE_MEAN_REVERT", "INTRADAY_TREND_SELECTIVE"] = Field("SCALPER_STABLE", validation_alias=AliasChoices("STRATEGY_PROFILE", "strategy_profile"))
     engine_mode: Literal["paper", "signal_only", "live"] = Field("signal_only", validation_alias=AliasChoices("ENGINE_MODE", "engine_mode"))
     symbols: Annotated[list[str], NoDecode] = Field(
         default_factory=lambda: ["BTCUSDT"],
@@ -98,6 +98,19 @@ class Settings(BaseSettings):
     scalp_retest_max_bars: int = Field(
         6,
         validation_alias=AliasChoices("SCALP_RETEST_MAX_BARS", "scalp_retest_max_bars"),
+    )
+    htf_bias_enabled: bool = Field(False, validation_alias=AliasChoices("HTF_BIAS_ENABLED", "htf_bias_enabled"))
+    htf_interval: str = Field("1h", validation_alias=AliasChoices("HTF_INTERVAL", "htf_interval"))
+    htf_ema_fast: int = Field(50, validation_alias=AliasChoices("HTF_EMA_FAST", "htf_ema_fast"))
+    htf_ema_slow: int = Field(200, validation_alias=AliasChoices("HTF_EMA_SLOW", "htf_ema_slow"))
+    htf_bias_require_slope: bool = Field(
+        False,
+        validation_alias=AliasChoices("HTF_BIAS_REQUIRE_SLOPE", "htf_bias_require_slope"),
+    )
+    trigger_body_ratio_min: float = Field(0.0, validation_alias=AliasChoices("TRIGGER_BODY_RATIO_MIN", "trigger_body_ratio_min"))
+    trigger_close_location_min: float = Field(
+        0.0,
+        validation_alias=AliasChoices("TRIGGER_CLOSE_LOCATION_MIN", "trigger_close_location_min"),
     )
     min_signal_score_trend: int = Field(78, validation_alias=AliasChoices("MIN_SIGNAL_SCORE_TREND", "min_signal_score_trend"))
     min_signal_score_range: int = Field(70, validation_alias=AliasChoices("MIN_SIGNAL_SCORE_RANGE", "min_signal_score_range"))
@@ -547,6 +560,32 @@ class Settings(BaseSettings):
                 "cooldown_minutes_after_loss": 10,
                 "max_trades_per_day": 6,
             },
+            "INTRADAY_TREND_SELECTIVE": {
+                "account_size": 25000,
+                "base_risk_pct": 0.0025,
+                "max_risk_pct": 0.0025,
+                "max_daily_loss_pct": 0.015,
+                "daily_profit_target_pct": 0.012,
+                "max_consecutive_losses": 2,
+                "candle_interval": "1m",
+                "tick_interval_seconds": 60,
+                "min_signal_score": 65,
+                "trend_strength_min": 0.50,
+                "cooldown_minutes_after_loss": 15,
+                "max_trades_per_day": 6,
+                "scalp_min_score": 80,
+                "scalp_setup_mode": "pullback_engulfing",
+                "scalp_pullback_min_dist_pct": 0.0005,
+                "disable_breakout_chase": True,
+                "max_open_positions_per_direction": 1,
+                "htf_bias_enabled": True,
+                "htf_interval": "1h",
+                "htf_ema_fast": 50,
+                "htf_ema_slow": 200,
+                "htf_bias_require_slope": False,
+                "trigger_body_ratio_min": 0.55,
+                "trigger_close_location_min": 0.65,
+            },
         }
         return profiles[self.strategy_profile]
 
@@ -642,6 +681,13 @@ class Settings(BaseSettings):
             "scalp_rsi_short_max": self.scalp_rsi_short_max,
             "scalp_breakout_lookback": self.scalp_breakout_lookback,
             "scalp_retest_max_bars": self.scalp_retest_max_bars,
+            "htf_bias_enabled": self.htf_bias_enabled,
+            "htf_interval": self.htf_interval,
+            "htf_ema_fast": self.htf_ema_fast,
+            "htf_ema_slow": self.htf_ema_slow,
+            "htf_bias_require_slope": self.htf_bias_require_slope,
+            "trigger_body_ratio_min": self.trigger_body_ratio_min,
+            "trigger_close_location_min": self.trigger_close_location_min,
             "min_signal_score_trend": self.min_signal_score_trend,
             "min_signal_score_range": self.min_signal_score_range,
             "be_trigger_r_mult": self.be_trigger_r_mult,

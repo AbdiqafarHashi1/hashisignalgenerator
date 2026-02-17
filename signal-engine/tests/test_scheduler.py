@@ -7,7 +7,7 @@ from app.config import Settings
 from app.models import Direction, Posture, Status, TradePlan
 from app.providers.binance import BinanceCandle, BinanceKlineSnapshot
 from app.services import scheduler as scheduler_module
-from app.services.scheduler import DecisionScheduler, classify_scalp_regime, is_scalp_setup_confirmed
+from app.services.scheduler import DecisionScheduler, classify_scalp_regime, is_scalp_setup_confirmed, scalp_setup_gate_reason
 from app.services.database import Database
 from app.services.paper_trader import PaperTrader
 from app.state import StateStore
@@ -708,3 +708,100 @@ def test_scheduler_blocks_stale_market_data(monkeypatch) -> None:
         assert state.get_decision_meta("BTCUSDT").get("market_data_status") == "STALE"
 
     asyncio.run(run())
+
+
+def test_scheduler_can_process_open_candle_when_close_confirm_disabled(monkeypatch) -> None:
+    snapshot = _build_snapshot(close_time_ms=9_000_000, closed=False)
+
+    async def fake_fetch(*args, **kwargs):
+        return snapshot
+
+    def fake_decide(*args, **kwargs):
+        return _trade_plan()
+
+    monkeypatch.setattr(scheduler_module, "fetch_symbol_klines", fake_fetch)
+    monkeypatch.setattr(scheduler_module, "decide", fake_decide)
+
+    settings = Settings(telegram_enabled=False, require_candle_close_confirm=False, _env_file=None)
+    state = StateStore()
+    scheduler = DecisionScheduler(settings, state)
+
+    async def run():
+        results = await scheduler.run_once()
+        assert results[0]["plan"] is not None
+        assert results[0]["reason"] is None
+
+    asyncio.run(run())
+
+
+def test_scalp_pullback_min_depth_gate_blocks_and_allows():
+    closes = [100 + (i * 0.2) for i in range(40)]
+    snapshot = _snapshot_from_closes(closes)
+    prev = snapshot.candles[-2]
+    prev.open = prev.close + 0.12
+    prev.close = prev.close - 0.10
+    prev.high = prev.close + 0.02
+    current = snapshot.candles[-1]
+    current.open = prev.close - 0.02
+    current.close = prev.high + 0.03
+    current.high = current.close + 0.03
+    current.low = current.open - 0.03
+    snapshot.price = current.close
+    snapshot.candle = current
+
+    block_settings = Settings(
+        current_mode="SCALP",
+        scalp_rsi_confirm=False,
+        scalp_pullback_max_dist_pct=0.05,
+        scalp_pullback_min_dist_pct=0.05,
+        adx_threshold=0,
+        _env_file=None,
+    )
+    allow_settings = block_settings.model_copy(update={"scalp_pullback_min_dist_pct": 0.0})
+
+    assert scalp_setup_gate_reason(snapshot, block_settings, Direction.long) == (False, "pullback_too_shallow")
+    assert is_scalp_setup_confirmed(snapshot, allow_settings, Direction.long) is True
+
+
+def test_scalp_rsi_exhaustion_caps_block_long_and_short():
+    long_snapshot = _snapshot_from_closes([100 + (i * 0.3) for i in range(50)])
+    prev = long_snapshot.candles[-2]
+    prev.open = prev.close + 0.1
+    prev.close = prev.close - 0.05
+    long_cur = long_snapshot.candles[-1]
+    long_cur.open = prev.close - 0.08
+    long_cur.close = prev.high + 0.12
+    long_snapshot.candle = long_cur
+    long_snapshot.price = long_cur.close
+
+    long_settings = Settings(
+        current_mode="SCALP",
+        scalp_rsi_confirm=True,
+        scalp_pullback_max_dist_pct=0.05,
+        scalp_rsi_long_max=60,
+        adx_threshold=0,
+        _env_file=None,
+    )
+
+    assert scalp_setup_gate_reason(long_snapshot, long_settings, Direction.long) == (False, "rsi_exhausted_long")
+
+    short_snapshot = _snapshot_from_closes([200 - (i * 0.3) for i in range(50)])
+    prev_short = short_snapshot.candles[-2]
+    prev_short.open = prev_short.close - 0.1
+    prev_short.close = prev_short.close + 0.05
+    short_cur = short_snapshot.candles[-1]
+    short_cur.open = prev_short.close + 0.08
+    short_cur.close = prev_short.low - 0.12
+    short_snapshot.candle = short_cur
+    short_snapshot.price = short_cur.close
+
+    short_settings = Settings(
+        current_mode="SCALP",
+        scalp_rsi_confirm=True,
+        scalp_pullback_max_dist_pct=0.05,
+        scalp_rsi_short_min=40,
+        adx_threshold=0,
+        _env_file=None,
+    )
+
+    assert scalp_setup_gate_reason(short_snapshot, short_settings, Direction.short) == (False, "rsi_exhausted_short")

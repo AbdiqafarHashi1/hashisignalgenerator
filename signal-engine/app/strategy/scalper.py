@@ -77,6 +77,10 @@ def pullback_continuation_trigger(candles: list[Candle], direction: Direction, e
     prev = candles[-2]
     cur = candles[-1]
     band = ema * cfg.ema_pullback_pct
+    min_dist = max(0.0, float(cfg.scalp_pullback_min_dist_pct or 0.0))
+    dist_from_ema = abs(cur.close - ema) / ema if ema > 0 else 1.0
+    if dist_from_ema < min_dist:
+        return False
     if direction == Direction.long:
         pullback = prev.low <= ema + band
         strong_close = cur.close > prev.high and cur.close > cur.open

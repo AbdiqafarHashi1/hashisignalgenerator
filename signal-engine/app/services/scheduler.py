@@ -443,7 +443,7 @@ class DecisionScheduler:
             last_processed = self._state.get_last_processed_close_time_ms(snapshot.symbol)
             should_process = bool(force_mode or dedupe_bypass or (latest_closed_ms and latest_closed_ms != last_processed))
 
-            if not snapshot.kline_is_closed and not force_mode:
+            if not snapshot.kline_is_closed and self._settings.require_candle_close_confirm:
                 reason = "candle_open"
                 skip_reason = "candle_open"
                 should_process = False
@@ -473,6 +473,12 @@ class DecisionScheduler:
                     if plan.status != Status.TRADE:
                         reason = mode_skip_reason or "setup_not_confirmed"
                         skip_reason = mode_skip_reason or "setup_not_confirmed"
+                    elif self._database is not None:
+                        direction_block = _direction_limit_reason(plan.direction, self._database.fetch_open_trades(), self._settings)
+                        if direction_block is not None:
+                            plan = plan.model_copy(update={"status": Status.NO_TRADE, "rationale": [*plan.rationale, direction_block]})
+                            reason = direction_block
+                            skip_reason = direction_block
                 decision_status = plan.status.value
                 self._state.set_latest_decision(snapshot.symbol, plan)
                 persisted = True
@@ -1041,24 +1047,43 @@ def scalp_setup_gate_reason(
 ) -> tuple[bool, str]:
     if direction not in {Direction.long, Direction.short}:
         return False, "setup_invalid_direction"
-    if settings.scalp_setup_mode in {"pullback_engulfing", "either"} and _confirm_pullback_engulfing(snapshot, settings, direction):
+    pullback_ok, pullback_reason = _confirm_pullback_engulfing(snapshot, settings, direction)
+    if settings.scalp_setup_mode in {"pullback_engulfing", "either"} and pullback_ok:
         return True, ""
-    if settings.scalp_setup_mode in {"breakout_retest", "either"} and _confirm_breakout_retest(snapshot, settings, direction):
+    if settings.scalp_setup_mode == "pullback_engulfing" and pullback_reason:
+        return False, pullback_reason
+
+    if settings.disable_breakout_chase and settings.scalp_setup_mode in {"breakout_retest", "either"}:
+        return False, "breakout_chase_disabled"
+
+    breakout_ok, breakout_reason = _confirm_breakout_retest(snapshot, settings, direction)
+    if settings.scalp_setup_mode in {"breakout_retest", "either"} and breakout_ok:
         return True, ""
+    if settings.scalp_setup_mode == "breakout_retest" and breakout_reason:
+        return False, breakout_reason
+
     return False, f"setup_not_confirmed:{settings.scalp_setup_mode}"
 
 
-def _confirm_pullback_engulfing(snapshot: BybitKlineSnapshot, settings: Settings, direction: Direction) -> bool:
+def _confirm_pullback_engulfing(snapshot: BybitKlineSnapshot, settings: Settings, direction: Direction) -> tuple[bool, str]:
     candles = snapshot.candles
     if len(candles) < settings.setup_min_candles:
-        return False
+        return False, "setup_not_confirmed:pullback_engulfing"
     closes = [c.close for c in candles]
     ema_pull = _ema(closes, settings.scalp_pullback_ema)
     current = candles[-1]
     prev = candles[-2]
     dist = abs(current.close - ema_pull) / current.close if current.close > 0 else 1.0
     if dist > settings.scalp_pullback_max_dist_pct:
-        return False
+        return False, "setup_not_confirmed:pullback_engulfing"
+    min_dist = max(0.0, float(settings.scalp_pullback_min_dist_pct or 0.0))
+    dist_from_ema = abs(current.close - ema_pull) / ema_pull if ema_pull > 0 else 1.0
+    if dist_from_ema < min_dist:
+        return False, "pullback_too_shallow"
+
+    adx = _compute_adx(snapshot, period=max(2, settings.adx_period))
+    if adx is None or adx < settings.adx_threshold:
+        return False, "adx_too_low"
 
     current_body = abs(current.close - current.open)
     min_body = current.close * settings.scalp_engulfing_min_body_pct
@@ -1070,35 +1095,42 @@ def _confirm_pullback_engulfing(snapshot: BybitKlineSnapshot, settings: Settings
         engulfing = current.close < current.open and prev.close > prev.open and current.open >= prev.close and current.close <= prev.open
         strong_close = current.close < prev.low and current_body >= min_body
     if not (engulfing or strong_close):
-        return False
+        return False, "setup_not_confirmed:pullback_engulfing"
 
     if settings.scalp_rsi_confirm:
         rsi = _rsi(closes, settings.scalp_rsi_period)
         if rsi is None:
-            return False
+            return False, "setup_not_confirmed:pullback_engulfing"
         if direction == Direction.long and rsi < settings.scalp_rsi_long_min:
-            return False
+            return False, "setup_not_confirmed:pullback_engulfing"
         if direction == Direction.short and rsi > settings.scalp_rsi_short_max:
-            return False
-    return True
+            return False, "setup_not_confirmed:pullback_engulfing"
+        if direction == Direction.long and rsi > settings.scalp_rsi_long_max:
+            return False, "rsi_exhausted_long"
+        if direction == Direction.short and rsi < settings.scalp_rsi_short_min:
+            return False, "rsi_exhausted_short"
+    return True, ""
 
 
-def _confirm_breakout_retest(snapshot: BybitKlineSnapshot, settings: Settings, direction: Direction) -> bool:
+def _confirm_breakout_retest(snapshot: BybitKlineSnapshot, settings: Settings, direction: Direction) -> tuple[bool, str]:
     candles = snapshot.candles
     lookback = max(settings.setup_min_candles, settings.scalp_breakout_lookback)
     if len(candles) < lookback + 2:
-        return False
+        return False, "setup_not_confirmed:breakout_retest"
+    adx = _compute_adx(snapshot, period=max(2, settings.adx_period))
+    if adx is None or adx < settings.adx_threshold:
+        return False, "adx_too_low"
     window = candles[-(lookback + settings.scalp_retest_max_bars + 1):]
     breakout_level = max(c.high for c in window[:lookback]) if direction == Direction.long else min(c.low for c in window[:lookback])
     for i in range(lookback, len(window)):
         candle = window[i]
         if direction == Direction.long and candle.close > breakout_level:
             retest_window = window[i + 1 : i + 1 + settings.scalp_retest_max_bars]
-            return any(item.low <= breakout_level <= item.close for item in retest_window)
+            return any(item.low <= breakout_level <= item.close for item in retest_window), "setup_not_confirmed:breakout_retest"
         if direction == Direction.short and candle.close < breakout_level:
             retest_window = window[i + 1 : i + 1 + settings.scalp_retest_max_bars]
-            return any(item.high >= breakout_level >= item.close for item in retest_window)
-    return False
+            return any(item.high >= breakout_level >= item.close for item in retest_window), "setup_not_confirmed:breakout_retest"
+    return False, "setup_not_confirmed:breakout_retest"
 
 
 def _derive_trend_bias(snapshot: BybitKlineSnapshot, lookback: int | None = None, settings: Settings | None = None) -> Direction | None:
@@ -1187,6 +1219,19 @@ def _trade_key(snapshot: BybitKlineSnapshot, plan: TradePlan) -> str:
     )
 
 
+
+
+def _direction_limit_reason(direction: Direction, open_trades: list[object], settings: Settings) -> str | None:
+    limit = int(settings.max_open_positions_per_direction or 0)
+    if limit <= 0:
+        return None
+    open_longs = sum(1 for trade in open_trades if getattr(trade, "side", "") == "long")
+    open_shorts = sum(1 for trade in open_trades if getattr(trade, "side", "") == "short")
+    if direction == Direction.long and open_longs >= limit:
+        return "dir_limit_long"
+    if direction == Direction.short and open_shorts >= limit:
+        return "dir_limit_short"
+    return None
 def _funding_blackout_state(now: datetime, settings: Settings) -> dict[str, bool]:
     minutes = int(now.timestamp() // 60)
     interval = max(1, settings.funding_interval_minutes)

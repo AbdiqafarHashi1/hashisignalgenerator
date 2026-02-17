@@ -266,3 +266,20 @@ def test_risk_reduction_disabled_keeps_stop_unchanged(tmp_path):
 
     assert moved == 0
     assert db.fetch_open_trades("ETHUSDT")[0].stop == original_stop
+
+
+def test_direction_limit_blocks_second_long_but_allows_short(tmp_path):
+    settings = _settings(tmp_path)
+    settings.max_open_positions_per_direction = 1
+    settings.sweet8_enabled = False
+    db = Database(settings)
+    trader = PaperTrader(settings, db)
+
+    first_long = trader.maybe_open_trade("ETHUSDT", _plan(), allow_multiple=True)
+    assert first_long is not None
+
+    second_long = trader.maybe_open_trade("BTCUSDT", _plan(), allow_multiple=True)
+    assert second_long is None
+
+    short_open = trader.maybe_open_trade("BTCUSDT", _short_plan(), allow_multiple=True)
+    assert short_open is not None

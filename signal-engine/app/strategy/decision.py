@@ -183,12 +183,44 @@ def _decide_scalper(request: DecisionRequest, state: StateStore, cfg: Settings) 
             raw_input_snapshot=request.model_dump(),
         )
 
+    adx_value = scalper_engine._compute_adx(candles, cfg.adx_period)
+    if adx_value is None or adx_value < cfg.adx_threshold:
+        rationale.append("adx_too_low")
+        return TradePlan(
+            status=Status.NO_TRADE,
+            direction=trend_direction,
+            entry_zone=None,
+            stop_loss=None,
+            take_profit=None,
+            risk_pct_used=None,
+            position_size_usd=None,
+            signal_score=signal_score,
+            posture=posture_snapshot.posture,
+            rationale=rationale,
+            raw_input_snapshot=request.model_dump(),
+        )
+
     regime_signal = scalper_engine.generate_regime_signal(candles, cfg)
     if regime_signal is None:
         setup_name: str | None = None
         if scalper_engine.pullback_continuation_trigger(candles, trend_direction, ema, cfg):
             setup_name = "pullback_continuation"
             rationale.append("setup_pullback_continuation")
+        elif cfg.disable_breakout_chase:
+            rationale.append("breakout_chase_disabled")
+            return TradePlan(
+                status=Status.NO_TRADE,
+                direction=trend_direction,
+                entry_zone=None,
+                stop_loss=None,
+                take_profit=None,
+                risk_pct_used=None,
+                position_size_usd=None,
+                signal_score=signal_score,
+                posture=posture_snapshot.posture,
+                rationale=rationale,
+                raw_input_snapshot=request.model_dump(),
+            )
         elif scalper_engine.breakout_expansion_trigger(candles, trend_direction, cfg):
             setup_name = "breakout_expansion"
             rationale.append("setup_breakout_expansion")

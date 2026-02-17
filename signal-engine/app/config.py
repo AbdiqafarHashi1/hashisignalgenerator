@@ -76,6 +76,10 @@ class Settings(BaseSettings):
         0.0020,
         validation_alias=AliasChoices("SCALP_PULLBACK_MAX_DIST_PCT", "scalp_pullback_max_dist_pct"),
     )
+    scalp_pullback_min_dist_pct: float = Field(
+        0.0,
+        validation_alias=AliasChoices("SCALP_PULLBACK_MIN_DIST_PCT", "scalp_pullback_min_dist_pct"),
+    )
     scalp_engulfing_min_body_pct: float = Field(
         0.0006,
         validation_alias=AliasChoices("SCALP_ENGULFING_MIN_BODY_PCT", "scalp_engulfing_min_body_pct"),
@@ -84,6 +88,8 @@ class Settings(BaseSettings):
     scalp_rsi_confirm: bool = Field(True, validation_alias=AliasChoices("SCALP_RSI_CONFIRM", "scalp_rsi_confirm"))
     scalp_rsi_long_min: float = Field(45, validation_alias=AliasChoices("SCALP_RSI_LONG_MIN", "scalp_rsi_long_min"))
     scalp_rsi_short_max: float = Field(55, validation_alias=AliasChoices("SCALP_RSI_SHORT_MAX", "scalp_rsi_short_max"))
+    scalp_rsi_long_max: int = Field(100, validation_alias=AliasChoices("SCALP_RSI_LONG_MAX", "scalp_rsi_long_max"))
+    scalp_rsi_short_min: int = Field(0, validation_alias=AliasChoices("SCALP_RSI_SHORT_MIN", "scalp_rsi_short_min"))
     scalp_breakout_lookback: int = Field(
         20,
         validation_alias=AliasChoices("SCALP_BREAKOUT_LOOKBACK", "scalp_breakout_lookback"),
@@ -263,6 +269,18 @@ class Settings(BaseSettings):
     force_trade_random_direction: bool = Field(
         True,
         validation_alias=AliasChoices("FORCE_TRADE_RANDOM_DIRECTION", "force_trade_random_direction"),
+    )
+    require_candle_close_confirm: bool = Field(
+        True,
+        validation_alias=AliasChoices("REQUIRE_CANDLE_CLOSE_CONFIRM", "require_candle_close_confirm"),
+    )
+    disable_breakout_chase: bool = Field(
+        False,
+        validation_alias=AliasChoices("DISABLE_BREAKOUT_CHASE", "disable_breakout_chase"),
+    )
+    max_open_positions_per_direction: int = Field(
+        0,
+        validation_alias=AliasChoices("MAX_OPEN_POSITIONS_PER_DIRECTION", "max_open_positions_per_direction"),
     )
     sweet8_enabled: bool = Field(False, validation_alias=AliasChoices("SWEET8_ENABLED", "sweet8_enabled"))
     sweet8_mode: Literal["auto", "scalper", "swing"] = Field(

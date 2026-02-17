@@ -381,3 +381,63 @@ This project is for research and signal generation only. It does not place trade
    ```bash
    PROFILE=profit docker compose up -d --build
    ```
+
+## Deterministic replay/backtest mode
+Use `RUN_MODE` as the single switch:
+
+- `RUN_MODE=live` (default): current live behavior.
+- `RUN_MODE=replay`: scheduler runs using local replay candles and the same strategy/risk/execution logic.
+
+Replay dataset format (supported):
+
+- CSV: `timestamp,open,high,low,close,volume,close_time`
+- Path layout: `data/replay/{SYMBOL}/{INTERVAL}.csv` (example: `data/replay/ETHUSDT/3m.csv`)
+
+Replay controls:
+
+- `REPLAY_MAX_TRADES` (default `120`)
+- `REPLAY_MAX_BARS` (default `5000`)
+- `REPLAY_START_TS` (optional)
+- `REPLAY_END_TS` (optional)
+- `REPLAY_SEED` (optional)
+
+Engine control endpoints:
+
+- `POST /engine/replay/start`
+- `POST /engine/replay/stop`
+- `POST /engine/replay/reset?clear_storage=false`
+
+`GET /debug/runtime` includes:
+
+- `run_mode`
+- `replay` object with progress (`bar_index`, `total_bars`, `progress_pct`, `max_trades`, `trades_so_far`, etc.)
+
+### Run replay locally (100+ trades)
+```bash
+export RUN_MODE=replay
+export MODE=paper
+export ENGINE_MODE=paper
+export SYMBOLS=ETHUSDT
+export CANDLE_INTERVAL=3m
+export MARKET_DATA_REPLAY_PATH=data/replay
+export FORCE_TRADE_MODE=true
+export FORCE_TRADE_AUTO_CLOSE_SECONDS=1
+export REPLAY_MAX_TRADES=120
+export REPLAY_MAX_BARS=5000
+uvicorn app.main:app --reload
+```
+
+Then start replay and inspect progress:
+
+```bash
+curl -s -X POST http://localhost:8000/engine/replay/start | jq
+curl -s http://localhost:8000/debug/runtime | jq
+curl -s http://localhost:8000/trades | jq '.trades | length'
+```
+
+Switch back to live:
+
+```bash
+export RUN_MODE=live
+unset REPLAY_MAX_TRADES REPLAY_MAX_BARS REPLAY_START_TS REPLAY_END_TS
+```

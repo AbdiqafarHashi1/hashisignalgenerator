@@ -25,7 +25,8 @@ from .services.stats import compute_stats
 from .services.performance import PerformanceStore, build_performance_snapshot
 from .strategy.decision import decide
 from .services.scheduler import DecisionScheduler
-from .providers.bybit import BybitClient, fetch_symbol_klines
+from .providers.bybit import BybitClient, fetch_symbol_klines, replay_reset, replay_status, replay_validate_dataset
+from .providers.replay import ReplayDatasetError
 def _as_datetime_utc(value: Any) -> Optional[datetime]:
     """
     Normalize DB timestamps to timezone-aware UTC datetimes.
@@ -102,6 +103,7 @@ last_heartbeat_ts: datetime | None = None
 last_action: str | None = None
 last_correlation_id: str | None = None
 last_status_reason_logged: str | None = None
+replay_last_error: str | None = None
 state_subscribers: set[asyncio.Queue[str]] = set()
 latest_engine_state: EngineState | None = None
 
@@ -385,7 +387,7 @@ def _publish_state_snapshot() -> None:
 
 def _initialize_engine(app: FastAPI) -> None:
     global settings, state, database, paper_trader, scheduler, performance_store
-    global running, last_heartbeat_ts, last_action, last_correlation_id, last_status_reason_logged
+    global running, last_heartbeat_ts, last_action, last_correlation_id, last_status_reason_logged, replay_last_error
 
     settings = get_settings()
     state = StateStore()
@@ -401,6 +403,7 @@ def _initialize_engine(app: FastAPI) -> None:
         interval_seconds=settings.tick_interval_seconds,
         heartbeat_cb=_record_heartbeat,
     )
+    paper_trader.set_clock(scheduler.engine_now)
     scheduler.add_tick_listener(_publish_state_snapshot)
     performance_store = PerformanceStore(settings.data_dir)
     running = False
@@ -408,6 +411,7 @@ def _initialize_engine(app: FastAPI) -> None:
     last_action = None
     last_correlation_id = None
     last_status_reason_logged = None
+    replay_last_error = None
 
     app.state.settings = settings
     app.state.state_store = state
@@ -560,7 +564,17 @@ async def stream_state_events(request: Request) -> StreamingResponse:
 
 @app.get("/start")
 async def start_scheduler() -> dict[str, str]:
+    global replay_last_error
     scheduler = _require_scheduler()
+    cfg = _require_settings()
+    if cfg.run_mode == "replay":
+        try:
+            replay_validate_dataset(cfg.market_data_replay_path, cfg.symbols[0], cfg.candle_interval or "3m")
+            replay_last_error = None
+        except ReplayDatasetError as exc:
+            replay_last_error = str(exc)
+            logger.error("engine_start status=failed reason=%s", replay_last_error)
+            return {"status": "failed"}
     started = await scheduler.start()
     global running
     running = scheduler.running
@@ -595,6 +609,29 @@ async def stop_scheduler() -> dict[str, str]:
 @app.get("/engine/stop")
 async def engine_stop() -> dict[str, str]:
     return await stop_scheduler()
+
+
+@app.post("/engine/replay/start")
+async def engine_replay_start() -> dict[str, str]:
+    return await start_scheduler()
+
+
+@app.post("/engine/replay/stop")
+async def engine_replay_stop() -> dict[str, str]:
+    return await stop_scheduler()
+
+
+@app.post("/engine/replay/reset")
+async def engine_replay_reset(clear_storage: bool = False) -> dict[str, str]:
+    cfg = _require_settings()
+    db = _require_database()
+    state_store = _require_state()
+    for symbol in cfg.symbols:
+        replay_reset(cfg.market_data_replay_path, symbol, cfg.candle_interval or "3m")
+    if clear_storage:
+        db.reset_all()
+        state_store.reset()
+    return {"status": "ok"}
 
 
 @app.get("/stats")
@@ -1150,12 +1187,32 @@ async def debug_runtime() -> dict:
                 "should_process_reason": state_store.get_decision_meta(symbol).get("should_process_reason"),
             }
         )
+    replay_info: dict[str, Any] = {
+        "active": scheduler.replay_active if settings.run_mode == "replay" else False,
+        "error": replay_last_error,
+    }
+    if settings.run_mode == "replay":
+        try:
+            status = replay_status(settings.market_data_replay_path, symbols[0], settings.candle_interval or "3m")
+            replay_info.update(
+                {
+                    **status,
+                    "max_trades": settings.replay_max_trades,
+                    "max_bars": settings.replay_max_bars,
+                    "trades_so_far": len([t for t in _require_database().fetch_trades() if getattr(t, "closed_at", None)]),
+                }
+            )
+        except ReplayDatasetError as exc:
+            replay_info["error"] = str(exc)
+
     return {
         "settings": {
             **settings.resolved_settings(),
             "telegram_bot_token": _mask_secret(settings.telegram_bot_token),
             "telegram_enabled": settings.telegram_enabled,
         },
+        "run_mode": settings.run_mode,
+        "replay": replay_info,
         "scheduler": {
             "tick_interval_seconds": scheduler.tick_interval,
             "last_tick_time": scheduler.last_tick_time().isoformat() if scheduler.last_tick_time() else None,

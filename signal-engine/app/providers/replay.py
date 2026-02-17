@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
+import csv
 import json
 from pathlib import Path
 
 from pydantic import BaseModel
 
-from ..utils.intervals import interval_to_ms
+
+class ReplayDatasetError(RuntimeError):
+    pass
 
 
 class ReplayCandle(BaseModel):
@@ -40,102 +43,141 @@ class ReplayCursor:
 class ReplayProvider:
     def __init__(self, base_path: str) -> None:
         self._base = Path(base_path)
-        self._base.mkdir(parents=True, exist_ok=True)
         self._cache: dict[tuple[str, str], list[ReplayCandle]] = {}
         self._cursor: dict[tuple[str, str], ReplayCursor] = {}
 
-    def _path_for(self, symbol: str, interval: str) -> Path:
-        return self._base / f"{symbol}_{interval}.json"
-
-    def _generate_series(self, symbol: str, interval: str, count: int = 500) -> list[ReplayCandle]:
-        step = interval_to_ms(interval)
-        now = datetime.now(timezone.utc)
-        start = now - timedelta(milliseconds=step * count)
-        price = 100000.0 if symbol.startswith("BTC") else 3500.0
-        candles: list[ReplayCandle] = []
-        for idx in range(count):
-            t0 = start + timedelta(milliseconds=idx * step)
-            drift = ((idx % 24) - 12) * 0.00015
-            open_price = price
-            close_price = max(1.0, price * (1 + drift))
-            high = max(open_price, close_price) * 1.0006
-            low = min(open_price, close_price) * 0.9994
-            volume = 10 + (idx % 9)
-            t1 = t0 + timedelta(milliseconds=step)
-            candles.append(
-                ReplayCandle(
-                    open_time=t0,
-                    open=open_price,
-                    high=high,
-                    low=low,
-                    close=close_price,
-                    volume=volume,
-                    close_time=t1,
-                )
-            )
-            price = close_price
-        self._write_file(symbol, interval, candles)
-        return candles
-
-    def _write_file(self, symbol: str, interval: str, candles: list[ReplayCandle]) -> None:
-        path = self._path_for(symbol, interval)
-        path.write_text(json.dumps([c.model_dump(mode="json") for c in candles], indent=2), encoding="utf-8")
-
-    def _load_series(self, symbol: str, interval: str) -> list[ReplayCandle]:
-        key = (symbol, interval)
-        if key in self._cache:
-            return self._cache[key]
-        path = self._path_for(symbol, interval)
-        if path.exists():
-            raw = json.loads(path.read_text(encoding="utf-8"))
-            candles = [ReplayCandle(**row) for row in raw]
-            if candles:
-                now = datetime.now(timezone.utc)
-                if (now - candles[-1].close_time).total_seconds() > 120:
-                    candles = self._generate_series(symbol, interval)
-        else:
-            candles = self._generate_series(symbol, interval)
-        self._cache[key] = candles
-        self._cursor.setdefault(key, ReplayCursor(index=max(0, len(candles) - 2)))
-        return candles
-
-
-    def _next_candle(self, previous: ReplayCandle, interval: str, index: int, symbol: str) -> ReplayCandle:
-        step_ms = interval_to_ms(interval)
-        open_price = previous.close
-        drift = ((index % 24) - 12) * 0.00015
-        close_price = max(1.0, open_price * (1 + drift))
-        high = max(open_price, close_price) * 1.0006
-        low = min(open_price, close_price) * 0.9994
-        volume = 10 + (index % 9)
-        t0 = previous.close_time
-        t1 = t0 + timedelta(milliseconds=step_ms)
-        return ReplayCandle(
-            open_time=t0,
-            open=open_price,
-            high=high,
-            low=low,
-            close=close_price,
-            volume=volume,
-            close_time=t1,
+    def _path_for(self, symbol: str, interval: str) -> tuple[Path, str]:
+        symbol_dir = self._base / symbol.upper()
+        csv_path = symbol_dir / f"{interval}.csv"
+        jsonl_path = symbol_dir / f"{interval}.jsonl"
+        if csv_path.exists():
+            return csv_path, "csv"
+        if jsonl_path.exists():
+            return jsonl_path, "jsonl"
+        raise ReplayDatasetError(
+            f"replay_dataset_missing symbol={symbol.upper()} interval={interval} expected={csv_path} or {jsonl_path}"
         )
 
-    async def fetch_symbol_klines(self, symbol: str, interval: str, limit: int, speed: float = 1.0) -> ReplayKlineSnapshot:
+    def _parse_ts(self, value: object) -> datetime:
+        if isinstance(value, (int, float)):
+            v = float(value)
+            if v > 10_000_000_000:
+                v = v / 1000.0
+            return datetime.fromtimestamp(v, tz=timezone.utc)
+        text = str(value).strip()
+        if text.endswith("Z"):
+            text = text[:-1] + "+00:00"
+        try:
+            dt = datetime.fromisoformat(text)
+        except ValueError as exc:
+            raise ReplayDatasetError(f"invalid_timestamp value={value!r}") from exc
+        return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+
+    def _load_series(self, symbol: str, interval: str) -> list[ReplayCandle]:
+        key = (symbol.upper(), interval)
+        if key in self._cache:
+            return self._cache[key]
+        path, kind = self._path_for(symbol, interval)
+        candles: list[ReplayCandle] = []
+        if kind == "csv":
+            with path.open("r", encoding="utf-8") as handle:
+                reader = csv.DictReader(handle)
+                for row in reader:
+                    open_time = self._parse_ts(row.get("timestamp"))
+                    close_time = self._parse_ts(row.get("close_time") or row.get("timestamp"))
+                    candles.append(
+                        ReplayCandle(
+                            open_time=open_time,
+                            open=float(row["open"]),
+                            high=float(row["high"]),
+                            low=float(row["low"]),
+                            close=float(row["close"]),
+                            volume=float(row.get("volume", 0.0) or 0.0),
+                            close_time=close_time,
+                        )
+                    )
+        else:
+            with path.open("r", encoding="utf-8") as handle:
+                for line in handle:
+                    if not line.strip():
+                        continue
+                    row = json.loads(line)
+                    open_time = self._parse_ts(row.get("timestamp"))
+                    close_time = self._parse_ts(row.get("close_time") or row.get("timestamp"))
+                    candles.append(
+                        ReplayCandle(
+                            open_time=open_time,
+                            open=float(row["open"]),
+                            high=float(row["high"]),
+                            low=float(row["low"]),
+                            close=float(row["close"]),
+                            volume=float(row.get("volume", 0.0) or 0.0),
+                            close_time=close_time,
+                        )
+                    )
+        if not candles:
+            raise ReplayDatasetError(f"replay_dataset_empty symbol={symbol} interval={interval} path={path}")
+        candles.sort(key=lambda c: c.close_time)
+        self._cache[key] = candles
+        self._cursor.setdefault(key, ReplayCursor(index=0))
+        return candles
+
+    def validate_dataset(self, symbol: str, interval: str) -> dict[str, object]:
         candles = self._load_series(symbol, interval)
-        key = (symbol, interval)
-        cursor = self._cursor.setdefault(key, ReplayCursor(index=max(0, len(candles) - limit)))
+        return {
+            "symbol": symbol.upper(),
+            "interval": interval,
+            "total_bars": len(candles),
+            "start_ts": candles[0].close_time.isoformat(),
+            "end_ts": candles[-1].close_time.isoformat(),
+        }
+
+    def reset_cursor(self, symbol: str, interval: str) -> None:
+        key = (symbol.upper(), interval)
+        self._cursor[key] = ReplayCursor(index=0)
+
+    def status(self, symbol: str, interval: str) -> dict[str, object]:
+        candles = self._load_series(symbol, interval)
+        key = (symbol.upper(), interval)
+        cursor = self._cursor.setdefault(key, ReplayCursor(index=max(0, min(len(candles) - 1, limit - 1))))
+        idx = min(max(cursor.index, 0), len(candles) - 1)
+        ts = candles[idx].close_time
+        return {
+            "symbol": symbol.upper(),
+            "interval": interval,
+            "bar_index": idx,
+            "total_bars": len(candles),
+            "ts": ts.isoformat(),
+            "progress_pct": round(((idx + 1) / len(candles)) * 100.0, 4),
+        }
+
+    async def fetch_symbol_klines(
+        self,
+        symbol: str,
+        interval: str,
+        limit: int,
+        speed: float = 1.0,
+        start_ts: str | None = None,
+        end_ts: str | None = None,
+    ) -> ReplayKlineSnapshot:
+        candles = self._load_series(symbol, interval)
+        if start_ts or end_ts:
+            start_dt = self._parse_ts(start_ts) if start_ts else None
+            end_dt = self._parse_ts(end_ts) if end_ts else None
+            candles = [c for c in candles if (start_dt is None or c.close_time >= start_dt) and (end_dt is None or c.close_time <= end_dt)]
+            if not candles:
+                raise ReplayDatasetError(f"replay_filter_empty symbol={symbol} interval={interval}")
+        key = (symbol.upper(), interval)
+        cursor = self._cursor.setdefault(key, ReplayCursor(index=0))
+        if cursor.index == 0:
+            cursor.index = max(0, min(len(candles) - 1, limit - 1))
         step = max(1, int(round(speed)))
         cursor.index = min(len(candles) - 1, cursor.index + step)
-        if cursor.index >= len(candles) - 1:
-            candles.append(self._next_candle(candles[-1], interval, cursor.index + 1, symbol))
-            cursor.index = len(candles) - 1
-            self._cache[key] = candles
-            self._write_file(symbol, interval, candles)
         window_start = max(0, cursor.index - max(2, limit) + 1)
         window = candles[window_start : cursor.index + 1]
         candle = window[-1]
         return ReplayKlineSnapshot(
-            symbol=symbol,
+            symbol=symbol.upper(),
             interval=interval,
             price=candle.close,
             volume=candle.volume,

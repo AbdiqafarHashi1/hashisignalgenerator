@@ -88,6 +88,11 @@ class DecisionScheduler:
         self._stop_reason: str | None = None
         self._consecutive_failures = 0
         self._stopping_requested = False
+        self._replay_active = False
+        self._replay_bars_processed = 0
+        self._engine_clock: datetime | None = None
+        if settings.run_mode == "replay" and settings.replay_seed is not None:
+            random.seed(settings.replay_seed)
 
     @property
     def running(self) -> bool:
@@ -113,6 +118,17 @@ class DecisionScheduler:
     def last_symbol_tick_time(self, symbol: str) -> datetime | None:
         return self._last_symbol_tick_time.get(symbol)
 
+    def engine_now(self) -> datetime:
+        return self._engine_clock or datetime.now(timezone.utc)
+
+    @property
+    def replay_active(self) -> bool:
+        return self._replay_active
+
+    @property
+    def replay_bars_processed(self) -> int:
+        return self._replay_bars_processed
+
     def add_tick_listener(self, listener: Callable[[], None]) -> None:
         self._tick_listeners.append(listener)
 
@@ -132,6 +148,8 @@ class DecisionScheduler:
             self._stopping_requested = False
             self._stop_reason = None
             self._consecutive_failures = 0
+            self._replay_active = self._settings.run_mode == "replay"
+            self._replay_bars_processed = 0
             self.started_ts = time.time()
             self._task = asyncio.create_task(self._run_loop(), name="decision_scheduler")
             self._task.add_done_callback(self._on_task_done)
@@ -158,6 +176,7 @@ class DecisionScheduler:
         if task is not None:
             await task
         self._task = None
+        self._replay_active = False
         logger.info("scheduler_stop status=stopped")
         return True
 
@@ -228,34 +247,11 @@ class DecisionScheduler:
                 self._state.record_skip_reason("market_data_disabled")
             self._notify_tick_listeners()
             return results
-        closed_trades_today = self._closed_trades_today_by_symbol(self._last_tick_time)
+        closed_trades_today = self._closed_trades_today_by_symbol(self.engine_now())
         for symbol in symbols:
-            tick_ts = datetime.now(timezone.utc)
-            self._last_symbol_tick_time[symbol] = tick_ts
-            gate_reason = self._risk_gate_reason(symbol, tick_ts, closed_trades_today)
-            if gate_reason:
-                self._state.set_decision_meta(symbol, {"decision": "skip", "skip_reason": gate_reason, "final_entry_gate": gate_reason})
-                self._state.record_skip_reason(gate_reason)
-                results.append(
-                    {
-                        "symbol": symbol,
-                        "plan": None,
-                        "reason": gate_reason,
-                        "candles_fetched": 0,
-                        "latest_candle_ts": None,
-                        "decision_status": None,
-                        "persisted": False,
-                        "dedupe_key": None,
-                        "telegram_sent": False,
-                        "trade_opened": False,
-                        "trade_id": None,
-                        "decision": "skip",
-                        "skip_reason": gate_reason,
-                    }
-                )
-                continue
             try:
                 snapshot = self._last_snapshots.get(symbol)
+                tick_ts = datetime.now(timezone.utc)
                 now_ms = int(tick_ts.timestamp() * 1000)
                 next_fetch_after_ms = self._next_fetch_after_ms.get(symbol, 0)
                 should_refresh = snapshot is None or force_mode or now_ms >= next_fetch_after_ms
@@ -272,7 +268,36 @@ class DecisionScheduler:
                         backoff_max_ms=self._settings.market_data_backoff_max_ms,
                         replay_path=self._settings.market_data_replay_path,
                         replay_speed=self._settings.market_data_replay_speed,
+                        replay_start_ts=self._settings.replay_start_ts,
+                        replay_end_ts=self._settings.replay_end_ts,
                     )
+                if self._settings.run_mode == "replay":
+                    tick_ts = snapshot.candle.close_time
+                    self._engine_clock = tick_ts
+                    now_ms = snapshot.kline_close_time_ms
+                self._last_symbol_tick_time[symbol] = tick_ts
+                gate_reason = self._risk_gate_reason(symbol, tick_ts, closed_trades_today)
+                if gate_reason:
+                    self._state.set_decision_meta(symbol, {"decision": "skip", "skip_reason": gate_reason, "final_entry_gate": gate_reason})
+                    self._state.record_skip_reason(gate_reason)
+                    results.append(
+                        {
+                            "symbol": symbol,
+                            "plan": None,
+                            "reason": gate_reason,
+                            "candles_fetched": len(snapshot.candles) if snapshot else 0,
+                            "latest_candle_ts": snapshot.candle.close_time.isoformat() if snapshot else None,
+                            "decision_status": None,
+                            "persisted": False,
+                            "dedupe_key": None,
+                            "telegram_sent": False,
+                            "trade_opened": False,
+                            "trade_id": None,
+                            "decision": "skip",
+                            "skip_reason": gate_reason,
+                        }
+                    )
+                    continue
                 if snapshot is None:
                     logger.info("candle_fetch symbol=%s status=not_ready reason=candle_open", symbol)
                     self._last_fetch_counts[symbol] = 0
@@ -461,7 +486,7 @@ class DecisionScheduler:
                     self._last_force_trade_ts[snapshot.symbol] = tick_ts
                     forced_trade = True
                 else:
-                    request = _build_decision_request(snapshot)
+                    request = _build_decision_request(snapshot, timestamp=tick_ts)
                     settings_for_decision = self._settings
                     if self._settings.sweet8_enabled:
                         settings_for_decision = self._settings.model_copy(
@@ -506,7 +531,7 @@ class DecisionScheduler:
                     if plan.entry_zone is not None:
                         entry = sum(plan.entry_zone) / 2.0
                     self._database.add_signal(
-                        timestamp=datetime.now(timezone.utc),
+                        timestamp=tick_ts,
                         symbol=snapshot.symbol,
                         score=plan.signal_score,
                         status=plan.status.value,
@@ -679,13 +704,15 @@ class DecisionScheduler:
                 }
             )
         self._notify_tick_listeners()
+        if self._settings.run_mode == "replay":
+            self._replay_bars_processed += 1
         return results
 
 
     async def _maybe_send_skip_debug(self, symbol: str, skip_reason: str | None) -> None:
         if not skip_reason:
             return
-        now = datetime.now(timezone.utc)
+        now = self.engine_now()
         last_sent = self._last_skip_telegram_ts.get(symbol)
         if last_sent is not None and (now - last_sent).total_seconds() < 600:
             return
@@ -761,6 +788,16 @@ class DecisionScheduler:
             logger.info("scheduler_loop_tick_start")
             try:
                 await self.run_once()
+                if self._settings.run_mode == "replay":
+                    closed = len([trade for trade in self._database.fetch_trades() if getattr(trade, "closed_at", None)]) if self._database is not None else 0
+                    if closed >= max(1, self._settings.replay_max_trades):
+                        self._stop_reason = "replay_max_trades_reached"
+                        self._stop_event.set()
+                        break
+                    if self._replay_bars_processed >= max(1, self._settings.replay_max_bars):
+                        self._stop_reason = "replay_max_bars_reached"
+                        self._stop_event.set()
+                        break
                 self._consecutive_failures = 0
                 logger.info("scheduler_loop_tick_end status=ok")
             except Exception as exc:
@@ -778,6 +815,9 @@ class DecisionScheduler:
                 except asyncio.TimeoutError:
                     continue
                 break
+            if self._settings.run_mode == "replay":
+                await asyncio.sleep(0)
+                continue
             try:
                 await asyncio.wait_for(self._stop_event.wait(), timeout=self._interval)
             except asyncio.TimeoutError:
@@ -815,6 +855,10 @@ class DecisionScheduler:
 
         if self._stopping_requested:
             self._task = None
+            return
+        if self._settings.run_mode == "replay" and self._stop_reason in {"replay_max_trades_reached", "replay_max_bars_reached"}:
+            self._task = None
+            self._replay_active = False
             return
 
         try:
@@ -867,7 +911,7 @@ def _trend_strength(candle: BybitKlineSnapshot) -> float:
     return min(1.0, strength)
 
 
-def _build_decision_request(snapshot: BybitKlineSnapshot) -> DecisionRequest:
+def _build_decision_request(snapshot: BybitKlineSnapshot, timestamp: datetime | None = None) -> DecisionRequest:
     candle = snapshot.candle
     direction = Direction.long if candle.close >= candle.open else Direction.short
     entry_low = min(candle.open, candle.close)
@@ -894,7 +938,7 @@ def _build_decision_request(snapshot: BybitKlineSnapshot) -> DecisionRequest:
         tradingview=tradingview_payload,
         market=market,
         bias=bias,
-        timestamp=datetime.now(timezone.utc),
+        timestamp=timestamp or candle.close_time,
         interval=snapshot.interval,
         candles=[
             {

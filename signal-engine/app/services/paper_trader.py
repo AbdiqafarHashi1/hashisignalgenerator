@@ -31,7 +31,14 @@ class PaperTrader:
         self._last_mark_prices: dict[str, float] = {}
         self._original_stops: dict[int, float] = {}
         self._risk_reduced_trade_ids: set[int] = set()
+        self._clock = lambda: datetime.now(timezone.utc)
 
+
+    def set_clock(self, clock_fn) -> None:
+        self._clock = clock_fn
+
+    def _now(self) -> datetime:
+        return self._clock()
     def update_mark_price(self, symbol: str, price: float) -> None:
         self._last_mark_prices[symbol] = price
 
@@ -123,7 +130,7 @@ class PaperTrader:
                 take_profit=take_profit,
                 size=size,
                 side=side,
-                opened_at=datetime.now(timezone.utc),
+                opened_at=self._now(),
                 trade_mode=self._settings.engine_mode if self._settings.engine_mode in {"paper", "live"} else "paper",
             )
         if not allow_multiple and self._db.fetch_open_trades(symbol):
@@ -158,7 +165,7 @@ class PaperTrader:
             take_profit=take_profit,
             size=size,
             side=side,
-            opened_at=datetime.now(timezone.utc),
+            opened_at=self._now(),
             trade_mode=self._settings.engine_mode if self._settings.engine_mode in {"paper", "live"} else "paper",
         )
 
@@ -194,7 +201,7 @@ class PaperTrader:
                 pnl_usd=pnl_usd,
                 pnl_r=pnl_r,
                 fees=fees,
-                closed_at=datetime.now(timezone.utc),
+                closed_at=self._now(),
                 result=reason,
             )
             self._db.log_event(
@@ -235,7 +242,7 @@ class PaperTrader:
                 pnl_usd=pnl_usd,
                 pnl_r=pnl_r,
                 fees=fees,
-                closed_at=datetime.now(timezone.utc),
+                closed_at=self._now(),
                 result=result,
             )
             self._db.log_event(
@@ -397,7 +404,7 @@ class PaperTrader:
             if trade.result != "tp_close" or trade.side != side:
                 continue
             closed_at = datetime.fromisoformat(trade.closed_at)
-            elapsed_minutes = (datetime.now(timezone.utc) - closed_at).total_seconds() / 60.0
+            elapsed_minutes = (self._now() - closed_at).total_seconds() / 60.0
             return elapsed_minutes >= cooldown
         return True
 

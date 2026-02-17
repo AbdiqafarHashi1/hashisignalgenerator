@@ -392,6 +392,8 @@ Replay dataset format (supported):
 
 - CSV: `timestamp,open,high,low,close,volume,close_time`
 - Path layout: `data/replay/{SYMBOL}/{INTERVAL}.csv` (example: `data/replay/ETHUSDT/3m.csv`)
+- Dataset tooling + downloader docs: `tools/replay/README.md`
+- Quick download: `make replay-eth-5m DAYS=45` (or `DAYS=120`)
 
 Replay controls:
 
@@ -425,6 +427,14 @@ export FORCE_TRADE_AUTO_CLOSE_SECONDS=1
 export REPLAY_MAX_TRADES=120
 export REPLAY_MAX_BARS=5000
 uvicorn app.main:app --reload
+```
+
+
+Fast replay helpers:
+
+```bash
+make replay-eth-5m DAYS=45
+./tools/replay/run_replay.sh
 ```
 
 Then start replay and inspect progress:

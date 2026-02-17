@@ -40,7 +40,7 @@ def _trade(
 
 
 def test_build_performance_snapshot_computes_metrics() -> None:
-    now = datetime.now(timezone.utc)
+    now = datetime.now(timezone.utc).replace(hour=12, minute=0, second=0, microsecond=0)
     trades = [
         _trade(
             1,

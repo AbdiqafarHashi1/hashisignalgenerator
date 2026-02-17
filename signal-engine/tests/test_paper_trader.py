@@ -89,7 +89,7 @@ def _short_plan() -> TradePlan:
     )
 
 
-def test_tp_cap_applies_for_long_and_short(tmp_path):
+def test_take_profit_is_not_capped_for_long_and_short(tmp_path):
     settings = _settings(tmp_path)
     db = Database(settings)
     trader = PaperTrader(settings, db)
@@ -98,7 +98,7 @@ def test_tp_cap_applies_for_long_and_short(tmp_path):
     long_id = trader.maybe_open_trade("ETHUSDT", capped_long_plan, allow_multiple=True)
     assert long_id is not None
     long_trade = db.fetch_open_trades("ETHUSDT")[0]
-    assert long_trade.take_profit == long_trade.entry * 1.02
+    assert long_trade.take_profit == 2100.0
 
     trader.force_close_trades("ETHUSDT", long_trade.entry, reason="manual_close")
 
@@ -106,7 +106,7 @@ def test_tp_cap_applies_for_long_and_short(tmp_path):
     short_id = trader.maybe_open_trade("ETHUSDT", capped_short_plan, allow_multiple=True)
     assert short_id is not None
     short_trade = db.fetch_open_trades("ETHUSDT")[0]
-    assert short_trade.take_profit == short_trade.entry * 0.98
+    assert short_trade.take_profit == 1900.0
 
 
 def test_reentry_cooldown_blocks_then_allows(tmp_path):

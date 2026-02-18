@@ -38,6 +38,11 @@ class PropRiskGovernor:
     def save(self, state: GovernorState) -> None:
         self._db.set_runtime_state(STATE_KEY, value_text=self._db.dumps_json(asdict(state)))
 
+    def reset(self, now: datetime) -> GovernorState:
+        state = GovernorState(risk_pct=self._s.prop_risk_base_pct, day_key=now.date().isoformat())
+        self.save(state)
+        return state
+
     def applied_risk_pct(self, now: datetime) -> tuple[float, str]:
         st = self.load(now)
         self._roll_day(st, now)
@@ -98,4 +103,6 @@ class PropRiskGovernor:
         st.daily_net_r = 0.0
         st.daily_losses = 0
         st.daily_trades = 0
+        st.consecutive_losses = 0
+        st.trades_since_loss = 999
         st.locked_until_ts = None

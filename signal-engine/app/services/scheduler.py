@@ -81,6 +81,9 @@ class DecisionScheduler:
         self._last_skip_telegram_ts: dict[str, datetime] = {}
         self._next_fetch_after_ms: dict[str, int] = {}
         self._tick_listeners: list[Callable[[], None]] = []
+        self._listener_error_log_window_seconds = 10.0
+        self._last_listener_error_message: str | None = None
+        self._last_listener_error_traceback_ts: float = 0.0
 
         self._stop_event = asyncio.Event()
         self._task: asyncio.Task | None = None
@@ -136,8 +139,19 @@ class DecisionScheduler:
         for listener in self._tick_listeners:
             try:
                 listener()
-            except Exception:
-                logger.exception("scheduler_tick_listener_error")
+            except Exception as exc:
+                message = f"{type(exc).__name__}: {exc}"
+                now_monotonic = time.monotonic()
+                should_log_traceback = (
+                    message != self._last_listener_error_message
+                    or (now_monotonic - self._last_listener_error_traceback_ts) >= self._listener_error_log_window_seconds
+                )
+                if should_log_traceback:
+                    self._last_listener_error_message = message
+                    self._last_listener_error_traceback_ts = now_monotonic
+                    logger.exception("scheduler_tick_listener_error error=%s", message)
+                else:
+                    logger.warning("scheduler_tick_listener_error_suppressed error=%s", message)
 
     async def start(self) -> bool:
         async with self._lock:
@@ -303,6 +317,10 @@ class DecisionScheduler:
                     self._engine_clock = tick_ts
                     now_ms = snapshot.kline_close_time_ms
                 self._last_symbol_tick_time[symbol] = tick_ts
+                if snapshot is None:
+                    self._last_fetch_counts[symbol] = 0
+                else:
+                    self._last_fetch_counts[symbol] = len(snapshot.candles)
                 gate_reason = self._risk_gate_reason(symbol, tick_ts, closed_trades_today)
                 if gate_reason:
                     self._state.set_decision_meta(symbol, {"decision": "skip", "skip_reason": gate_reason, "final_entry_gate": gate_reason})

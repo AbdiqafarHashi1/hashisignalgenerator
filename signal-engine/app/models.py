@@ -162,3 +162,6 @@ class EngineState(BaseModel):
     trades_today_by_symbol: dict[str, int] = Field(default_factory=dict)
     realized_pnl_by_symbol: dict[str, float] = Field(default_factory=dict)
     fees_by_symbol: dict[str, float] = Field(default_factory=dict)
+    challenge: dict[str, Any] | None = None
+    challenge_ready: bool = False
+    challenge_error: str | None = None

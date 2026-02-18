@@ -883,3 +883,27 @@ def test_new_filters_disabled_preserve_default_trade_path(monkeypatch):
     assert meta["htf_bias_reject"] is False
     assert meta["trigger_body_ratio_reject"] is False
     assert meta["trigger_close_location_reject"] is False
+
+
+def test_tick_listener_error_logs_are_rate_limited(monkeypatch, caplog):
+    settings = Settings(symbols=["BTCUSDT"], _env_file=None)
+    scheduler = DecisionScheduler(settings, StateStore())
+
+    def broken_listener() -> None:
+        raise RuntimeError("boom")
+
+    scheduler.add_tick_listener(broken_listener)
+
+    values = iter([0.0, 1.0, 12.0])
+    monkeypatch.setattr(scheduler_module.time, "monotonic", lambda: next(values))
+
+    caplog.set_level("WARNING")
+    scheduler._notify_tick_listeners()
+    scheduler._notify_tick_listeners()
+    scheduler._notify_tick_listeners()
+
+    full_errors = [record for record in caplog.records if record.message.startswith("scheduler_tick_listener_error error=")]
+    suppressed = [record for record in caplog.records if "scheduler_tick_listener_error_suppressed" in record.message]
+
+    assert len(full_errors) == 2
+    assert len(suppressed) == 1

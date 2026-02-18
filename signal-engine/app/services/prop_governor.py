@@ -103,6 +103,7 @@ class PropRiskGovernor:
         st.daily_net_r = 0.0
         st.daily_losses = 0
         st.daily_trades = 0
-        st.consecutive_losses = 0
-        st.trades_since_loss = 999
+        if self._s.prop_reset_consec_losses_on_day_rollover:
+            st.consecutive_losses = 0
+            st.trades_since_loss = 999
         st.locked_until_ts = None

@@ -484,6 +484,8 @@ class PaperTrader:
             state["daily_net_r"] = 0.0
             state["daily_losses"] = 0
             state["daily_trades"] = 0
+            if self._settings.prop_reset_consec_losses_on_day_rollover:
+                state["consecutive_losses"] = 0
             state["locked_until_ts"] = None
         state["daily_net_r"] = float(state.get("daily_net_r", 0.0)) + float(net_r)
         state["daily_trades"] = int(state.get("daily_trades", 0)) + 1

@@ -243,6 +243,8 @@ class DecisionScheduler:
         gov["daily_net_r"] = 0.0
         gov["daily_losses"] = 0
         gov["daily_trades"] = 0
+        if self._settings.prop_reset_consec_losses_on_day_rollover:
+            gov["consecutive_losses"] = 0
         gov["locked_until_ts"] = None
         self._database.set_runtime_state("prop.governor", value_text=self._database.dumps_json(gov))
         return gov

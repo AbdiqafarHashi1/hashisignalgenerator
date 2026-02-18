@@ -1,15 +1,42 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
-from ..config import Settings
-from ..models import MarketSnapshot
+from dataclasses import dataclass
+
+from ..models import Direction
+from .features import BiasSnapshot, FeatureSnapshot
 
 
-def regime_allows(market: MarketSnapshot, cfg: Settings) -> tuple[bool, list[str]]:
-    reasons: list[str] = []
-    if abs(market.funding_rate) >= cfg.funding_extreme_abs:
-        reasons.append("funding_extreme")
-    if market.leverage_ratio >= cfg.leverage_elevated:
-        reasons.append("leverage_elevated")
-    if abs(market.oi_change_24h) >= cfg.oi_spike_pct and abs(market.funding_rate) >= cfg.funding_elevated_abs:
-        reasons.append("oi_spike_with_non_neutral_funding")
-    return len(reasons) == 0, reasons
+@dataclass(frozen=True)
+class RegimeSnapshot:
+    regime: str
+    trend_allowed: bool
+    volatility_bucket: str
+    bias: Direction
+    skip_reason: str | None
+
+
+def classify_regime(
+    features: FeatureSnapshot,
+    bias: BiasSnapshot,
+    adx_threshold: float,
+    min_atr_pct: float,
+    max_atr_pct: float,
+    slope_threshold: float,
+) -> RegimeSnapshot:
+    if bias.direction == Direction.none:
+        return RegimeSnapshot("RANGE", False, "normal", Direction.none, "bias_unclear")
+    if features.atr_pct < min_atr_pct:
+        return RegimeSnapshot("LOW_VOL", False, "low", bias.direction, "atr_too_low")
+    if features.atr_pct > max_atr_pct:
+        return RegimeSnapshot("HIGH_VOL", False, "high", bias.direction, "atr_too_high")
+
+    trend_alignment = (
+        (bias.direction == Direction.long and features.ema20 > features.ema50)
+        or (bias.direction == Direction.short and features.ema20 < features.ema50)
+    )
+    trend_energy = features.adx >= adx_threshold or (
+        abs(features.ema50_slope) >= slope_threshold and features.atr_pct >= min_atr_pct * 1.15
+    )
+    if trend_alignment and trend_energy:
+        return RegimeSnapshot("TREND", True, "normal", bias.direction, None)
+    return RegimeSnapshot("RANGE", False, "normal", bias.direction, "range_regime")

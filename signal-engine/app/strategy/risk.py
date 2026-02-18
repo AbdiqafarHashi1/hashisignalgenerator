@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from ..config import Settings
-from ..models import Direction
+from ..models import Direction, Posture, RiskResult
 
 
 @dataclass(frozen=True)
@@ -77,3 +77,39 @@ def suggest_position_size(account_balance: float, entry: float, stop_distance: f
         return RiskProposal(risk_pct=risk_pct, size_usd=0.0)
     units = risk_usd / stop_distance
     return RiskProposal(risk_pct=risk_pct, size_usd=max(0.0, units * entry))
+
+
+# Backward-compatible API for tests/legacy imports.
+def choose_risk_pct(posture: Posture, signal_score: int, settings: Settings) -> float:
+    """Compatibility wrapper for legacy risk selection API.
+
+    Canonical sizing logic now lives in suggest_position_size/prop governor flow.
+    This helper preserves the old import surface without altering strategy behavior.
+    """
+    base = float(settings.base_risk_pct or 0.0)
+    max_risk = float(settings.max_risk_pct or base)
+    if posture == Posture.RISK_OFF:
+        return 0.0
+    if posture == Posture.OPPORTUNISTIC and signal_score >= 80:
+        return max_risk
+    return base
+
+
+# Backward-compatible API for tests/legacy imports.
+def position_size(entry: float, stop_loss: float, risk_pct: float, settings: Settings) -> RiskResult:
+    stop_distance = abs(entry - stop_loss)
+    stop_distance_pct = (stop_distance / entry) if entry > 0 else 0.0
+    risk_usd = max(0.0, float(settings.account_size or 0.0) * float(risk_pct))
+    if entry <= 0 or stop_distance <= 0:
+        position_size_usd = 0.0
+    else:
+        units = risk_usd / stop_distance
+        raw_notional = max(0.0, units * entry)
+        max_notional = max(0.0, float(settings.account_size or 0.0) * settings.max_notional_account_multiplier)
+        position_size_usd = min(raw_notional, max_notional)
+
+    return RiskResult(
+        risk_pct_used=float(risk_pct),
+        stop_distance_pct=stop_distance_pct,
+        position_size_usd=position_size_usd,
+    )

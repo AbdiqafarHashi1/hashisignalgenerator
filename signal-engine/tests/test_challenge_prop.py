@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from app.config import Settings
 from app.services.challenge import ChallengeService
@@ -134,3 +134,126 @@ def test_governor_reset_clears_day_key_and_counters(tmp_path):
     assert state.daily_trades == 0
     assert state.consecutive_losses == 0
     assert state.locked_until_ts is None
+
+
+from app.models import Direction, Posture, Status, TradePlan
+from app.services.scheduler import DecisionScheduler
+
+
+def _make_scheduler(settings, state, db):
+    return DecisionScheduler(settings=settings, state=state, database=db, paper_trader=None)
+
+
+def _no_momentum_plan() -> TradePlan:
+    return TradePlan(
+        status=Status.RISK_OFF,
+        direction=Direction.long,
+        entry_zone=None,
+        stop_loss=None,
+        take_profit=None,
+        risk_pct_used=None,
+        position_size_usd=None,
+        signal_score=None,
+        posture=Posture.NORMAL,
+        rationale=["no_momentum"],
+        raw_input_snapshot={},
+    )
+
+
+def test_effective_blocker_governor_max_consecutive_losses(tmp_path):
+    s = _settings(tmp_path)
+    db = Database(s)
+    state = StateStore()
+    scheduler = _make_scheduler(s, state, db)
+    now = datetime(2024, 1, 1, 12, 0, tzinfo=timezone.utc)
+    db.set_runtime_state(
+        "prop.governor",
+        value_text=db.dumps_json(
+            {
+                "risk_pct": s.prop_risk_base_pct,
+                "consecutive_losses": s.prop_max_consec_losses,
+                "trades_since_loss": 0,
+                "daily_net_r": 0.0,
+                "daily_losses": 0,
+                "daily_trades": 0,
+                "locked_until_ts": None,
+                "day_key": now.date().isoformat(),
+            }
+        ),
+    )
+    blocker, _ = scheduler._compute_effective_blockers("ETHUSDT", now, {}, plan=None, skip_reason=None)
+    assert blocker is not None
+    assert blocker.layer == "governor"
+    assert blocker.code == "prop_max_consecutive_losses"
+
+
+def test_effective_blocker_cooldown_ttl_and_clear(tmp_path):
+    s = _settings(tmp_path)
+    s.prop_time_cooldown_minutes = 10
+    db = Database(s)
+    state = StateStore()
+    scheduler = _make_scheduler(s, state, db)
+    lock_started = datetime(2024, 1, 1, 12, 0, tzinfo=timezone.utc)
+    db.set_runtime_state(
+        "prop.governor",
+        value_text=db.dumps_json(
+            {
+                "risk_pct": s.prop_risk_base_pct,
+                "consecutive_losses": 1,
+                "trades_since_loss": 0,
+                "daily_net_r": 0.0,
+                "daily_losses": 0,
+                "daily_trades": 0,
+                "locked_until_ts": lock_started.isoformat(),
+                "day_key": lock_started.date().isoformat(),
+            }
+        ),
+    )
+    blocker, _ = scheduler._compute_effective_blockers("ETHUSDT", lock_started + timedelta(minutes=5), {}, plan=None, skip_reason=None)
+    assert blocker is not None
+    assert blocker.code == "prop_time_cooldown"
+    assert blocker.until_ts is not None
+
+    cleared, _ = scheduler._compute_effective_blockers("ETHUSDT", lock_started + timedelta(minutes=11), {}, plan=None, skip_reason=None)
+    assert cleared is None or cleared.code != "prop_time_cooldown"
+
+
+def test_effective_blocker_strategy_no_momentum_without_governor_lock(tmp_path):
+    s = _settings(tmp_path)
+    db = Database(s)
+    state = StateStore()
+    scheduler = _make_scheduler(s, state, db)
+    now = datetime(2024, 1, 1, 12, 0, tzinfo=timezone.utc)
+
+    blocker, _ = scheduler._compute_effective_blockers("ETHUSDT", now, {}, plan=_no_momentum_plan(), skip_reason="no_momentum")
+    assert blocker is not None
+    assert blocker.layer == "strategy"
+    assert blocker.code == "no_momentum"
+
+
+def test_effective_blocker_governor_priority_over_strategy(tmp_path):
+    s = _settings(tmp_path)
+    db = Database(s)
+    state = StateStore()
+    scheduler = _make_scheduler(s, state, db)
+    now = datetime(2024, 1, 1, 12, 0, tzinfo=timezone.utc)
+    db.set_runtime_state(
+        "prop.governor",
+        value_text=db.dumps_json(
+            {
+                "risk_pct": s.prop_risk_base_pct,
+                "consecutive_losses": s.prop_max_consec_losses,
+                "trades_since_loss": 0,
+                "daily_net_r": 0.0,
+                "daily_losses": 0,
+                "daily_trades": 0,
+                "locked_until_ts": None,
+                "day_key": now.date().isoformat(),
+            }
+        ),
+    )
+
+    blocker, _ = scheduler._compute_effective_blockers("ETHUSDT", now, {}, plan=_no_momentum_plan(), skip_reason="no_momentum")
+    assert blocker is not None
+    assert blocker.layer == "governor"
+    assert blocker.code == "prop_max_consecutive_losses"

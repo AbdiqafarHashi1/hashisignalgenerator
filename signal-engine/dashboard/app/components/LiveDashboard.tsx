@@ -229,7 +229,7 @@ export default function LiveDashboard() {
         </section>
 
         {viewMode === "professional" ? (
-          <section className="grid gap-4 lg:grid-cols-4">
+          <section className="grid gap-4 lg:grid-cols-5">
             <Card title="Risk Panel">
               <Metric label="Daily loss limit" value={pct(risk.daily_loss_limit_pct)} />
               <Metric label="Global DD limit" value={pct(risk.global_dd_limit_pct)} />
@@ -247,6 +247,7 @@ export default function LiveDashboard() {
               <Metric label="Equity reconcile Δ" value={money(account.equity_reconcile_delta)} />
             </Card>
 
+            <BlockersCard state={state} />
             <SymbolCard symbol={ethCard} fallback="ETHUSDT" />
             <SymbolCard symbol={btcCard} fallback="BTCUSDT" />
           </section>
@@ -449,6 +450,7 @@ function SymbolCard({ symbol, fallback }: { symbol: NormalizedSymbol | null; fal
     regimeLabel: "—",
     lastDecision: "—",
     lastSkipReason: "—",
+    blockerCode: "—",
     atrPct: null,
     trendStrength: null,
     signalScore: null,
@@ -460,13 +462,39 @@ function SymbolCard({ symbol, fallback }: { symbol: NormalizedSymbol | null; fal
     <Card title={row.symbol}>
       <Metric label="Regime" value={row.regime} />
       <Metric label="Last decision" value={row.lastDecision} />
-      <Metric label="Last skip reason" value={humanSkipReason(row.lastSkipReason)} />
+      <Metric label="Blocker" value={humanSkipReason(row.blockerCode !== "--" ? row.blockerCode : row.lastSkipReason)} />
       <Metric label="ATR %" value={pct(row.atrPct)} />
       <Metric label="Trend strength" value={fmt(row.trendStrength)} />
       <Metric label="Signal score" value={fmt(row.signalScore)} />
       <Metric label="Position" value={row.openPosition || "No open position"} />
     </Card>
   );
+}
+
+
+function BlockersCard({ state }: { state: EngineState | null }) {
+  const blockers = Array.isArray(state?.blockers) ? state?.blockers ?? [] : [];
+  return (
+    <Card title="Blockers">
+      {blockers.length === 0 ? <Metric label="Status" value="ELIGIBLE" /> : null}
+      {blockers.slice(0, 6).map((blocker, idx) => (
+        <Metric
+          key={`${blocker.code}-${idx}`}
+          label={`${blocker.layer}`}
+          value={`${blocker.code}${formatBlockerTtl(blocker.until_ts, state?.candle_ts)}`}
+        />
+      ))}
+    </Card>
+  );
+}
+
+function formatBlockerTtl(untilTs?: string | null, replayTs?: string | null): string {
+  if (!untilTs) return "";
+  const untilMs = Date.parse(untilTs);
+  const nowMs = replayTs ? Date.parse(replayTs) : Date.now();
+  if (!Number.isFinite(untilMs) || !Number.isFinite(nowMs)) return "";
+  const remaining = Math.max(0, Math.floor((untilMs - nowMs) / 1000));
+  return ` (ttl ${remaining}s)`;
 }
 
 function TradeTable({ rows }: { rows: NormalizedTrade[] }) {

@@ -1,63 +1,79 @@
-﻿from __future__ import annotations
+from __future__ import annotations
+
+from dataclasses import dataclass
 
 from ..config import Settings
-from ..models import Posture, RiskResult
+from ..models import Direction
 
 
-def choose_risk_pct(posture: Posture, score: int, cfg: Settings) -> float:
-    """
-    Base risk always applies.
-    Risk bump only when posture is OPPORTUNISTIC and score is high.
-    """
-    risk_pct = cfg.base_risk_pct
-    if posture == Posture.OPPORTUNISTIC:
-        if cfg.MODE == "prop_cfd" and score >= cfg.prop_score_threshold:
-            risk_pct = cfg.max_risk_pct
-        if cfg.MODE == "personal_crypto" and score >= cfg.personal_score_threshold:
-            risk_pct = cfg.max_risk_pct
-    return min(risk_pct, cfg.max_risk_pct)
+@dataclass(frozen=True)
+class StopPlan:
+    stop_price: float
+    stop_distance: float
+    stop_type: str
 
 
-def position_size(entry_price: float, stop_loss: float, risk_pct: float, cfg: Settings) -> RiskResult:
-    """
-    Test-compatible signature.
+@dataclass(frozen=True)
+class TargetPlan:
+    target_price: float
+    partial_r: float
+    target_r: float
 
-    Coach upgrade (non-breaking):
-      - optional min stop distance gate (only active if cfg.min_stop_distance_pct exists and > 0)
-      - still returns RiskResult (position may be 0 when rejected)
-    """
-    stop_distance = abs(entry_price - stop_loss)
-    if entry_price <= 0:
-        stop_distance_pct = 0.0
+
+@dataclass(frozen=True)
+class RiskProposal:
+    risk_pct: float
+    size_usd: float
+
+
+def build_stop_plan(
+    entry: float,
+    direction: Direction,
+    swing_low: float,
+    swing_high: float,
+    atr: float,
+    settings: Settings,
+) -> StopPlan:
+    atr_distance = atr * settings.strategy_atr_stop_mult
+    if direction == Direction.long:
+        swing_stop = swing_low * (1 - settings.strategy_swing_stop_buffer_bps / 10_000)
+        atr_stop = entry - atr_distance
+        stop = min(swing_stop, atr_stop)
+        dist = entry - stop
     else:
-        stop_distance_pct = stop_distance / entry_price
+        swing_stop = swing_high * (1 + settings.strategy_swing_stop_buffer_bps / 10_000)
+        atr_stop = entry + atr_distance
+        stop = max(swing_stop, atr_stop)
+        dist = stop - entry
 
-    if stop_distance_pct <= 0:
-        return RiskResult(risk_pct_used=risk_pct, stop_distance_pct=0.0, position_size_usd=0.0)
+    min_distance = entry * settings.strategy_min_stop_pct
+    max_distance = entry * settings.strategy_max_stop_pct
+    clamped = min(max(dist, min_distance), max_distance)
+    if direction == Direction.long:
+        stop = entry - clamped
+    else:
+        stop = entry + clamped
 
-    # Optional safety: reject ultra-tight stops only if configured
-    min_stop = float(getattr(cfg, "min_stop_distance_pct", 0.0) or 0.0)
-    if min_stop > 0 and stop_distance_pct < min_stop:
-        return RiskResult(risk_pct_used=risk_pct, stop_distance_pct=stop_distance_pct, position_size_usd=0.0)
-
-    position_usd = (cfg.account_size * risk_pct) / stop_distance_pct
-    max_notional = cfg.account_size * cfg.max_notional_account_multiplier
-    position_usd = min(position_usd, max_notional)
-
-    return RiskResult(
-        risk_pct_used=risk_pct,
-        stop_distance_pct=stop_distance_pct,
-        position_size_usd=position_usd,
-    )
+    stop_type = "blended"
+    if abs(stop - swing_stop) < 1e-9:
+        stop_type = "swing"
+    elif abs(stop - atr_stop) < 1e-9:
+        stop_type = "atr"
+    return StopPlan(stop, clamped, stop_type)
 
 
-# Backward-compat helper for tests that import this name directly
-def position_size_usd(account_size: float, risk_pct: float, entry_price: float, stop_loss: float) -> float:
-    stop_distance = abs(entry_price - stop_loss)
-    if entry_price <= 0 or stop_distance <= 0:
-        return 0.0
-    stop_distance_pct = stop_distance / entry_price
-    if stop_distance_pct <= 0:
-        return 0.0
-    position = (account_size * risk_pct) / stop_distance_pct
-    return min(position, account_size * 3.0)
+def build_target_plan(entry: float, direction: Direction, stop_distance: float, settings: Settings) -> TargetPlan:
+    target_r = settings.strategy_target_r
+    partial_r = settings.strategy_partial_r
+    move = stop_distance * target_r
+    target = entry + move if direction == Direction.long else entry - move
+    return TargetPlan(target, partial_r=partial_r, target_r=target_r)
+
+
+def suggest_position_size(account_balance: float, entry: float, stop_distance: float, settings: Settings) -> RiskProposal:
+    risk_pct = min(max(settings.prop_risk_base_pct, settings.prop_risk_min_pct), settings.prop_risk_max_pct)
+    risk_usd = max(0.0, account_balance * risk_pct)
+    if stop_distance <= 0 or entry <= 0:
+        return RiskProposal(risk_pct=risk_pct, size_usd=0.0)
+    units = risk_usd / stop_distance
+    return RiskProposal(risk_pct=risk_pct, size_usd=max(0.0, units * entry))

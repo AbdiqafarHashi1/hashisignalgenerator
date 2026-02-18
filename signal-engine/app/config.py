@@ -24,6 +24,19 @@ class Settings(BaseSettings):
     run_mode: Literal["live", "replay"] = Field("live", validation_alias=AliasChoices("RUN_MODE", "run_mode"))
     PROFILE: Literal["profit", "diag"] = Field("profit", validation_alias=AliasChoices("PROFILE", "profile"))
     strategy_profile: Literal["SCALPER_FAST", "SCALPER_STABLE", "RANGE_MEAN_REVERT", "INTRADAY_TREND_SELECTIVE", "PROP_PASS"] = Field("SCALPER_STABLE", validation_alias=AliasChoices("STRATEGY_PROFILE", "strategy_profile"))
+    strategy_bias_ema_fast: int = Field(50, validation_alias=AliasChoices("STRATEGY_BIAS_EMA_FAST", "strategy_bias_ema_fast"))
+    strategy_bias_ema_slow: int = Field(200, validation_alias=AliasChoices("STRATEGY_BIAS_EMA_SLOW", "strategy_bias_ema_slow"))
+    strategy_swing_lookback: int = Field(30, validation_alias=AliasChoices("STRATEGY_SWING_LOOKBACK", "strategy_swing_lookback"))
+    strategy_adx_threshold: float = Field(22.0, validation_alias=AliasChoices("STRATEGY_ADX_THRESHOLD", "strategy_adx_threshold"))
+    strategy_min_atr_pct: float = Field(0.0015, validation_alias=AliasChoices("STRATEGY_MIN_ATR_PCT", "strategy_min_atr_pct"))
+    strategy_max_atr_pct: float = Field(0.012, validation_alias=AliasChoices("STRATEGY_MAX_ATR_PCT", "strategy_max_atr_pct"))
+    strategy_trend_slope_threshold: float = Field(0.0002, validation_alias=AliasChoices("STRATEGY_TREND_SLOPE_THRESHOLD", "strategy_trend_slope_threshold"))
+    strategy_atr_stop_mult: float = Field(1.6, validation_alias=AliasChoices("STRATEGY_ATR_STOP_MULT", "strategy_atr_stop_mult"))
+    strategy_swing_stop_buffer_bps: float = Field(8.0, validation_alias=AliasChoices("STRATEGY_SWING_STOP_BUFFER_BPS", "strategy_swing_stop_buffer_bps"))
+    strategy_min_stop_pct: float = Field(0.002, validation_alias=AliasChoices("STRATEGY_MIN_STOP_PCT", "strategy_min_stop_pct"))
+    strategy_max_stop_pct: float = Field(0.015, validation_alias=AliasChoices("STRATEGY_MAX_STOP_PCT", "strategy_max_stop_pct"))
+    strategy_target_r: float = Field(2.2, validation_alias=AliasChoices("STRATEGY_TARGET_R", "strategy_target_r"))
+    strategy_partial_r: float = Field(1.8, validation_alias=AliasChoices("STRATEGY_PARTIAL_R", "strategy_partial_r"))
     engine_mode: Literal["paper", "signal_only", "live"] = Field("signal_only", validation_alias=AliasChoices("ENGINE_MODE", "engine_mode"))
     symbols: Annotated[list[str], NoDecode] = Field(
         default_factory=lambda: ["BTCUSDT"],
@@ -640,20 +653,30 @@ class Settings(BaseSettings):
                 "max_consecutive_losses": 2,
                 "candle_interval": "5m",
                 "tick_interval_seconds": 60,
-                "min_signal_score": 72,
-                "trend_strength_min": 0.60,
                 "cooldown_minutes_after_loss": 60,
                 "max_trades_per_day": 4,
-                "scalp_min_score": 84,
-                "scalp_setup_mode": "pullback_engulfing",
-                "scalp_pullback_min_dist_pct": 0.0008,
+                "strategy_bias_ema_fast": 50,
+                "strategy_bias_ema_slow": 200,
+                "strategy_swing_lookback": 30,
+                "strategy_adx_threshold": 22.0,
+                "strategy_min_atr_pct": 0.0015,
+                "strategy_max_atr_pct": 0.0105,
+                "strategy_trend_slope_threshold": 0.0002,
+                "strategy_atr_stop_mult": 1.6,
+                "strategy_target_r": 2.2,
+                "strategy_partial_r": 1.8,
+                "be_enabled": True,
+                "move_to_breakeven_trigger_r": 1.3,
+                "be_min_seconds_open": 300,
+                "partial_tp_enabled": True,
+                "partial_tp_r": 1.8,
+                "partial_tp_close_pct": 0.25,
+                "trail_enabled": True,
+                "trail_start_r": 2.2,
+                "trail_atr_mult": 1.2,
                 "disable_breakout_chase": True,
-                "max_open_positions_per_direction": 1,
                 "htf_bias_enabled": True,
                 "htf_interval": "1h",
-                "trigger_body_ratio_min": 0.62,
-                "trigger_close_location_min": 0.68,
-                "adx_threshold": 24,
             },
         }
         return profiles[self.strategy_profile]

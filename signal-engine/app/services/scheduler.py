@@ -80,6 +80,8 @@ class DecisionScheduler:
                 )
         self._heartbeat_cb = heartbeat_cb
         self._last_tick_time: datetime | None = None
+        self._last_heartbeat_monotonic = time.monotonic()
+        self._stall_recoveries = 0
         self.last_tick_ts: float | None = None
         self.started_ts: float | None = None
         self._last_snapshots: dict[str, BybitKlineSnapshot] = {}
@@ -365,6 +367,7 @@ class DecisionScheduler:
 
     async def run_once(self, force: bool = False) -> list[dict[str, object]]:
         self.last_tick_ts = time.time()
+        self._last_heartbeat_monotonic = time.monotonic()
         if self._heartbeat_cb is not None:
             self._heartbeat_cb()
         symbols = list(self._settings.symbols)
@@ -1006,6 +1009,10 @@ class DecisionScheduler:
         while not self._stop_event.is_set():
             logger.info("scheduler_loop_tick_start")
             try:
+                heartbeat_age = time.monotonic() - self._last_heartbeat_monotonic
+                if heartbeat_age > max(5.0, self._interval * 3):
+                    self._stall_recoveries += 1
+                    logger.error("scheduler_watchdog_stall_detected age=%.2fs recoveries=%s", heartbeat_age, self._stall_recoveries)
                 await self.run_once()
                 if self._settings.run_mode == "replay":
                     closed = len([trade for trade in self._database.fetch_trades() if getattr(trade, "closed_at", None)]) if self._database is not None else 0

@@ -239,10 +239,13 @@ class PaperTrader:
                 mark = price
                 progress_r = ((mark - trade.entry) / risk_per_unit) if trade.side == "long" else ((trade.entry - mark) / risk_per_unit)
                 if self._settings.be_enabled and progress_r >= self._settings.move_to_breakeven_trigger_r:
-                    buffer = trade.entry * (self._settings.move_to_breakeven_buffer_bps / 10000.0)
-                    be_stop = (trade.entry + buffer) if trade.side == "long" else (trade.entry - buffer)
-                    if (trade.side == "long" and be_stop > trade.stop) or (trade.side == "short" and be_stop < trade.stop):
-                        self._db.update_trade_stop(trade.id, be_stop)
+                    opened_at = datetime.fromisoformat(trade.opened_at)
+                    seconds_open = (self._now() - opened_at).total_seconds()
+                    if seconds_open >= self._settings.move_to_breakeven_min_seconds_open:
+                        buffer = trade.entry * (self._settings.move_to_breakeven_buffer_bps / 10000.0)
+                        be_stop = (trade.entry + buffer) if trade.side == "long" else (trade.entry - buffer)
+                        if (trade.side == "long" and be_stop > trade.stop) or (trade.side == "short" and be_stop < trade.stop):
+                            self._db.update_trade_stop(trade.id, be_stop)
                 if self._settings.partial_tp_enabled and progress_r >= self._settings.partial_tp_r and trade.id not in self._partial_taken_trade_ids:
                     self._partial_taken_trade_ids.add(trade.id)
                     self._db.log_event("partial_tp", {"trade_id": trade.id, "symbol": trade.symbol, "close_pct": self._settings.partial_tp_close_pct}, f"trade:{trade.id}")

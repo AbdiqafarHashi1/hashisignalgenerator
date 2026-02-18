@@ -10,6 +10,7 @@ from . import manager
 from .features import compute_bias, compute_features
 from .regime import classify_regime
 from .risk import build_stop_plan, build_target_plan, suggest_position_size
+from . import scalper as scalper_engine
 from .signals import generate_entry_signal
 
 
@@ -35,13 +36,44 @@ def decide(request: DecisionRequest, state: StateStore, cfg: Settings) -> TradeP
     symbol = request.tradingview.symbol
     candles = request.candles or []
 
+    allowed, risk_status, risk_reasons = state.check_limits(symbol, cfg, now)
+    if not allowed:
+        return _skip_plan(request, Posture.RISK_OFF, risk_status, *risk_reasons)
+
     if abs(request.market.funding_rate) >= cfg.funding_extreme_abs:
         return _skip_plan(request, Posture.RISK_OFF, Status.RISK_OFF, "funding_extreme")
-    if len(candles) < 60:
+    if len(candles) < 5:
         return _skip_plan(request, Posture.NORMAL, Status.RISK_OFF, "insufficient_candles")
 
+    trend_direction, trend_ema = scalper_engine.trend_direction(candles, cfg.ema_length)
+    has_pullback = False
+    has_breakout = False
+    if trend_direction is not None and request.tradingview.direction_hint != trend_direction:
+        return _skip_plan(request, Posture.RISK_OFF, Status.RISK_OFF, "no_trigger")
+    if trend_direction is not None and trend_ema is not None:
+        has_pullback = scalper_engine.pullback_continuation_trigger(candles, request.tradingview.direction_hint, trend_ema, cfg)
+        has_breakout = scalper_engine.breakout_expansion_trigger(candles, request.tradingview.direction_hint, cfg)
+        if cfg.debug_loosen and (has_pullback or has_breakout):
+            entry = candles[-1].close
+            direction = request.tradingview.direction_hint
+            stop = request.tradingview.sl_hint
+            tp = entry * (1 + cfg.take_profit_pct) if direction == Direction.long else entry * (1 - cfg.take_profit_pct)
+            return TradePlan(
+                status=Status.TRADE,
+                direction=direction,
+                entry_zone=(request.tradingview.entry_low, request.tradingview.entry_high),
+                stop_loss=stop,
+                take_profit=tp,
+                risk_pct_used=float(cfg.base_risk_pct or 0.0),
+                position_size_usd=float(cfg.account_size or 0.0) * float(cfg.base_risk_pct or 0.0),
+                signal_score=int(max(0.0, min(1.0, request.market.trend_strength)) * 100),
+                posture=Posture.NORMAL,
+                rationale=["debug_loosen", "setup_pullback" if has_pullback else "setup_breakout"],
+                raw_input_snapshot={"debug": True},
+            )
+
     signal_floor_score = int(max(0.0, min(1.0, request.market.trend_strength)) * 100)
-    if cfg.min_signal_score is not None and signal_floor_score < cfg.min_signal_score:
+    if not cfg.debug_loosen and cfg.min_signal_score is not None and signal_floor_score < cfg.min_signal_score:
         return _skip_plan(request, Posture.NORMAL, Status.NO_TRADE, "score_below_min")
 
     features = compute_features(candles, swing_lookback=cfg.strategy_swing_lookback)
@@ -57,7 +89,7 @@ def decide(request: DecisionRequest, state: StateStore, cfg: Settings) -> TradeP
         max_atr_pct=cfg.strategy_max_atr_pct,
         slope_threshold=cfg.strategy_trend_slope_threshold,
     )
-    if features.adx < effective_adx_threshold:
+    if not cfg.debug_loosen and features.adx < effective_adx_threshold:
         return _skip_plan(
             request,
             Posture.RISK_OFF,
@@ -65,6 +97,9 @@ def decide(request: DecisionRequest, state: StateStore, cfg: Settings) -> TradeP
             "no_momentum",
             details=_decision_snapshot(now, symbol, features, bias, regime.regime, type("S", (), {"setup_type": None, "score": 0, "skip_reason": "no_momentum"})(), None, None),
         )
+
+    if len(candles) <= 120 and trend_direction is not None and trend_ema is not None and not has_pullback and not has_breakout:
+        return _skip_plan(request, Posture.NORMAL, Status.NO_TRADE, "no_valid_setup")
 
     signal = generate_entry_signal(candles, features, regime)
     if not signal.should_trade or signal.entry is None:

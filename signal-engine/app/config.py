@@ -260,6 +260,7 @@ class Settings(BaseSettings):
         0.6,
         validation_alias=AliasChoices(
             "MOVE_TO_BREAKEVEN_TRIGGER_R",
+            "BE_TRIGGER_R",
             "BE_TRIGGER_R_MULT",
             "move_to_breakeven_trigger_r",
         ),
@@ -515,9 +516,20 @@ class Settings(BaseSettings):
     def apply_mode_defaults(self) -> "Settings":
         logger = logging.getLogger(__name__)
         profile_defaults = self._profile_defaults()
+        skipped_defaults: list[str] = []
         for key, value in profile_defaults.items():
-            if getattr(self, key) is None:
+            if key not in self.__class__.model_fields:
+                skipped_defaults.append(key)
+                continue
+            if getattr(self, key, None) is None:
                 setattr(self, key, value)
+        if skipped_defaults:
+            logger.warning("Config default skipped (field missing): %s", ", ".join(sorted(skipped_defaults)))
+
+        if "BE_TRIGGER_R" in os.environ and "MOVE_TO_BREAKEVEN_TRIGGER_R" not in os.environ:
+            logger.warning(
+                "Config key BE_TRIGGER_R is deprecated; use MOVE_TO_BREAKEVEN_TRIGGER_R instead."
+            )
         if "ENGINE_MODE" not in os.environ and self.MODE in {"paper", "signal_only", "live"}:
             self.engine_mode = self.MODE
         if self.run_mode == "replay":
@@ -667,7 +679,7 @@ class Settings(BaseSettings):
                 "strategy_partial_r": 1.8,
                 "be_enabled": True,
                 "move_to_breakeven_trigger_r": 1.3,
-                "be_min_seconds_open": 300,
+                "move_to_breakeven_min_seconds_open": 300,
                 "partial_tp_enabled": True,
                 "partial_tp_r": 1.8,
                 "partial_tp_close_pct": 0.25,

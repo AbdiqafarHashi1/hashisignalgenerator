@@ -17,7 +17,7 @@ const HEAVY_REFRESH_MS = 15000;
 type Toast = { id: number; message: string; type: "success" | "error" };
 type ViewMode = "professional" | "minimal";
 type ResultFilter = "all" | "win" | "loss" | "breakeven";
-type ControlKey = "start" | "stop" | "runOnce" | "forceRun";
+type ControlKey = "start" | "stop" | "runOnce" | "forceRun" | "resetChallenge";
 
 const CONTROLS: Array<{
   key: ControlKey;
@@ -30,6 +30,7 @@ const CONTROLS: Array<{
   { key: "stop", label: "Stop", path: "/stop", activeWhenRunning: true, kind: "secondary" },
   { key: "runOnce", label: "Run Once", path: "/run", activeWhenRunning: true, kind: "secondary" },
   { key: "forceRun", label: "Force Run", path: "/run?force=true", activeWhenRunning: true, kind: "danger" },
+  { key: "resetChallenge", label: "Reset Challenge", path: "/challenge/reset", activeWhenRunning: false, kind: "danger" },
 ];
 
 export default function LiveDashboard() {
@@ -142,6 +143,7 @@ export default function LiveDashboard() {
             <div className="flex flex-col items-end gap-1">
               <div className="flex flex-wrap items-center gap-2">
                 <StatusChip label="LIVE" tone="green" />
+                <StatusChip label={`REPLAY @ ${String((state as any)?.candle_ts ?? "--")}`} tone="blue" />
                 <StatusChip label="PAPER" tone="blue" />
                 <div className="inline-flex h-10 items-center rounded-full border border-slate-600/70 bg-slate-900/65 p-1 text-xs backdrop-blur-[2px]">
                   <button
@@ -308,7 +310,7 @@ export default function LiveDashboard() {
             <div className="max-h-60 space-y-2 overflow-auto text-xs">
               {eventTape.length ? eventTape.slice(-200).reverse().map((row, idx) => (
                 <div key={`${String(row.correlation_id ?? idx)}-${idx}`} className="rounded-lg border border-slate-700/60 p-2">
-                  <p>{formatTime(String(row.time ?? ""))} | {String(row.type ?? "event")}</p>
+                  <p>{formatTime(String(row.candle_ts ?? row.time ?? ""))} | {String(row.type ?? "event")}</p>
                   <p className="truncate text-slate-300">{JSON.stringify(row.payload ?? {})}</p>
                 </div>
               )) : <p className="text-sm text-slate-400">No events</p>}

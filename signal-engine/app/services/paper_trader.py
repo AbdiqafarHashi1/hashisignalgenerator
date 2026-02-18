@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
+import json
 import math
 import logging
 
@@ -31,6 +32,8 @@ class PaperTrader:
         self._last_mark_prices: dict[str, float] = {}
         self._original_stops: dict[int, float] = {}
         self._risk_reduced_trade_ids: set[int] = set()
+        self._partial_taken_trade_ids: set[int] = set()
+        self._trail_state: dict[int, float] = {}
         self._clock = lambda: datetime.now(timezone.utc)
 
 
@@ -144,7 +147,16 @@ class PaperTrader:
         side = "long" if plan.direction == Direction.long else "short"
         entry_with_costs = self._apply_entry_price(side, entry)
         configured_risk_usd = float(getattr(self._settings, "risk_per_trade_usd", 0.0) or 0.0)
-        risk_usd = configured_risk_usd if configured_risk_usd > 0 else (self._settings.account_size * float(plan.risk_pct_used or self._settings.base_risk_pct or 0.0))
+        applied_risk_pct = float(plan.risk_pct_used or self._settings.base_risk_pct or 0.0)
+        if self._settings.prop_governor_enabled:
+            row = self._db.get_runtime_state("prop.governor")
+            if row and row.value_text:
+                try:
+                    gov = json.loads(row.value_text)
+                    applied_risk_pct = float(gov.get("risk_pct", applied_risk_pct))
+                except (ValueError, json.JSONDecodeError):
+                    pass
+        risk_usd = configured_risk_usd if configured_risk_usd > 0 else (self._settings.account_size * applied_risk_pct)
         stop_distance = abs(entry_with_costs - stop)
         size = (risk_usd / stop_distance) if stop_distance > 0 else 0.0
         if plan.position_size_usd:
@@ -222,6 +234,26 @@ class PaperTrader:
         results: list[PaperTradeResult] = []
         self.update_mark_price(symbol, price)
         for trade in self._db.fetch_open_trades(symbol):
+            risk_per_unit = abs(trade.entry - trade.stop)
+            if risk_per_unit > 0:
+                mark = price
+                progress_r = ((mark - trade.entry) / risk_per_unit) if trade.side == "long" else ((trade.entry - mark) / risk_per_unit)
+                if self._settings.be_enabled and progress_r >= self._settings.move_to_breakeven_trigger_r:
+                    buffer = trade.entry * (self._settings.move_to_breakeven_buffer_bps / 10000.0)
+                    be_stop = (trade.entry + buffer) if trade.side == "long" else (trade.entry - buffer)
+                    if (trade.side == "long" and be_stop > trade.stop) or (trade.side == "short" and be_stop < trade.stop):
+                        self._db.update_trade_stop(trade.id, be_stop)
+                if self._settings.partial_tp_enabled and progress_r >= self._settings.partial_tp_r and trade.id not in self._partial_taken_trade_ids:
+                    self._partial_taken_trade_ids.add(trade.id)
+                    self._db.log_event("partial_tp", {"trade_id": trade.id, "symbol": trade.symbol, "close_pct": self._settings.partial_tp_close_pct}, f"trade:{trade.id}")
+                if self._settings.trail_enabled and progress_r >= self._settings.trail_start_r:
+                    trail_distance = risk_per_unit * self._settings.trail_atr_mult
+                    target_stop = (mark - trail_distance) if trade.side == "long" else (mark + trail_distance)
+                    prev = self._trail_state.get(trade.id, trade.stop)
+                    tightened = max(prev, target_stop) if trade.side == "long" else min(prev, target_stop)
+                    if (trade.side == "long" and tightened > trade.stop) or (trade.side == "short" and tightened < trade.stop):
+                        self._db.update_trade_stop(trade.id, tightened)
+                        self._trail_state[trade.id] = tightened
             hit_result = self._check_exit(
                 trade.side,
                 trade.entry,
@@ -250,6 +282,7 @@ class PaperTrader:
                 {"trade_id": trade.id, "symbol": trade.symbol, "price": exit_with_costs, "qty": trade.size, "fee": fees, "reason": result},
                 f"trade:{trade.id}",
             )
+            self._update_governor_after_close(pnl_r)
             results.append(PaperTradeResult(trade.id, trade.symbol, exit_with_costs, pnl_usd, pnl_r, result))
         return results
 
@@ -423,6 +456,55 @@ class PaperTrader:
         risk_per_unit = abs(entry - stop)
         pnl_r = ((exit_price - entry) * side_sign) / risk_per_unit if risk_per_unit else 0.0
         return pnl_usd, pnl_r, fees
+
+    def _update_governor_after_close(self, net_r: float) -> None:
+        if not self._settings.prop_governor_enabled:
+            return
+        row = self._db.get_runtime_state("prop.governor")
+        if row is None or not row.value_text:
+            state = {
+                "risk_pct": self._settings.prop_risk_base_pct,
+                "consecutive_losses": 0,
+                "trades_since_loss": 999,
+                "daily_net_r": 0.0,
+                "daily_losses": 0,
+                "daily_trades": 0,
+                "locked_until_ts": None,
+                "day_key": self._now().date().isoformat(),
+            }
+        else:
+            try:
+                state = json.loads(row.value_text)
+            except json.JSONDecodeError:
+                return
+        now = self._now()
+        day_key = now.date().isoformat()
+        if state.get("day_key") != day_key:
+            state["day_key"] = day_key
+            state["daily_net_r"] = 0.0
+            state["daily_losses"] = 0
+            state["daily_trades"] = 0
+            state["locked_until_ts"] = None
+        state["daily_net_r"] = float(state.get("daily_net_r", 0.0)) + float(net_r)
+        state["daily_trades"] = int(state.get("daily_trades", 0)) + 1
+        risk_pct = float(state.get("risk_pct", self._settings.prop_risk_base_pct))
+        reason = "base"
+        if net_r < 0:
+            state["daily_losses"] = int(state.get("daily_losses", 0)) + 1
+            state["consecutive_losses"] = int(state.get("consecutive_losses", 0)) + 1
+            state["trades_since_loss"] = 0
+            risk_pct = max(self._settings.prop_risk_min_pct, risk_pct * self._settings.prop_stepdown_factor)
+            state["locked_until_ts"] = now.isoformat()
+            reason = "stepdown_after_loss"
+        else:
+            state["consecutive_losses"] = 0
+            state["trades_since_loss"] = int(state.get("trades_since_loss", 0)) + 1
+            if state["trades_since_loss"] >= self._settings.prop_stepup_cooldown_trades:
+                risk_pct = min(self._settings.prop_risk_max_pct, risk_pct * self._settings.prop_stepup_factor)
+                reason = "stepup_after_win"
+        state["risk_pct"] = risk_pct
+        self._db.set_runtime_state("prop.governor", value_text=json.dumps(state))
+        self._db.log_event("risk_governor", {"base": self._settings.prop_risk_base_pct, "applied": risk_pct, "reason": reason}, f"gov:{now.isoformat()}")
 
 
 def _compute_atr(snapshot: BybitKlineSnapshot, period: int = 14) -> float | None:

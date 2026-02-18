@@ -115,6 +115,9 @@ class TradeOutcome(BaseModel):
 
 class EngineState(BaseModel):
     timestamp: datetime
+    server_ts: datetime | None = None
+    candle_ts: datetime | None = None
+    replay_cursor_ts: datetime | None = None
     last_tick_age_seconds: float | None
     running: bool
     balance: float

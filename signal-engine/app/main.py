@@ -23,6 +23,8 @@ from .services.database import Database
 from .services.paper_trader import PaperTrader
 from .services.stats import compute_stats
 from .services.performance import PerformanceStore, build_performance_snapshot
+from .services.challenge import ChallengeService
+from .services.prop_governor import PropRiskGovernor
 from .strategy.decision import decide
 from .services.scheduler import DecisionScheduler
 from .providers.bybit import BybitClient, fetch_symbol_klines, replay_reset, replay_status, replay_validate_dataset
@@ -97,6 +99,9 @@ database = None
 paper_trader = None
 scheduler = None
 performance_store = None
+challenge_service = None
+prop_governor = None
+engine_reset_lock = asyncio.Lock()
 
 running = False
 last_heartbeat_ts: datetime | None = None
@@ -288,9 +293,15 @@ def _build_engine_state_snapshot() -> EngineState:
     db = _require_database()
     state_store = _require_state()
     trader = _require_paper_trader()
-    now = datetime.now(timezone.utc)
+    now = _runtime_now()
 
     acct = _build_accounting_snapshot(cfg, db, trader, state_store, now)
+    challenge = _require_challenge_service().update(
+        equity=float(acct["equity"]),
+        daily_start_equity=float(acct["daily_start_equity"]),
+        now=now,
+        traded_today=bool(acct["trades_today"]),
+    )
     trades = acct["trades"]
     summary = compute_stats(trades)
 
@@ -317,6 +328,9 @@ def _build_engine_state_snapshot() -> EngineState:
 
     return EngineState(
         timestamp=now,
+        server_ts=datetime.now(timezone.utc),
+        candle_ts=now,
+        replay_cursor_ts=now,
         last_tick_age_seconds=last_tick_age_seconds,
         running=scheduler.running,
         balance=balance,
@@ -386,7 +400,7 @@ def _publish_state_snapshot() -> None:
 
 
 def _initialize_engine(app: FastAPI) -> None:
-    global settings, state, database, paper_trader, scheduler, performance_store
+    global settings, state, database, paper_trader, scheduler, performance_store, challenge_service, prop_governor
     global running, last_heartbeat_ts, last_action, last_correlation_id, last_status_reason_logged, replay_last_error
 
     settings = get_settings()
@@ -497,6 +511,25 @@ def _require_paper_trader() -> PaperTrader:
     return paper_trader
 
 
+
+
+def _require_challenge_service() -> ChallengeService:
+    if challenge_service is None:
+        raise HTTPException(status_code=503, detail="engine_not_ready")
+    return challenge_service
+
+
+def _require_prop_governor() -> PropRiskGovernor:
+    if prop_governor is None:
+        raise HTTPException(status_code=503, detail="engine_not_ready")
+    return prop_governor
+
+
+def _runtime_now() -> datetime:
+    if scheduler is not None and _require_settings().run_mode == "replay":
+        return scheduler.engine_now()
+    return datetime.now(timezone.utc)
+
 def _require_performance_store() -> PerformanceStore:
     if performance_store is None:
         raise HTTPException(status_code=503, detail="engine_not_ready")
@@ -514,8 +547,13 @@ async def test_telegram() -> dict:
 
 
 @app.get("/health")
-async def health() -> dict[str, str]:
-    return {"status": "ok"}
+async def health() -> dict[str, Any]:
+    cfg_errors: list[str] = []
+    try:
+        _require_settings()
+    except Exception as exc:
+        cfg_errors.append(str(exc))
+    return {"status": "ok", "config_errors": cfg_errors}
 
 
 @app.get("/run")
@@ -633,6 +671,42 @@ async def engine_replay_reset(clear_storage: bool = False) -> dict[str, str]:
         state_store.reset()
     return {"status": "ok"}
 
+
+
+
+@app.get("/challenge/status")
+async def challenge_status() -> dict[str, Any]:
+    now = _runtime_now()
+    return _require_challenge_service().status_payload(now=now)
+
+
+@app.post("/challenge/reset")
+async def challenge_reset() -> dict[str, Any]:
+    cfg = _require_settings()
+    db = _require_database()
+    state_store = _require_state()
+    sch = _require_scheduler()
+    start = time.perf_counter()
+    async with engine_reset_lock:
+        await sch.stop()
+        db.reset_all()
+        state_store.reset()
+        if cfg.run_mode == "replay":
+            for symbol in cfg.symbols:
+                replay_reset(cfg.market_data_replay_path, symbol, cfg.candle_interval or "3m")
+        now = _runtime_now()
+        challenge = _require_challenge_service().reset(now, float(cfg.account_size or 0.0))
+    elapsed_ms = round((time.perf_counter() - start) * 1000, 2)
+    return {"status": "reset", "elapsed_ms": elapsed_ms, "challenge": challenge.__dict__}
+
+
+@app.get("/replay/status")
+async def replay_dataset_status() -> dict[str, Any]:
+    cfg = _require_settings()
+    symbol = cfg.symbols[0] if cfg.symbols else "ETHUSDT"
+    interval = cfg.candle_interval or "3m"
+    status = replay_status(cfg.market_data_replay_path, symbol, interval)
+    return status
 
 @app.get("/stats")
 async def stats() -> dict:
@@ -1399,14 +1473,13 @@ async def debug_smoke_run_full_cycle(payload: DebugSmokeCycleRequest) -> dict:
 
 @app.post("/debug/storage/reset")
 async def debug_storage_reset() -> dict:
+    payload = await challenge_reset()
     settings = _require_settings()
-    _require_database().reset_all()
-    _require_state().reset()
     logs_dir = Path(settings.data_dir) / "logs"
     if logs_dir.exists():
         for path in logs_dir.glob("*.jsonl"):
             path.unlink()
-    return {"status": "reset"}
+    return payload
 
 
 def _mask_secret(value: str | None) -> str | None:

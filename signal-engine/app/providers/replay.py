@@ -138,16 +138,21 @@ class ReplayProvider:
 
     def status(self, symbol: str, interval: str) -> dict[str, object]:
         candles = self._load_series(symbol, interval)
+        path, _ = self._path_for(symbol, interval)
         key = (symbol.upper(), interval)
-        cursor = self._cursor.setdefault(key, ReplayCursor(index=max(0, min(len(candles) - 1, limit - 1))))
+        cursor = self._cursor.setdefault(key, ReplayCursor(index=0))
         idx = min(max(cursor.index, 0), len(candles) - 1)
         ts = candles[idx].close_time
         return {
             "symbol": symbol.upper(),
+            "file_path": str(path),
+            "exists": path.exists(),
             "interval": interval,
             "bar_index": idx,
-            "total_bars": len(candles),
-            "ts": ts.isoformat(),
+            "row_count": len(candles),
+            "first_ts": candles[0].close_time.isoformat(),
+            "last_ts": candles[-1].close_time.isoformat(),
+            "current_ts": ts.isoformat(),
             "progress_pct": round(((idx + 1) / len(candles)) * 100.0, 4),
         }
 

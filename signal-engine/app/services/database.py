@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
+import json
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -151,6 +152,11 @@ class Database:
 
     def init_schema(self) -> None:
         Base.metadata.create_all(self._engine)
+        if self._engine.url.get_backend_name() == "sqlite":
+            with self._engine.connect() as conn:
+                conn.exec_driver_sql("PRAGMA journal_mode=WAL;")
+                conn.exec_driver_sql("PRAGMA busy_timeout=1500;")
+                conn.commit()
 
     def _resolve_database_url(self, settings: Settings) -> str:
         if settings.database_url:
@@ -300,6 +306,12 @@ class Database:
             session.query(EquityCurveRow).delete()
             session.query(RuntimeStateRow).delete()
             session.commit()
+
+    def dumps_json(self, payload: dict[str, Any]) -> str:
+        return json.dumps(payload, separators=(",", ":"), sort_keys=True)
+
+    def loads_json(self, payload: str) -> dict[str, Any]:
+        return json.loads(payload)
 
     def _upsert_position(self, session: Session, *, symbol: str, side: str, qty: float, entry: float, stop: float | None, take_profit: float | None) -> None:
         pos = session.get(PositionRow, symbol)

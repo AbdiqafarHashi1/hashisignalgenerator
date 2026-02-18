@@ -23,7 +23,7 @@ class Settings(BaseSettings):
     MODE: Literal["prop_cfd", "personal_crypto", "paper", "signal_only", "live"] = Field("prop_cfd", validation_alias=AliasChoices("MODE", "mode"))
     run_mode: Literal["live", "replay"] = Field("live", validation_alias=AliasChoices("RUN_MODE", "run_mode"))
     PROFILE: Literal["profit", "diag"] = Field("profit", validation_alias=AliasChoices("PROFILE", "profile"))
-    strategy_profile: Literal["SCALPER_FAST", "SCALPER_STABLE", "RANGE_MEAN_REVERT", "INTRADAY_TREND_SELECTIVE"] = Field("SCALPER_STABLE", validation_alias=AliasChoices("STRATEGY_PROFILE", "strategy_profile"))
+    strategy_profile: Literal["SCALPER_FAST", "SCALPER_STABLE", "RANGE_MEAN_REVERT", "INTRADAY_TREND_SELECTIVE", "PROP_PASS"] = Field("SCALPER_STABLE", validation_alias=AliasChoices("STRATEGY_PROFILE", "strategy_profile"))
     engine_mode: Literal["paper", "signal_only", "live"] = Field("signal_only", validation_alias=AliasChoices("ENGINE_MODE", "engine_mode"))
     symbols: Annotated[list[str], NoDecode] = Field(
         default_factory=lambda: ["BTCUSDT"],
@@ -272,6 +272,37 @@ class Settings(BaseSettings):
     prop_score_threshold: int = Field(80, validation_alias=AliasChoices("PROP_SCORE_THRESHOLD", "prop_score_threshold"))
     personal_score_threshold: int = Field(75, validation_alias=AliasChoices("PERSONAL_SCORE_THRESHOLD", "personal_score_threshold"))
 
+
+    prop_enabled: bool = Field(True, validation_alias=AliasChoices("PROP_ENABLED", "prop_enabled"))
+    prop_profit_target_pct: float = Field(0.08, validation_alias=AliasChoices("PROP_PROFIT_TARGET_PCT", "prop_profit_target_pct"))
+    prop_min_trading_days: int = Field(5, validation_alias=AliasChoices("PROP_MIN_TRADING_DAYS", "prop_min_trading_days"))
+    prop_max_days: int = Field(60, validation_alias=AliasChoices("PROP_MAX_DAYS", "prop_max_days"))
+    prop_max_daily_loss_pct: float = Field(0.05, validation_alias=AliasChoices("PROP_MAX_DAILY_LOSS_PCT", "prop_max_daily_loss_pct"))
+    prop_max_global_dd_pct: float = Field(0.10, validation_alias=AliasChoices("PROP_MAX_GLOBAL_DD_PCT", "prop_max_global_dd_pct"))
+
+    prop_governor_enabled: bool = Field(True, validation_alias=AliasChoices("PROP_GOVERNOR_ENABLED", "prop_governor_enabled"))
+    prop_risk_base_pct: float = Field(0.0015, validation_alias=AliasChoices("PROP_RISK_BASE_PCT", "prop_risk_base_pct"))
+    prop_risk_max_pct: float = Field(0.0020, validation_alias=AliasChoices("PROP_RISK_MAX_PCT", "prop_risk_max_pct"))
+    prop_risk_min_pct: float = Field(0.0007, validation_alias=AliasChoices("PROP_RISK_MIN_PCT", "prop_risk_min_pct"))
+    prop_stepdown_after_loss: bool = Field(True, validation_alias=AliasChoices("PROP_STEPDOWN_AFTER_LOSS", "prop_stepdown_after_loss"))
+    prop_stepdown_factor: float = Field(0.5, validation_alias=AliasChoices("PROP_STEPDOWN_FACTOR", "prop_stepdown_factor"))
+    prop_stepup_after_win: bool = Field(True, validation_alias=AliasChoices("PROP_STEPUP_AFTER_WIN", "prop_stepup_after_win"))
+    prop_stepup_factor: float = Field(1.15, validation_alias=AliasChoices("PROP_STEPUP_FACTOR", "prop_stepup_factor"))
+    prop_stepup_cooldown_trades: int = Field(2, validation_alias=AliasChoices("PROP_STEPUP_COOLDOWN_TRADES", "prop_stepup_cooldown_trades"))
+    prop_daily_stop_after_net_r: float = Field(2.0, validation_alias=AliasChoices("PROP_DAILY_STOP_AFTER_NET_R", "prop_daily_stop_after_net_r"))
+    prop_daily_stop_after_losses: int = Field(2, validation_alias=AliasChoices("PROP_DAILY_STOP_AFTER_LOSSES", "prop_daily_stop_after_losses"))
+    prop_max_trades_per_day: int = Field(4, validation_alias=AliasChoices("PROP_MAX_TRADES_PER_DAY", "prop_max_trades_per_day"))
+    prop_max_consec_losses: int = Field(2, validation_alias=AliasChoices("PROP_MAX_CONSEC_LOSSES", "prop_max_consec_losses"))
+    prop_time_cooldown_minutes: int = Field(60, validation_alias=AliasChoices("PROP_TIME_COOLDOWN_MINUTES", "prop_time_cooldown_minutes"))
+
+    be_enabled: bool = Field(True, validation_alias=AliasChoices("BE_ENABLED", "be_enabled"))
+    partial_tp_enabled: bool = Field(True, validation_alias=AliasChoices("PARTIAL_TP_ENABLED", "partial_tp_enabled"))
+    partial_tp_r: float = Field(1.0, validation_alias=AliasChoices("PARTIAL_TP_R", "partial_tp_r"))
+    partial_tp_close_pct: float = Field(0.35, validation_alias=AliasChoices("PARTIAL_TP_CLOSE_PCT", "partial_tp_close_pct"))
+    trail_enabled: bool = Field(True, validation_alias=AliasChoices("TRAIL_ENABLED", "trail_enabled"))
+    trail_start_r: float = Field(1.5, validation_alias=AliasChoices("TRAIL_START_R", "trail_start_r"))
+    trail_atr_mult: float = Field(1.1, validation_alias=AliasChoices("TRAIL_ATR_MULT", "trail_atr_mult"))
+    trail_step_r: float = Field(0.5, validation_alias=AliasChoices("TRAIL_STEP_R", "trail_step_r"))
     force_trade_mode: bool = Field(False, validation_alias=AliasChoices("FORCE_TRADE_MODE", "force_trade_mode"))
     force_trade_every_seconds: int = Field(
         5,
@@ -585,6 +616,30 @@ class Settings(BaseSettings):
                 "htf_bias_require_slope": False,
                 "trigger_body_ratio_min": 0.55,
                 "trigger_close_location_min": 0.65,
+            },
+            "PROP_PASS": {
+                "account_size": 25000,
+                "base_risk_pct": 0.0015,
+                "max_risk_pct": 0.0020,
+                "max_daily_loss_pct": 0.05,
+                "daily_profit_target_pct": 0.08,
+                "max_consecutive_losses": 2,
+                "candle_interval": "5m",
+                "tick_interval_seconds": 60,
+                "min_signal_score": 72,
+                "trend_strength_min": 0.60,
+                "cooldown_minutes_after_loss": 60,
+                "max_trades_per_day": 4,
+                "scalp_min_score": 84,
+                "scalp_setup_mode": "pullback_engulfing",
+                "scalp_pullback_min_dist_pct": 0.0008,
+                "disable_breakout_chase": True,
+                "max_open_positions_per_direction": 1,
+                "htf_bias_enabled": True,
+                "htf_interval": "1h",
+                "trigger_body_ratio_min": 0.62,
+                "trigger_close_location_min": 0.68,
+                "adx_threshold": 24,
             },
         }
         return profiles[self.strategy_profile]

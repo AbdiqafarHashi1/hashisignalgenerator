@@ -44,6 +44,9 @@ export type EngineStatus = {
 
 export type EngineState = {
   timestamp: string;
+  server_ts?: string | null;
+  candle_ts?: string | null;
+  replay_cursor_ts?: string | null;
   last_tick_age_seconds: number | null;
   running: boolean;
   balance: number;

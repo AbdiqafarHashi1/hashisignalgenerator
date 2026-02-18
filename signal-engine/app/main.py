@@ -296,12 +296,19 @@ def _build_engine_state_snapshot() -> EngineState:
     now = _runtime_now()
 
     acct = _build_accounting_snapshot(cfg, db, trader, state_store, now)
-    challenge = _require_challenge_service().update(
-        equity=float(acct["equity"]),
-        daily_start_equity=float(acct["daily_start_equity"]),
-        now=now,
-        traded_today=bool(acct["trades_today"]),
-    )
+    challenge = None
+    challenge_ready = False
+    challenge_error: str | None = "engine_not_ready"
+    maybe_challenge_service = _get_challenge_service_optional()
+    if maybe_challenge_service is not None:
+        challenge = maybe_challenge_service.update(
+            equity=float(acct["equity"]),
+            daily_start_equity=float(acct["daily_start_equity"]),
+            now=now,
+            traded_today=bool(acct["trades_today"]),
+        )
+        challenge_ready = True
+        challenge_error = None
     trades = acct["trades"]
     summary = compute_stats(trades)
 
@@ -375,6 +382,9 @@ def _build_engine_state_snapshot() -> EngineState:
         trades_today_by_symbol=dict(acct["trades_today_by_symbol"]),
         realized_pnl_by_symbol=dict(acct["realized_pnl_by_symbol"]),
         fees_by_symbol=dict(acct["fees_by_symbol"]),
+        challenge=challenge.__dict__ if challenge is not None else None,
+        challenge_ready=challenge_ready,
+        challenge_error=challenge_error,
     )
 
 
@@ -408,6 +418,10 @@ def _initialize_engine(app: FastAPI) -> None:
     state.set_symbols(settings.symbols)
     database = Database(settings)
     database.init_schema()
+    challenge_service = ChallengeService(settings, database)
+    challenge_service.load(now=datetime.now(timezone.utc), start_equity=float(settings.account_size or 0.0))
+    prop_governor = PropRiskGovernor(settings, database)
+    prop_governor.load(now=datetime.now(timezone.utc))
     paper_trader = PaperTrader(settings, database)
     scheduler = DecisionScheduler(
         settings,
@@ -516,6 +530,10 @@ def _require_paper_trader() -> PaperTrader:
 def _require_challenge_service() -> ChallengeService:
     if challenge_service is None:
         raise HTTPException(status_code=503, detail="engine_not_ready")
+    return challenge_service
+
+
+def _get_challenge_service_optional() -> ChallengeService | None:
     return challenge_service
 
 

@@ -249,3 +249,60 @@ def test_debug_db_endpoint() -> None:
         payload = response.json()
         assert payload["connected"] is True
         assert "database_type" in payload
+
+
+def test_state_snapshot_survives_missing_challenge_service() -> None:
+    from app import main as main_module
+
+    with TestClient(main_module.app) as client:
+        original_challenge_service = main_module.challenge_service
+        try:
+            main_module.challenge_service = None
+            response = client.get("/state")
+            assert response.status_code == 200
+            payload = response.json()
+            assert payload["challenge"] is None
+            assert payload["challenge_ready"] is False
+            assert payload["challenge_error"] == "engine_not_ready"
+        finally:
+            main_module.challenge_service = original_challenge_service
+
+
+def test_challenge_service_initialized_on_startup() -> None:
+    from app import main as main_module
+
+    with TestClient(main_module.app) as client:
+        response = client.get("/challenge/status")
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["status"] in {"IN_PROGRESS", "PASSED", "FAILED"}
+
+        state_response = client.get("/state")
+        assert state_response.status_code == 200
+        state_payload = state_response.json()
+        assert state_payload["challenge_ready"] is True
+        assert isinstance(state_payload["challenge"], dict)
+        assert state_payload["challenge_error"] is None
+
+
+def test_replay_run_once_with_prop_enabled_does_not_crash_when_challenge_unavailable(monkeypatch) -> None:
+    main_module = _fresh_main(monkeypatch, {"RUN_MODE": "replay", "PROP_ENABLED": "true"})
+
+    with TestClient(main_module.app) as client:
+        async def fake_run_once(*args, **kwargs):
+            return []
+
+        monkeypatch.setattr(client.app.state.scheduler, "run_once", fake_run_once)
+        original_challenge_service = main_module.challenge_service
+        try:
+            main_module.challenge_service = None
+            response = client.get("/engine/run_once", params={"force": "true"})
+            assert response.status_code == 200
+            assert response.json()["status"] == "ok"
+
+            state_response = client.get("/state")
+            assert state_response.status_code == 200
+            payload = state_response.json()
+            assert payload["challenge_ready"] is False
+        finally:
+            main_module.challenge_service = original_challenge_service

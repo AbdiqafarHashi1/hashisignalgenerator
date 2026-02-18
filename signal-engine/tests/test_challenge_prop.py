@@ -160,6 +160,75 @@ def _no_momentum_plan() -> TradePlan:
     )
 
 
+def test_governor_consecutive_loss_lock_persists_across_day_rollover_when_flag_disabled(tmp_path):
+    s = _settings(tmp_path)
+    s.prop_reset_consec_losses_on_day_rollover = False
+    db = Database(s)
+    state = StateStore()
+    scheduler = _make_scheduler(s, state, db)
+    day_one = datetime(2024, 1, 1, 23, 59, tzinfo=timezone.utc)
+    day_two = datetime(2024, 1, 2, 0, 1, tzinfo=timezone.utc)
+    db.set_runtime_state(
+        "prop.governor",
+        value_text=db.dumps_json(
+            {
+                "risk_pct": s.prop_risk_base_pct,
+                "consecutive_losses": s.prop_max_consec_losses,
+                "trades_since_loss": 0,
+                "daily_net_r": 0.0,
+                "daily_losses": 0,
+                "daily_trades": 0,
+                "locked_until_ts": None,
+                "day_key": day_one.date().isoformat(),
+            }
+        ),
+    )
+
+    blocker, _ = scheduler._compute_effective_blockers("ETHUSDT", day_two, {}, plan=None, skip_reason=None)
+    assert blocker is not None
+    assert blocker.code == "prop_max_consecutive_losses"
+
+    rolled = db.get_runtime_state("prop.governor")
+    assert rolled is not None and rolled.value_text is not None
+    rolled_state = db.loads_json(rolled.value_text)
+    assert rolled_state["day_key"] == day_two.date().isoformat()
+    assert int(rolled_state["consecutive_losses"]) == s.prop_max_consec_losses
+
+
+def test_governor_consecutive_loss_lock_clears_on_day_rollover_when_flag_enabled(tmp_path):
+    s = _settings(tmp_path)
+    s.prop_reset_consec_losses_on_day_rollover = True
+    db = Database(s)
+    state = StateStore()
+    scheduler = _make_scheduler(s, state, db)
+    day_one = datetime(2024, 1, 1, 23, 59, tzinfo=timezone.utc)
+    day_two = datetime(2024, 1, 2, 0, 1, tzinfo=timezone.utc)
+    db.set_runtime_state(
+        "prop.governor",
+        value_text=db.dumps_json(
+            {
+                "risk_pct": s.prop_risk_base_pct,
+                "consecutive_losses": s.prop_max_consec_losses,
+                "trades_since_loss": 0,
+                "daily_net_r": 0.0,
+                "daily_losses": 0,
+                "daily_trades": 0,
+                "locked_until_ts": None,
+                "day_key": day_one.date().isoformat(),
+            }
+        ),
+    )
+
+    blocker, _ = scheduler._compute_effective_blockers("ETHUSDT", day_two, {}, plan=None, skip_reason=None)
+    assert blocker is None or blocker.code != "prop_max_consecutive_losses"
+
+    rolled = db.get_runtime_state("prop.governor")
+    assert rolled is not None and rolled.value_text is not None
+    rolled_state = db.loads_json(rolled.value_text)
+    assert rolled_state["day_key"] == day_two.date().isoformat()
+    assert int(rolled_state["consecutive_losses"]) == 0
+
+
 def test_effective_blocker_governor_max_consecutive_losses(tmp_path):
     s = _settings(tmp_path)
     db = Database(s)

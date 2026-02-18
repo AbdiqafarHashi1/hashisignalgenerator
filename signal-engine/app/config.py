@@ -293,6 +293,13 @@ class Settings(BaseSettings):
     prop_daily_stop_after_losses: int = Field(2, validation_alias=AliasChoices("PROP_DAILY_STOP_AFTER_LOSSES", "prop_daily_stop_after_losses"))
     prop_max_trades_per_day: int = Field(4, validation_alias=AliasChoices("PROP_MAX_TRADES_PER_DAY", "prop_max_trades_per_day"))
     prop_max_consec_losses: int = Field(2, validation_alias=AliasChoices("PROP_MAX_CONSEC_LOSSES", "prop_max_consec_losses"))
+    prop_reset_consec_losses_on_day_rollover: bool = Field(
+        False,
+        validation_alias=AliasChoices(
+            "PROP_RESET_CONSEC_LOSSES_ON_DAY_ROLLOVER",
+            "prop_reset_consec_losses_on_day_rollover",
+        ),
+    )
     prop_time_cooldown_minutes: int = Field(60, validation_alias=AliasChoices("PROP_TIME_COOLDOWN_MINUTES", "prop_time_cooldown_minutes"))
 
     be_enabled: bool = Field(True, validation_alias=AliasChoices("BE_ENABLED", "be_enabled"))

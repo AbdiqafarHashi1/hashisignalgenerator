@@ -214,6 +214,28 @@ class DecisionScheduler:
             counts[symbol] = counts.get(symbol, 0) + 1
         return counts
 
+
+    def _roll_governor_day(self, now: datetime) -> dict[str, object] | None:
+        if self._database is None:
+            return None
+        governor_row = self._database.get_runtime_state("prop.governor")
+        if governor_row is None or not governor_row.value_text:
+            return None
+        try:
+            gov = json.loads(governor_row.value_text)
+        except json.JSONDecodeError:
+            return None
+        day_key = now.date().isoformat()
+        if gov.get("day_key") == day_key:
+            return gov
+        gov["day_key"] = day_key
+        gov["daily_net_r"] = 0.0
+        gov["daily_losses"] = 0
+        gov["daily_trades"] = 0
+        gov["locked_until_ts"] = None
+        self._database.set_runtime_state("prop.governor", value_text=self._database.dumps_json(gov))
+        return gov
+
     def _risk_gate_reason(self, symbol: str, now: datetime, closed_trades_today: dict[str, int]) -> str | None:
         if self._settings.prop_enabled and self._database is not None:
             challenge_row = self._database.get_runtime_state("challenge.state")
@@ -224,10 +246,9 @@ class DecisionScheduler:
                         return f"challenge_{str(challenge.get('status')).lower()}"
                 except json.JSONDecodeError:
                     pass
-            governor_row = self._database.get_runtime_state("prop.governor")
-            if governor_row and governor_row.value_text:
+            gov = self._roll_governor_day(now)
+            if gov:
                 try:
-                    gov = json.loads(governor_row.value_text)
                     daily_losses = int(gov.get("daily_losses", 0))
                     daily_trades = int(gov.get("daily_trades", 0))
                     consec_losses = int(gov.get("consecutive_losses", 0))
@@ -240,7 +261,7 @@ class DecisionScheduler:
                         return "prop_max_consecutive_losses"
                     if daily_net_r >= self._settings.prop_daily_stop_after_net_r:
                         return "prop_daily_r_lock"
-                except (ValueError, json.JSONDecodeError):
+                except (TypeError, ValueError):
                     pass
         closed_count = closed_trades_today.get(symbol)
         allowed, reason = self._state.risk_check(symbol, self._settings, now, trades_today_closed=closed_count)
@@ -312,7 +333,7 @@ class DecisionScheduler:
                         replay_start_ts=self._settings.replay_start_ts,
                         replay_end_ts=self._settings.replay_end_ts,
                     )
-                if self._settings.run_mode == "replay":
+                if self._settings.run_mode == "replay" or self._settings.market_data_provider == "replay":
                     tick_ts = snapshot.candle.close_time
                     self._engine_clock = tick_ts
                     now_ms = snapshot.kline_close_time_ms

@@ -503,6 +503,13 @@ class Settings(BaseSettings):
         if self.run_mode == "replay":
             self.market_data_provider = "replay"
 
+        prop_max_env = os.environ.get("PROP_MAX_TRADES_PER_DAY")
+        max_env = os.environ.get("MAX_TRADES_PER_DAY")
+        if prop_max_env:
+            self.max_trades_per_day = self.prop_max_trades_per_day
+        elif max_env and not prop_max_env:
+            self.prop_max_trades_per_day = int(max_env)
+
         if self.sweet8_enabled:
             self.debug_loosen = False
             self.debug_disable_hard_risk_gates = False

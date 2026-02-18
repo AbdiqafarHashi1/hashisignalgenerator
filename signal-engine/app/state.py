@@ -36,20 +36,27 @@ class StateStore:
         self._global_realized_pnl_usd: float = 0.0
         self._global_peak_equity_usd: float | None = None
         self._market_data_errors: dict[str, int] = {}
+        self._clock = lambda: datetime.now(timezone.utc)
 
-    def _today_key(self) -> str:
-        return datetime.now(timezone.utc).date().isoformat()
+    def set_clock(self, clock_fn) -> None:
+        self._clock = clock_fn
 
-    def get_daily_state(self, symbol: str) -> DailyState:
-        date_key = self._today_key()
+    def _now(self) -> datetime:
+        return self._clock()
+
+    def _today_key(self, now: datetime | None = None) -> str:
+        return (now or self._now()).date().isoformat()
+
+    def get_daily_state(self, symbol: str, now: datetime | None = None) -> DailyState:
+        date_key = self._today_key(now)
         with self._lock:
             key = f"{symbol}:{date_key}"
             if key not in self._daily:
                 self._daily[key] = DailyState(date=date_key)
             return self._daily[key]
 
-    def get_posture(self, symbol: str) -> PostureSnapshot | None:
-        date_key = self._today_key()
+    def get_posture(self, symbol: str, now: datetime | None = None) -> PostureSnapshot | None:
+        date_key = self._today_key(now)
         with self._lock:
             return self._posture_cache.get((symbol, date_key))
 
@@ -58,8 +65,8 @@ class StateStore:
             self._posture_cache[(snapshot.symbol, snapshot.date)] = snapshot
 
     def set_latest_decision(self, symbol: str, plan: TradePlan) -> None:
-        state = self.get_daily_state(symbol)
-        now = datetime.now(timezone.utc)
+        now = self._now()
+        state = self.get_daily_state(symbol, now)
         with self._lock:
             state.latest_decision = plan
             self._last_decision_ts[symbol] = now
@@ -146,12 +153,12 @@ class StateStore:
             return dict(self._decision_meta.get(symbol, {}))
 
     def record_trade(self, symbol: str) -> None:
-        state = self.get_daily_state(symbol)
+        state = self.get_daily_state(symbol, self._now())
         with self._lock:
             state.trades += 1
 
     def record_outcome(self, symbol: str, pnl_usd: float, win: bool, timestamp: datetime) -> None:
-        state = self.get_daily_state(symbol)
+        state = self.get_daily_state(symbol, timestamp)
         with self._lock:
             self._global_realized_pnl_usd += pnl_usd
             state.pnl_usd += pnl_usd
@@ -203,7 +210,7 @@ class StateStore:
             self._market_data_errors.clear()
 
     def risk_snapshot(self, symbol: str, cfg: Settings, now: datetime) -> dict[str, object]:
-        state = self.get_daily_state(symbol)
+        state = self.get_daily_state(symbol, now)
         account_loss_limit = cfg.account_size * cfg.max_daily_loss_pct
         cooldown_active = False
         cooldown_remaining_minutes = 0
@@ -235,7 +242,7 @@ class StateStore:
         now: datetime,
         trades_today_closed: int | None = None,
     ) -> tuple[bool, str | None]:
-        state = self.get_daily_state(symbol)
+        state = self.get_daily_state(symbol, now)
         account_loss_limit = cfg.account_size * cfg.max_daily_loss_pct
 
         if not cfg.debug_disable_hard_risk_gates and state.pnl_usd <= -account_loss_limit:
@@ -260,7 +267,7 @@ class StateStore:
         return True, None
 
     def check_limits(self, symbol: str, cfg: Settings, now: datetime) -> tuple[bool, Status, list[str]]:
-        state = self.get_daily_state(symbol)
+        state = self.get_daily_state(symbol, now)
         rationale: list[str] = []
         profit_target = cfg.account_size * (cfg.daily_profit_target_pct or 0.0)
 

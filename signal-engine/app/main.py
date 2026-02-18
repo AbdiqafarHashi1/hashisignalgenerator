@@ -301,14 +301,18 @@ def _build_engine_state_snapshot() -> EngineState:
     challenge_error: str | None = "engine_not_ready"
     maybe_challenge_service = _get_challenge_service_optional()
     if maybe_challenge_service is not None:
-        challenge = maybe_challenge_service.update(
-            equity=float(acct["equity"]),
-            daily_start_equity=float(acct["daily_start_equity"]),
-            now=now,
-            traded_today=bool(acct["trades_today"]),
-        )
-        challenge_ready = True
-        challenge_error = None
+        try:
+            challenge = maybe_challenge_service.update(
+                equity=float(acct["equity"]),
+                daily_start_equity=float(acct["daily_start_equity"]),
+                now=now,
+                traded_today=bool(acct["trades_today"]),
+            )
+            challenge_ready = True
+            challenge_error = None
+        except Exception as exc:
+            challenge_error = f"{type(exc).__name__}: {exc}"
+            logger.warning("challenge_state_publish_failed error=%s", challenge_error)
     trades = acct["trades"]
     summary = compute_stats(trades)
 
@@ -431,6 +435,7 @@ def _initialize_engine(app: FastAPI) -> None:
         interval_seconds=settings.tick_interval_seconds,
         heartbeat_cb=_record_heartbeat,
     )
+    state.set_clock(_runtime_now)
     paper_trader.set_clock(scheduler.engine_now)
     scheduler.add_tick_listener(_publish_state_snapshot)
     performance_store = PerformanceStore(settings.data_dir)
@@ -544,8 +549,10 @@ def _require_prop_governor() -> PropRiskGovernor:
 
 
 def _runtime_now() -> datetime:
-    if scheduler is not None and _require_settings().run_mode == "replay":
-        return scheduler.engine_now()
+    if scheduler is not None:
+        cfg = _require_settings()
+        if cfg.run_mode == "replay" or cfg.market_data_provider == "replay":
+            return scheduler.engine_now()
     return datetime.now(timezone.utc)
 
 def _require_performance_store() -> PerformanceStore:
@@ -687,6 +694,7 @@ async def engine_replay_reset(clear_storage: bool = False) -> dict[str, str]:
     if clear_storage:
         db.reset_all()
         state_store.reset()
+    _require_prop_governor().reset(_runtime_now())
     return {"status": "ok"}
 
 
@@ -713,6 +721,7 @@ async def challenge_reset() -> dict[str, Any]:
             for symbol in cfg.symbols:
                 replay_reset(cfg.market_data_replay_path, symbol, cfg.candle_interval or "3m")
         now = _runtime_now()
+        _require_prop_governor().reset(now)
         challenge = _require_challenge_service().reset(now, float(cfg.account_size or 0.0))
     elapsed_ms = round((time.perf_counter() - start) * 1000, 2)
     return {"status": "reset", "elapsed_ms": elapsed_ms, "challenge": challenge.__dict__}
@@ -854,7 +863,7 @@ async def account_summary() -> AccountSummary:
 async def risk_summary(symbol: str = Query(None)) -> dict[str, Any]:
     settings = _require_settings()
     state_store = _require_state()
-    now = datetime.now(timezone.utc)
+    now = _runtime_now()
     use_symbol = symbol or (settings.symbols[0] if settings.symbols else "BTCUSDT")
     snapshot = state_store.risk_snapshot(use_symbol, settings, now)
     minutes = int(now.timestamp() // 60)
@@ -1673,7 +1682,7 @@ def _execute_trade_plan(symbol: str, plan: TradePlan) -> tuple[bool, int | None]
     if settings.engine_mode not in {"paper", "live"} or paper_trader is None:
         return False, None
 
-    now = datetime.now(timezone.utc)
+    now = _runtime_now()
     closed_today = 0
     for trade in _require_database().fetch_trades():
         closed_at = _as_datetime_utc(getattr(trade, "closed_at", None))

@@ -306,3 +306,31 @@ def test_replay_run_once_with_prop_enabled_does_not_crash_when_challenge_unavail
             assert payload["challenge_ready"] is False
         finally:
             main_module.challenge_service = original_challenge_service
+
+
+def test_debug_storage_reset_clears_governor_lock(monkeypatch) -> None:
+    from app import main as main_module
+
+    with TestClient(main_module.app) as client:
+        db = client.app.state.database
+        db.set_runtime_state(
+            "prop.governor",
+            value_text='{"risk_pct":0.0015,"consecutive_losses":3,"trades_since_loss":0,"daily_net_r":-2.0,"daily_losses":2,"daily_trades":99,"locked_until_ts":"2024-01-01T00:00:00+00:00","day_key":"2024-01-01"}',
+        )
+
+        response = client.post("/debug/storage/reset")
+        assert response.status_code == 200
+
+        state_row = db.get_runtime_state("prop.governor")
+        assert state_row is not None and state_row.value_text
+        governor = main_module._require_prop_governor()
+        now = main_module._runtime_now()
+        parsed = governor.load(now)
+        assert parsed.daily_trades == 0
+        assert parsed.daily_losses == 0
+        assert parsed.daily_net_r == 0.0
+        assert parsed.locked_until_ts is None
+
+        allowed, reason = governor.allow_new_trade(now)
+        assert allowed is True
+        assert reason is None

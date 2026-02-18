@@ -4,6 +4,7 @@ from app.config import Settings
 from app.services.challenge import ChallengeService
 from app.services.database import Database
 from app.services.prop_governor import PropRiskGovernor
+from app.state import StateStore
 from app.providers.replay import ReplayProvider
 
 
@@ -82,3 +83,54 @@ def test_reset_storage_fast(tmp_path):
     db.reset_all()
     elapsed = (datetime.now(timezone.utc)-start).total_seconds()
     assert elapsed < 2.0
+
+
+def test_replay_day_rollover_clears_daily_trade_locks(tmp_path):
+    s = _settings(tmp_path)
+    s.max_trades_per_day = 2
+    s.prop_max_trades_per_day = 2
+    db = Database(s)
+    gov = PropRiskGovernor(s, db)
+    state = StateStore()
+
+    day_one = datetime(2024, 1, 1, 12, 0, tzinfo=timezone.utc)
+    state.set_clock(lambda: day_one)
+    state.record_trade("ETHUSDT")
+    state.record_trade("ETHUSDT")
+    gov.on_trade_close(net_r=1.0, now=day_one)
+    gov.on_trade_close(net_r=1.0, now=day_one)
+
+    allowed, reason = state.risk_check("ETHUSDT", s, day_one)
+    assert allowed is False
+    assert reason == "max_trades_exceeded"
+
+    gov_allowed, gov_reason = gov.allow_new_trade(day_one)
+    assert gov_allowed is False
+    assert gov_reason == "max_trades_per_day"
+
+    day_two = datetime(2024, 1, 2, 0, 5, tzinfo=timezone.utc)
+    allowed_day_two, reason_day_two = state.risk_check("ETHUSDT", s, day_two)
+    assert allowed_day_two is True
+    assert reason_day_two is None
+
+    gov_allowed_day_two, gov_reason_day_two = gov.allow_new_trade(day_two)
+    assert gov_allowed_day_two is True
+    assert gov_reason_day_two is None
+
+
+def test_governor_reset_clears_day_key_and_counters(tmp_path):
+    s = _settings(tmp_path)
+    db = Database(s)
+    gov = PropRiskGovernor(s, db)
+    now = datetime(2024, 1, 1, tzinfo=timezone.utc)
+    gov.on_trade_close(net_r=-1.0, now=now)
+
+    reset_now = datetime(2024, 1, 3, tzinfo=timezone.utc)
+    state = gov.reset(reset_now)
+
+    assert state.day_key == "2024-01-03"
+    assert state.daily_net_r == 0.0
+    assert state.daily_losses == 0
+    assert state.daily_trades == 0
+    assert state.consecutive_losses == 0
+    assert state.locked_until_ts is None

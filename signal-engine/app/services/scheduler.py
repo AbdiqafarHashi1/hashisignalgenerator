@@ -6,7 +6,8 @@ import random
 import time
 import traceback
 from collections.abc import Callable
-from datetime import datetime, timezone
+from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 
 from ..config import Settings
 from ..models import (
@@ -26,6 +27,14 @@ from ..utils.intervals import interval_to_ms
 from .notifier import format_trade_message, send_telegram_message
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class Blocker:
+    code: str
+    layer: str
+    detail: str
+    until_ts: str | None = None
 
 # ---- JSON SAFE HELPERS ----
 import json
@@ -79,6 +88,8 @@ class DecisionScheduler:
         self._last_force_trade_ts: dict[str, datetime] = {}
         self._last_exit_eval_close_ms: dict[str, int] = {}
         self._last_skip_telegram_ts: dict[str, datetime] = {}
+        self._last_blocker_log: dict[str, tuple[str, datetime]] = {}
+        self._blocker_log_interval_seconds = 30.0
         self._next_fetch_after_ms: dict[str, int] = {}
         self._tick_listeners: list[Callable[[], None]] = []
         self._listener_error_log_window_seconds = 10.0
@@ -236,36 +247,119 @@ class DecisionScheduler:
         self._database.set_runtime_state("prop.governor", value_text=self._database.dumps_json(gov))
         return gov
 
-    def _risk_gate_reason(self, symbol: str, now: datetime, closed_trades_today: dict[str, int]) -> str | None:
-        if self._settings.prop_enabled and self._database is not None:
-            challenge_row = self._database.get_runtime_state("challenge.state")
-            if challenge_row and challenge_row.value_text:
-                try:
-                    challenge = json.loads(challenge_row.value_text)
-                    if challenge.get("status") in {"PASSED", "FAILED"}:
-                        return f"challenge_{str(challenge.get('status')).lower()}"
-                except json.JSONDecodeError:
-                    pass
-            gov = self._roll_governor_day(now)
-            if gov:
-                try:
-                    daily_losses = int(gov.get("daily_losses", 0))
-                    daily_trades = int(gov.get("daily_trades", 0))
-                    consec_losses = int(gov.get("consecutive_losses", 0))
-                    daily_net_r = float(gov.get("daily_net_r", 0.0))
-                    if daily_losses >= self._settings.prop_daily_stop_after_losses:
-                        return "prop_daily_losses_limit"
-                    if daily_trades >= self._settings.prop_max_trades_per_day:
-                        return "prop_max_trades_per_day"
-                    if consec_losses >= self._settings.prop_max_consec_losses:
-                        return "prop_max_consecutive_losses"
-                    if daily_net_r >= self._settings.prop_daily_stop_after_net_r:
-                        return "prop_daily_r_lock"
-                except (TypeError, ValueError):
-                    pass
+    def _parse_iso_datetime(self, value: object) -> datetime | None:
+        if not value:
+            return None
+        try:
+            parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        if parsed.tzinfo is None:
+            return parsed.replace(tzinfo=timezone.utc)
+        return parsed
+
+    def _challenge_blockers(self) -> list[Blocker]:
+        if not self._settings.prop_enabled or self._database is None:
+            return []
+        row = self._database.get_runtime_state("challenge.state")
+        if row is None or not row.value_text:
+            return []
+        try:
+            challenge = json.loads(row.value_text)
+        except json.JSONDecodeError:
+            return [Blocker(code="challenge_state_unavailable", layer="terminal", detail="Challenge state is unreadable; trading disabled for safety.")]
+        status = str(challenge.get("status", "")).upper()
+        if status in {"PASSED", "FAILED"}:
+            return [Blocker(code=f"challenge_{status.lower()}", layer="terminal", detail=f"Challenge status is {status}.")]
+        return []
+
+    def _governor_blockers(self, now: datetime) -> list[Blocker]:
+        blockers: list[Blocker] = []
+        gov = self._roll_governor_day(now)
+        if not gov:
+            return blockers
+        try:
+            daily_losses = int(gov.get("daily_losses", 0) or 0)
+            daily_trades = int(gov.get("daily_trades", 0) or 0)
+            consec_losses = int(gov.get("consecutive_losses", 0) or 0)
+            daily_net_r = float(gov.get("daily_net_r", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            return [Blocker(code="prop_governor_state_invalid", layer="governor", detail="Governor state is invalid; unable to safely evaluate limits.")]
+
+        lock_start = self._parse_iso_datetime(gov.get("locked_until_ts"))
+        if lock_start is not None:
+            until_dt = lock_start
+            if self._settings.prop_time_cooldown_minutes > 0:
+                until_dt = lock_start + timedelta(minutes=int(self._settings.prop_time_cooldown_minutes))
+            if until_dt > now:
+                blockers.append(Blocker(code="prop_time_cooldown", layer="governor", detail="Prop governor cooldown is active.", until_ts=until_dt.isoformat()))
+
+        if daily_trades >= self._settings.prop_max_trades_per_day:
+            blockers.append(Blocker(code="prop_max_trades_per_day", layer="governor", detail="Prop max trades/day reached."))
+        if consec_losses >= self._settings.prop_max_consec_losses:
+            blockers.append(Blocker(code="prop_max_consecutive_losses", layer="governor", detail="Prop max consecutive losses reached."))
+        if daily_losses >= self._settings.prop_daily_stop_after_losses:
+            blockers.append(Blocker(code="prop_daily_stop_after_losses", layer="governor", detail="Prop daily stop after losses reached."))
+        if daily_net_r >= self._settings.prop_daily_stop_after_net_r:
+            blockers.append(Blocker(code="prop_daily_stop_after_net_r", layer="governor", detail="Prop daily stop after net R reached."))
+        return blockers
+
+    def _risk_blockers(self, symbol: str, now: datetime, closed_trades_today: dict[str, int], funding_blocked: bool = False) -> list[Blocker]:
+        blockers: list[Blocker] = []
+        if self._settings.is_blackout(now):
+            blockers.append(Blocker(code="news_blackout", layer="risk", detail="News blackout window active."))
+        if funding_blocked:
+            blockers.append(Blocker(code="funding_blackout_entries_blocked", layer="risk", detail="Funding blackout blocks new entries."))
         closed_count = closed_trades_today.get(symbol)
         allowed, reason = self._state.risk_check(symbol, self._settings, now, trades_today_closed=closed_count)
-        return None if allowed else reason
+        if not allowed:
+            blockers.append(Blocker(code=str(reason or "risk_gate_blocked"), layer="risk", detail=f"Global risk gate blocked entries: {reason or 'unknown'}"))
+        return blockers
+
+    def _strategy_blockers(self, plan: TradePlan | None, skip_reason: str | None) -> list[Blocker]:
+        if skip_reason:
+            return [Blocker(code=skip_reason, layer="strategy", detail=f"Strategy or execution filter blocked entry: {skip_reason}.")]
+        if plan is not None and plan.status != Status.TRADE:
+            code = _plan_skip_reason(plan)
+            return [Blocker(code=code, layer="strategy", detail=f"Strategy rejected setup: {code}.")]
+        return []
+
+    def _compute_effective_blockers(
+        self,
+        symbol: str,
+        now: datetime,
+        closed_trades_today: dict[str, int],
+        plan: TradePlan | None,
+        skip_reason: str | None,
+        funding_blocked: bool = False,
+    ) -> tuple[Blocker | None, list[Blocker]]:
+        blockers = [
+            *self._challenge_blockers(),
+            *self._governor_blockers(now),
+            *self._risk_blockers(symbol, now, closed_trades_today, funding_blocked=funding_blocked),
+            *self._strategy_blockers(plan, skip_reason),
+        ]
+        if blockers:
+            return blockers[0], blockers
+        return None, []
+
+    def _log_skip_blocker(self, symbol: str, blocker: Blocker | None, now: datetime) -> None:
+        if blocker is None:
+            return
+        signature = f"{blocker.layer}:{blocker.code}:{blocker.until_ts or ''}"
+        previous = self._last_blocker_log.get(symbol)
+        should_log = previous is None or previous[0] != signature or (now - previous[1]).total_seconds() >= self._blocker_log_interval_seconds
+        if not should_log:
+            return
+        logger.info(
+            "trade_skip_blocker symbol=%s layer=%s code=%s detail=%s until_ts=%s",
+            symbol,
+            blocker.layer,
+            blocker.code,
+            blocker.detail,
+            blocker.until_ts,
+        )
+        self._last_blocker_log[symbol] = (signature, now)
 
     async def run_once(self, force: bool = False) -> list[dict[str, object]]:
         self.last_tick_ts = time.time()
@@ -342,10 +436,31 @@ class DecisionScheduler:
                     self._last_fetch_counts[symbol] = 0
                 else:
                     self._last_fetch_counts[symbol] = len(snapshot.candles)
-                gate_reason = self._risk_gate_reason(symbol, tick_ts, closed_trades_today)
-                if gate_reason:
-                    self._state.set_decision_meta(symbol, {"decision": "skip", "skip_reason": gate_reason, "final_entry_gate": gate_reason})
+                effective_blocker, blockers = self._compute_effective_blockers(
+                    symbol=symbol,
+                    now=tick_ts,
+                    closed_trades_today=closed_trades_today,
+                    plan=None,
+                    skip_reason=None,
+                    funding_blocked=False,
+                )
+                if effective_blocker is not None and effective_blocker.layer in {"terminal", "governor", "risk"}:
+                    gate_reason = effective_blocker.code
+                    self._state.set_decision_meta(
+                        symbol,
+                        {
+                            "decision": "skip",
+                            "skip_reason": gate_reason,
+                            "final_entry_gate": gate_reason,
+                            "blocker_code": effective_blocker.code,
+                            "blocker_detail": effective_blocker.detail,
+                            "blocker_layer": effective_blocker.layer,
+                            "blocker_until_ts": effective_blocker.until_ts,
+                            "blockers": [blocker.__dict__ for blocker in blockers],
+                        },
+                    )
                     self._state.record_skip_reason(gate_reason)
+                    self._log_skip_blocker(symbol, effective_blocker, tick_ts)
                     results.append(
                         {
                             "symbol": symbol,
@@ -361,6 +476,12 @@ class DecisionScheduler:
                             "trade_id": None,
                             "decision": "skip",
                             "skip_reason": gate_reason,
+                            "final_entry_gate": gate_reason,
+                            "blocker_code": effective_blocker.code,
+                            "blocker_detail": effective_blocker.detail,
+                            "blocker_layer": effective_blocker.layer,
+                            "blocker_until_ts": effective_blocker.until_ts,
+                            "blockers": [blocker.__dict__ for blocker in blockers],
                         }
                     )
                     continue
@@ -714,12 +835,25 @@ class DecisionScheduler:
 
             if skip_reason is None and decision == "skip":
                 skip_reason = reason
-            final_entry_gate = skip_reason if decision == "skip" else None
+            effective_blocker, blockers = self._compute_effective_blockers(
+                symbol=symbol,
+                now=tick_ts,
+                closed_trades_today=closed_trades_today,
+                plan=plan,
+                skip_reason=skip_reason if decision == "skip" else None,
+                funding_blocked=bool(funding_state["block_new_entries"]),
+            )
+            final_entry_gate = effective_blocker.code if decision == "skip" and effective_blocker is not None else (skip_reason if decision == "skip" else None)
             decision_meta = {
                 **self._state.get_decision_meta(symbol),
                 "decision": decision,
                 "skip_reason": skip_reason,
                 "final_entry_gate": final_entry_gate,
+                "blocker_code": (effective_blocker.code if effective_blocker is not None else None),
+                "blocker_detail": (effective_blocker.detail if effective_blocker is not None else ("ELIGIBLE" if decision != "skip" else "No blocker detail available.")),
+                "blocker_layer": (effective_blocker.layer if effective_blocker is not None else "none"),
+                "blocker_until_ts": (effective_blocker.until_ts if effective_blocker is not None else None),
+                "blockers": [blocker.__dict__ for blocker in blockers],
                 "regime_label": scalp_meta.get("regime_label"),
                 "allowed_side": scalp_meta.get("allowed_side"),
                 "atr_pct": scalp_meta.get("atr_pct"),
@@ -742,14 +876,17 @@ class DecisionScheduler:
             self._state.set_decision_meta(symbol, decision_meta)
             if decision == "skip":
                 self._state.record_skip_reason(skip_reason)
+                self._log_skip_blocker(symbol, effective_blocker, tick_ts)
             if self._settings.telegram_debug_skips and decision == "skip":
                 await self._maybe_send_skip_debug(symbol, skip_reason)
             logger.info(
-                "tick symbol=%s ts=%s decision=%s skip_reason=%s htf_bias_reject=%s trigger_body_ratio_reject=%s trigger_close_location_reject=%s",
+                "tick symbol=%s ts=%s decision=%s skip_reason=%s blocker_layer=%s blocker_code=%s htf_bias_reject=%s trigger_body_ratio_reject=%s trigger_close_location_reject=%s",
                 symbol,
                 tick_ts.isoformat(),
                 decision,
                 skip_reason,
+                decision_meta.get("blocker_layer"),
+                decision_meta.get("blocker_code"),
                 decision_meta.get("htf_bias_reject"),
                 decision_meta.get("trigger_body_ratio_reject"),
                 decision_meta.get("trigger_close_location_reject"),
@@ -770,6 +907,11 @@ class DecisionScheduler:
                     "decision": decision,
                     "skip_reason": skip_reason,
                     "final_entry_gate": final_entry_gate,
+                    "blocker_code": decision_meta.get("blocker_code"),
+                    "blocker_detail": decision_meta.get("blocker_detail"),
+                    "blocker_layer": decision_meta.get("blocker_layer"),
+                    "blocker_until_ts": decision_meta.get("blocker_until_ts"),
+                    "blockers": decision_meta.get("blockers", []),
                     "regime_label": decision_meta.get("regime_label"),
                     "allowed_side": decision_meta.get("allowed_side"),
                     "atr_pct": decision_meta.get("atr_pct"),

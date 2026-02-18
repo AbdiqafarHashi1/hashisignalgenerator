@@ -42,7 +42,21 @@ export type EngineStatus = {
   uptime_seconds?: number;
 };
 
+
+export type EngineBlocker = {
+  code: string;
+  layer: "terminal" | "governor" | "risk" | "strategy" | "none";
+  detail: string;
+  until_ts?: string | null;
+};
+
 export type EngineState = {
+  blocker_code?: string | null;
+  blocker_detail?: string | null;
+  blocker_layer?: "terminal" | "governor" | "risk" | "strategy" | "none";
+  blocker_until_ts?: string | null;
+  blockers?: EngineBlocker[];
+
   timestamp: string;
   server_ts?: string | null;
   candle_ts?: string | null;

@@ -2,7 +2,7 @@
 
 from datetime import datetime
 from enum import Enum
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -165,3 +165,8 @@ class EngineState(BaseModel):
     challenge: dict[str, Any] | None = None
     challenge_ready: bool = False
     challenge_error: str | None = None
+    blocker_code: str | None = None
+    blocker_detail: str | None = None
+    blocker_layer: Literal["terminal", "governor", "risk", "strategy", "none"] = "none"
+    blocker_until_ts: datetime | None = None
+    blockers: list[dict[str, Any]] = Field(default_factory=list)

@@ -30,6 +30,7 @@ export type NormalizedSymbol = {
   regimeLabel: string;
   lastDecision: string;
   lastSkipReason: string;
+  blockerCode: string;
   atrPct: number | null;
   trendStrength: number | null;
   signalScore: number | null;
@@ -140,6 +141,7 @@ const normalizeSymbols = (input: unknown): NormalizedSymbol[] => {
       regimeLabel: asString(data.regime_label ?? data.regime),
       lastDecision: asString(data.last_decision),
       lastSkipReason: asString(data.last_skip_reason),
+      blockerCode: asString(data.blocker_code),
       atrPct: asNumber(data.atr_pct),
       trendStrength: asNumber(data.trend_strength),
       signalScore: asNumber(data.signal_score),

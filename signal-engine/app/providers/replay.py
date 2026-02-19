@@ -4,9 +4,13 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 import csv
 import json
+import logging
 from pathlib import Path
 
 from pydantic import BaseModel
+
+
+logger = logging.getLogger(__name__)
 
 
 class ReplayDatasetError(RuntimeError):
@@ -177,10 +181,28 @@ class ReplayProvider:
         if cursor.index == 0:
             cursor.index = max(0, min(len(candles) - 1, limit - 1))
         _ = speed  # speed is scheduler pacing only; replay data advances one candle at a time for deterministic outcomes.
+        prev_index = cursor.index
+        prev_ts = candles[prev_index].close_time.isoformat()
         cursor.index = min(len(candles) - 1, cursor.index + 1)
+        logger.info(
+            "replay_cursor_advance symbol=%s interval=%s prev_index=%s next_index=%s prev_ts=%s next_ts=%s",
+            symbol.upper(),
+            interval,
+            prev_index,
+            cursor.index,
+            prev_ts,
+            candles[cursor.index].close_time.isoformat(),
+        )
         window_start = max(0, cursor.index - max(2, limit) + 1)
         window = candles[window_start : cursor.index + 1]
         candle = window[-1]
+        logger.info(
+            "replay_candle_current symbol=%s interval=%s cursor_index=%s candle_ts=%s",
+            symbol.upper(),
+            interval,
+            cursor.index,
+            candle.close_time.isoformat(),
+        )
         return ReplayKlineSnapshot(
             symbol=symbol.upper(),
             interval=interval,

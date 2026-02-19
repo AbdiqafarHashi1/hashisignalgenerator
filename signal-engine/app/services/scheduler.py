@@ -422,7 +422,21 @@ class DecisionScheduler:
                 tick_ts = self.engine_now()
                 now_ms = int(tick_ts.timestamp() * 1000)
                 next_fetch_after_ms = self._next_fetch_after_ms.get(symbol, 0)
-                should_refresh = snapshot is None or force_mode or now_ms >= next_fetch_after_ms
+                should_refresh = (
+                    self._settings.run_mode == "replay"
+                    or self._settings.market_data_provider == "replay"
+                    or snapshot is None
+                    or force_mode
+                    or now_ms >= next_fetch_after_ms
+                )
+                if self._settings.run_mode == "replay" or self._settings.market_data_provider == "replay":
+                    logger.info(
+                        "replay_scheduler_fetch_gate symbol=%s now_ms=%s next_fetch_after_ms=%s should_refresh=%s",
+                        symbol,
+                        now_ms,
+                        next_fetch_after_ms,
+                        should_refresh,
+                    )
                 if should_refresh:
                     snapshot = await fetch_symbol_klines(
                         symbol=symbol,
@@ -680,6 +694,14 @@ class DecisionScheduler:
             elif not should_process:
                 reason = "candle_already_processed" if latest_closed_ms == last_processed else "candle_open"
                 skip_reason = reason
+                if self._settings.run_mode == "replay" or self._settings.market_data_provider == "replay":
+                    logger.info(
+                        "replay_candle_skipped symbol=%s reason=%s latest_closed_ms=%s last_processed_ms=%s",
+                        snapshot.symbol,
+                        reason,
+                        latest_closed_ms,
+                        last_processed,
+                    )
             else:
                 forced_trade = False
                 if (self._settings.force_trade_mode or self._settings.smoke_test_force_trade) and self._force_trade_due(snapshot.symbol, tick_ts):
@@ -747,6 +769,13 @@ class DecisionScheduler:
                         inputs_snapshot=_to_json_dict(plan.raw_input_snapshot),
                     )
                 self._state.set_last_processed_close_time_ms(snapshot.symbol, latest_closed_ms)
+                if self._settings.run_mode == "replay" or self._settings.market_data_provider == "replay":
+                    logger.info(
+                        "replay_candle_processed symbol=%s latest_closed_ms=%s last_processed_ms=%s",
+                        snapshot.symbol,
+                        latest_closed_ms,
+                        last_processed,
+                    )
                 if self._database is not None:
                     self._database.set_runtime_state(
                         key=f"last_processed_candle:{snapshot.symbol}",

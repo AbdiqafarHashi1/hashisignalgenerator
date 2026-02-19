@@ -6,6 +6,7 @@ from enum import Enum
 from typing import Any
 
 from ..config import Settings
+from ..utils.trading_day import trading_day_key
 from .database import Database
 
 STATE_KEY = "challenge.state"
@@ -53,7 +54,7 @@ class ChallengeService:
             current_equity=eq,
             peak_equity=eq,
             daily_start_equity=eq,
-            last_candle_date=ts.date().isoformat(),
+            last_candle_date=trading_day_key(ts),
             days_elapsed_count=1,
         )
         self.save(state)
@@ -68,7 +69,7 @@ class ChallengeService:
             current_equity=start_equity,
             peak_equity=start_equity,
             daily_start_equity=start_equity,
-            last_candle_date=now.date().isoformat(),
+            last_candle_date=trading_day_key(now),
             days_elapsed_count=1,
         )
         self.save(state)
@@ -83,7 +84,7 @@ class ChallengeService:
         traded_today: bool,
     ) -> ChallengeState:
         state = self.load(now=now, start_equity=self._settings.account_size)
-        date_key = now.date().isoformat()
+        date_key = trading_day_key(now)
         if state.last_candle_date != date_key:
             state.last_candle_date = date_key
             state.days_elapsed_count += 1

@@ -124,6 +124,11 @@ export default function LiveDashboard() {
   const btcCard = findSymbol(symbols, "BTCUSDT");
 
   const pnlToday = num(account.realized_pnl_today ?? state?.realized_pnl_today_usd);
+  const pnlTotal = num(account.realized_pnl);
+  const equityStart = num(account.starting_equity);
+  const feesToday = num(account.fees_today);
+  const feesTotal = num(account.fees_total);
+  const statusReason = asText((account.pause_reasons as unknown[] | undefined)?.[0]) || asText(state?.blocker_code) || "none";
   const unrealizedPnl = num(account.unrealized_pnl ?? state?.unrealized_pnl_usd);
   const statusText = running ? "ACTIVE" : "STOPPED";
   const openPositions = Array.isArray(account.open_positions_detail) ? (account.open_positions_detail as Array<Record<string, unknown>>) : [];
@@ -169,8 +174,9 @@ export default function LiveDashboard() {
 
         {error ? <p className="text-sm text-rose-300">{error}</p> : null}
 
-        <section className="grid grid-cols-2 gap-3 md:grid-cols-4 xl:grid-cols-7">
-          <Kpi loading={loading} label="Equity" value={money(account.live_equity ?? state?.equity)} />
+        <section className="grid grid-cols-2 gap-3 md:grid-cols-4 xl:grid-cols-8">
+          <Kpi loading={loading} label="Equity Now" value={money(account.live_equity ?? state?.equity)} />
+          <Kpi loading={loading} label="Equity Start" value={money(equityStart)} />
           <Kpi
             loading={loading}
             label="Unrealized PnL"
@@ -179,14 +185,15 @@ export default function LiveDashboard() {
           />
           <Kpi
             loading={loading}
-            label="PnL Today"
-            value={money(pnlToday)}
-            valueClass={pnlToday == null ? "" : pnlToday < 0 ? "text-rose-300" : "text-emerald-300"}
+            label="Realized PnL (Total)"
+            value={money(pnlTotal)}
+            valueClass={pnlTotal == null ? "" : pnlTotal < 0 ? "text-rose-300" : "text-emerald-300"}
           />
-          <Kpi loading={loading} label="Daily DD %" value={pct(account.daily_drawdown_pct ?? state?.daily_loss_pct)} />
-          <Kpi loading={loading} label="Global DD %" value={pct(account.global_drawdown_pct)} />
+          <Kpi loading={loading} label="Fees (Today / Total)" value={`${money(feesToday)} / ${money(feesTotal)}`} />
+          <Kpi loading={loading} label="Daily DD %" value={`${pct(account.daily_drawdown_pct ?? state?.daily_loss_pct)} | rem ${pct((risk.daily_loss_limit_pct ?? 0) - (num(account.daily_drawdown_pct) ?? 0))}`} />
+          <Kpi loading={loading} label="Global DD %" value={`${pct(account.global_drawdown_pct)} | rem ${pct((risk.global_dd_limit_pct ?? 0) - (num(account.global_drawdown_pct) ?? 0))}`} />
           <Kpi loading={loading} label="Trades Today" value={String(activity.trades_today ?? state?.trades_today ?? "—")} />
-          <Kpi loading={loading} label="Status" value={statusText} />
+          <Kpi loading={loading} label="Status" value={`${statusText} (${statusReason})`} />
         </section>
 
         <section>
@@ -243,7 +250,8 @@ export default function LiveDashboard() {
               <Metric label="Profit factor" value={fmt(activity.profit_factor)} />
               <Metric label="Expectancy" value={fmt(activity.expectancy)} />
               <Metric label="Avg win/loss" value={`${money(activity.avg_win)} / ${money(activity.avg_loss)}`} />
-              <Metric label="Fees today/rolling" value={`${money(activity.fees_today)} / ${money(activity.fees_rolling)}`} />
+              <Metric label="Fees today/total" value={`${money(activity.fees_today)} / ${money(activity.fees_rolling)}`} />
+              <Metric label="Max Global DD % (since reset)" value={pct(account.max_global_dd_pct)} />
               <Metric label="Equity reconcile Δ" value={money(account.equity_reconcile_delta)} />
             </Card>
 
@@ -638,6 +646,12 @@ function Spark({ data, color, glow = false }: { data: number[]; color: string; g
     </svg>
   );
 }
+
+const asText = (value: unknown): string => {
+  if (typeof value === "string") return value;
+  if (typeof value === "number" || typeof value === "boolean") return String(value);
+  return "";
+};
 
 const num = (value: unknown): number | null => {
   if (typeof value === "number" && Number.isFinite(value)) return value;

@@ -4,6 +4,7 @@ from dataclasses import dataclass, asdict
 from datetime import datetime
 
 from ..config import Settings
+from ..utils.trading_day import trading_day_key
 from .database import Database
 
 STATE_KEY = "prop.governor"
@@ -31,7 +32,7 @@ class PropRiskGovernor:
         if row and row.value_text:
             data = self._db.loads_json(row.value_text)
             return GovernorState(**data)
-        st = GovernorState(risk_pct=self._s.prop_risk_base_pct, day_key=now.date().isoformat())
+        st = GovernorState(risk_pct=self._s.prop_risk_base_pct, day_key=trading_day_key(now))
         self.save(st)
         return st
 
@@ -39,7 +40,7 @@ class PropRiskGovernor:
         self._db.set_runtime_state(STATE_KEY, value_text=self._db.dumps_json(asdict(state)))
 
     def reset(self, now: datetime) -> GovernorState:
-        state = GovernorState(risk_pct=self._s.prop_risk_base_pct, day_key=now.date().isoformat())
+        state = GovernorState(risk_pct=self._s.prop_risk_base_pct, day_key=trading_day_key(now))
         self.save(state)
         return state
 
@@ -96,7 +97,7 @@ class PropRiskGovernor:
         return (now - lock_dt).total_seconds() < self._s.prop_time_cooldown_minutes * 60
 
     def _roll_day(self, st: GovernorState, now: datetime) -> None:
-        day_key = now.date().isoformat()
+        day_key = trading_day_key(now)
         if st.day_key == day_key:
             return
         st.day_key = day_key

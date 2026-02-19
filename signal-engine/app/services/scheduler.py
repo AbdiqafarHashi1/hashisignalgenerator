@@ -25,6 +25,7 @@ from ..strategy.decision import decide
 from ..providers.bybit import BybitKlineSnapshot, fetch_symbol_klines
 from ..utils.intervals import interval_to_ms
 from ..utils.clock import Clock, ReplayClock
+from ..utils.trading_day import trading_day_key, trading_day_start
 from .notifier import format_trade_message, send_telegram_message
 
 logger = logging.getLogger(__name__)
@@ -217,7 +218,7 @@ class DecisionScheduler:
     def _closed_trades_today_by_symbol(self, now: datetime) -> dict[str, int]:
         if self._database is None:
             return {}
-        start_of_day = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        start_of_day = trading_day_start(now)
         counts: dict[str, int] = {}
         for trade in self._database.fetch_trades():
             closed_at = getattr(trade, "closed_at", None)
@@ -245,7 +246,7 @@ class DecisionScheduler:
             gov = json.loads(governor_row.value_text)
         except json.JSONDecodeError:
             return None
-        day_key = now.date().isoformat()
+        day_key = trading_day_key(now)
         if gov.get("day_key") == day_key:
             return gov
         gov["day_key"] = day_key

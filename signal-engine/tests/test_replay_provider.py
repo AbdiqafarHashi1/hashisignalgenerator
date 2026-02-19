@@ -17,3 +17,12 @@ def test_replay_provider_advances_cursor() -> None:
         assert len(second.candles) == 5
 
     asyncio.run(run())
+
+
+def test_replay_status_progress_fields() -> None:
+    replay_root = Path(__file__).parent / "fixtures" / "replay"
+    provider = ReplayProvider(str(replay_root))
+    status = provider.status("ETHUSDT", "3m")
+    assert status["bars_processed"] >= 1
+    assert status["total_bars"] >= status["bars_processed"]
+    assert status["current_ts"]

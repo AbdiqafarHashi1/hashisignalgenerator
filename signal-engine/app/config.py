@@ -308,7 +308,7 @@ class Settings(BaseSettings):
     prop_max_trades_per_day: int = Field(4, validation_alias=AliasChoices("PROP_MAX_TRADES_PER_DAY", "prop_max_trades_per_day"))
     prop_max_consec_losses: int = Field(2, validation_alias=AliasChoices("PROP_MAX_CONSEC_LOSSES", "prop_max_consec_losses"))
     prop_reset_consec_losses_on_day_rollover: bool = Field(
-        False,
+        True,
         validation_alias=AliasChoices(
             "PROP_RESET_CONSEC_LOSSES_ON_DAY_ROLLOVER",
             "prop_reset_consec_losses_on_day_rollover",
@@ -485,6 +485,15 @@ class Settings(BaseSettings):
     next_public_api_base: str | None = Field(None, validation_alias=AliasChoices("NEXT_PUBLIC_API_BASE", "next_public_api_base"))
     internal_api_base_url: str | None = Field(None, validation_alias=AliasChoices("INTERNAL_API_BASE_URL", "internal_api_base_url"))
     database_url: str | None = Field(None, validation_alias=AliasChoices("DATABASE_URL", "database_url"))
+    settings_enable_legacy: bool = Field(False, validation_alias=AliasChoices("SETTINGS_ENABLE_LEGACY", "settings_enable_legacy"))
+
+    LEGACY_ENV_KEYS: tuple[str, ...] = (
+        "BE_TRIGGER_R",
+        "MAX_TRADES_PER_DAY",
+        "BASE_RISK_PCT",
+        "MAX_RISK_PCT",
+        "MAX_DAILY_LOSS_PCT",
+    )
 
     @field_validator("symbols", mode="before")
     @classmethod
@@ -515,6 +524,12 @@ class Settings(BaseSettings):
     @model_validator(mode="after")
     def apply_mode_defaults(self) -> "Settings":
         logger = logging.getLogger(__name__)
+        legacy_keys_present = [key for key in self.LEGACY_ENV_KEYS if key in os.environ]
+        if legacy_keys_present and not self.settings_enable_legacy:
+            raise ValueError(
+                "Legacy env keys are not allowed while SETTINGS_ENABLE_LEGACY=false. "
+                f"Remove these keys: {', '.join(sorted(legacy_keys_present))}"
+            )
         profile_defaults = self._profile_defaults()
         skipped_defaults: list[str] = []
         for key, value in profile_defaults.items():
@@ -526,17 +541,18 @@ class Settings(BaseSettings):
         if skipped_defaults:
             logger.warning("Config default skipped (field missing): %s", ", ".join(sorted(skipped_defaults)))
 
-        if "BE_TRIGGER_R" in os.environ and "MOVE_TO_BREAKEVEN_TRIGGER_R" not in os.environ:
+        if self.settings_enable_legacy and "BE_TRIGGER_R" in os.environ and "MOVE_TO_BREAKEVEN_TRIGGER_R" not in os.environ:
             logger.warning(
                 "Config key BE_TRIGGER_R is deprecated; use MOVE_TO_BREAKEVEN_TRIGGER_R instead."
             )
+            self.move_to_breakeven_trigger_r = float(os.environ["BE_TRIGGER_R"])
         if "ENGINE_MODE" not in os.environ and self.MODE in {"paper", "signal_only", "live"}:
             self.engine_mode = self.MODE
         if self.run_mode == "replay":
             self.market_data_provider = "replay"
 
         prop_max_env = os.environ.get("PROP_MAX_TRADES_PER_DAY")
-        max_env = os.environ.get("MAX_TRADES_PER_DAY")
+        max_env = os.environ.get("MAX_TRADES_PER_DAY") if self.settings_enable_legacy else None
         if prop_max_env:
             self.max_trades_per_day = self.prop_max_trades_per_day
         elif max_env and not prop_max_env:
@@ -545,11 +561,11 @@ class Settings(BaseSettings):
         if self.sweet8_enabled:
             self.debug_loosen = False
             self.debug_disable_hard_risk_gates = False
-            if "BASE_RISK_PCT" not in os.environ:
+            if "BASE_RISK_PCT" not in os.environ or not self.settings_enable_legacy:
                 self.base_risk_pct = self.sweet8_base_risk_pct
-            if "MAX_RISK_PCT" not in os.environ:
+            if "MAX_RISK_PCT" not in os.environ or not self.settings_enable_legacy:
                 self.max_risk_pct = self.sweet8_max_risk_pct
-            if "MAX_DAILY_LOSS_PCT" not in os.environ:
+            if "MAX_DAILY_LOSS_PCT" not in os.environ or not self.settings_enable_legacy:
                 self.max_daily_loss_pct = self.sweet8_max_daily_loss_pct
         if self.debug_loosen:
             changes: list[str] = []

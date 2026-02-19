@@ -10,6 +10,7 @@ import {
   NormalizedTrade,
   triggerEngineAction,
 } from "../../lib/dashboardClient";
+import { formatBlocker, formatStatusReason, getRiskHeat, getRiskTone, toneClasses } from "../../lib/dashboardDisplay";
 
 const UI_REFRESH_MS = 3000;
 const HEAVY_REFRESH_MS = 15000;
@@ -123,14 +124,56 @@ export default function LiveDashboard() {
   const ethCard = findSymbol(symbols, "ETHUSDT");
   const btcCard = findSymbol(symbols, "BTCUSDT");
 
-  const pnlToday = num(account.realized_pnl_today ?? state?.realized_pnl_today_usd);
   const pnlTotal = num(account.realized_pnl);
   const equityStart = num(account.starting_equity);
+  const equityNow = num(account.live_equity ?? state?.equity);
   const feesToday = num(account.fees_today);
   const feesTotal = num(account.fees_total);
-  const statusReason = asText((account.pause_reasons as unknown[] | undefined)?.[0]) || asText(state?.blocker_code) || "none";
+  const statusReasonRaw = asText((account.pause_reasons as unknown[] | undefined)?.[0]) || asText(state?.blocker_code) || "none";
   const unrealizedPnl = num(account.unrealized_pnl ?? state?.unrealized_pnl_usd);
-  const statusText = running ? "ACTIVE" : "STOPPED";
+  const statusText = running ? "RUNNING" : "STOPPED";
+  const dailyDdPct = num(account.daily_drawdown_pct ?? state?.daily_loss_pct);
+  const globalDdPct = num(account.global_drawdown_pct);
+  const dailyLimitPct = num(risk.daily_loss_limit_pct);
+  const globalLimitPct = num(risk.global_dd_limit_pct);
+  const dailyRemainingPct = dailyDdPct != null && dailyLimitPct != null ? dailyLimitPct - dailyDdPct : null;
+  const globalRemainingPct = globalDdPct != null && globalLimitPct != null ? globalLimitPct - globalDdPct : null;
+  const dailyTone = getRiskTone(dailyDdPct, dailyLimitPct);
+  const globalTone = getRiskTone(globalDdPct, globalLimitPct);
+
+  const targetPct =
+    num(account.prop_profit_target_pct) ??
+    num(account.target_pct) ??
+    num(risk.prop_profit_target_pct) ??
+    num(bundle?.debugConfig.effective?.prop_profit_target_pct) ??
+    num(bundle?.debugConfig.effective?.daily_profit_target_pct);
+  const targetAmount = equityStart != null && targetPct != null ? equityStart * targetPct : null;
+  const realizedToTarget = equityNow != null && equityStart != null ? equityNow - equityStart : null;
+  const targetProgress = realizedToTarget != null && targetAmount && targetAmount > 0 ? realizedToTarget / targetAmount : null;
+
+  const cooldownSeconds = num(risk.cooldown_remaining_seconds);
+  const cooldownMins = cooldownSeconds != null ? Math.ceil(cooldownSeconds / 60) : null;
+  const statusReason = `${formatStatusReason(statusReasonRaw)}${cooldownMins && cooldownMins > 0 ? ` (${cooldownMins}m remaining)` : ""}`;
+
+  const maxGlobalDdPct = num(account.max_global_dd_pct);
+  const worstDayDdPct = num(account.max_daily_dd_pct ?? account.worst_day_dd_pct ?? activity.worst_day_dd_pct);
+
+  const totalR = num(account.net_r ?? activity.net_r);
+  const todayR = num(account.daily_net_r ?? activity.daily_net_r);
+  const avgRTrade = num(account.avg_r ?? activity.avg_r);
+  const targetR = num(account.target_r ?? activity.target_r);
+  const hasRMetrics = [totalR, todayR, avgRTrade, targetR].some((value) => value != null);
+
+  const riskHeat = getRiskHeat(dailyDdPct, dailyLimitPct, globalDdPct, globalLimitPct);
+  const riskHeatTone = riskHeat == null ? "neutral" : riskHeat >= 0.8 ? "red" : riskHeat >= 0.5 ? "amber" : "neutral";
+
+  const tradingDays = num(account.trading_days_count ?? account.days_traded_count ?? activity.trading_days_count);
+  const minTradingDays = num(account.prop_min_trading_days ?? risk.prop_min_trading_days ?? bundle?.debugConfig.effective?.prop_min_trading_days);
+  const elapsedDays = num(account.challenge_day_number ?? account.elapsed_days ?? activity.challenge_day_number);
+  const maxDays = num(account.prop_max_days ?? risk.prop_max_days ?? bundle?.debugConfig.effective?.prop_max_days);
+  const rolloverLabel = asText(account.rollover_label ?? account.trading_day_rollover ?? risk.rollover_label) || "default";
+  const blockerCode = asText(state?.blocker_code) || asText((account.pause_reasons as unknown[] | undefined)?.[0]);
+  const blockerSummary = blockerCode ? `${blockerCode} · ${formatBlocker(blockerCode)}` : "No active blocker";
   const openPositions = Array.isArray(account.open_positions_detail) ? (account.open_positions_detail as Array<Record<string, unknown>>) : [];
   const openOrders = Array.isArray(account.open_orders) ? (account.open_orders as Array<Record<string, unknown>>) : [];
   const executions = Array.isArray(account.executions) ? (account.executions as Array<Record<string, unknown>>) : [];
@@ -174,26 +217,48 @@ export default function LiveDashboard() {
 
         {error ? <p className="text-sm text-rose-300">{error}</p> : null}
 
-        <section className="grid grid-cols-2 gap-3 md:grid-cols-4 xl:grid-cols-8">
-          <Kpi loading={loading} label="Equity Now" value={money(account.live_equity ?? state?.equity)} />
-          <Kpi loading={loading} label="Equity Start" value={money(equityStart)} />
-          <Kpi
-            loading={loading}
-            label="Unrealized PnL"
-            value={money(unrealizedPnl)}
-            valueClass={unrealizedPnl == null ? "" : unrealizedPnl < 0 ? "text-rose-300" : "text-emerald-300"}
-          />
-          <Kpi
-            loading={loading}
-            label="Realized PnL (Total)"
-            value={money(pnlTotal)}
-            valueClass={pnlTotal == null ? "" : pnlTotal < 0 ? "text-rose-300" : "text-emerald-300"}
-          />
-          <Kpi loading={loading} label="Fees (Today / Total)" value={`${money(feesToday)} / ${money(feesTotal)}`} />
-          <Kpi loading={loading} label="Daily DD %" value={`${pct(account.daily_drawdown_pct ?? state?.daily_loss_pct)} | rem ${pct((risk.daily_loss_limit_pct ?? 0) - (num(account.daily_drawdown_pct) ?? 0))}`} />
-          <Kpi loading={loading} label="Global DD %" value={`${pct(account.global_drawdown_pct)} | rem ${pct((risk.global_dd_limit_pct ?? 0) - (num(account.global_drawdown_pct) ?? 0))}`} />
-          <Kpi loading={loading} label="Trades Today" value={String(activity.trades_today ?? state?.trades_today ?? "—")} />
-          <Kpi loading={loading} label="Status" value={`${statusText} (${statusReason})`} />
+        <section className="space-y-3">
+          <div className="grid gap-3 lg:grid-cols-4">
+            <Kpi loading={loading} tier="a" label="Equity Now" value={money(equityNow)} />
+            <Kpi
+              loading={loading}
+              tier="a"
+              label="Daily DD"
+              value={`${pct(dailyDdPct)} used | ${pct(dailyRemainingPct)} remaining`}
+              valueClass={dailyTone === "red" ? "text-rose-200" : dailyTone === "amber" ? "text-amber-200" : ""}
+              cardClass={toneClasses(dailyTone)}
+            />
+            <Kpi
+              loading={loading}
+              tier="a"
+              label="Global DD"
+              value={`${pct(globalDdPct)} used | ${pct(globalRemainingPct)} remaining`}
+              valueClass={globalTone === "red" ? "text-rose-200" : globalTone === "amber" ? "text-amber-200" : ""}
+              cardClass={toneClasses(globalTone)}
+            />
+            <ProfitProgressCard
+              loading={loading}
+              progress={targetProgress}
+              realized={realizedToTarget}
+              targetAmount={targetAmount}
+              targetPct={targetPct}
+              riskTone={dailyTone === "red" || globalTone === "red" ? "red" : dailyTone === "amber" || globalTone === "amber" ? "amber" : "neutral"}
+            />
+          </div>
+
+          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
+            <Kpi loading={loading} tier="b" label="Equity Start" value={money(equityStart)} />
+            <Kpi loading={loading} tier="b" label="Realized PnL (Total)" value={money(pnlTotal)} valueClass={pnlToneClass(pnlTotal)} />
+            <Kpi loading={loading} tier="b" label="Unrealized PnL" value={money(unrealizedPnl)} valueClass={pnlToneClass(unrealizedPnl)} />
+            <Kpi loading={loading} tier="b" label="Fees (Today / Total)" value={`${money(feesToday)} / ${money(feesTotal)}`} />
+            <Kpi loading={loading} tier="b" label="Trades (today)" value={String(activity.trades_today ?? state?.trades_today ?? "—")} />
+          </div>
+
+          <div className="grid gap-3 lg:grid-cols-3">
+            <Kpi loading={loading} tier="c" label="Status" value={statusText} />
+            <Kpi loading={loading} tier="c" label="Reason" value={`Reason: ${statusReason}`} />
+            <Kpi loading={loading} tier="c" label="Governor / Blocker" value={blockerSummary} />
+          </div>
         </section>
 
         <section>
@@ -228,15 +293,28 @@ export default function LiveDashboard() {
 
         <section className="grid gap-4 lg:grid-cols-2">
           <Card title="Equity Curve">
-            <Spark data={(bundle?.equitySeries ?? []).slice(-100)} color="#75e0cb" glow />
+            <Spark
+              data={(bundle?.equitySeries ?? []).slice(-100)}
+              color="#75e0cb"
+              glow
+              baseline={equityStart}
+              highWatermark
+              target={equityStart != null && targetPct != null ? equityStart * (1 + targetPct) : null}
+            />
           </Card>
           <Card title="Drawdown Curve">
-            <Spark data={toDrawdownCurve((bundle?.equitySeries ?? []).slice(-100))} color="#e3b75f" />
+            <Spark
+              data={toDrawdownCurve((bundle?.equitySeries ?? []).slice(-100))}
+              color="#e3b75f"
+              fill
+              invert
+              marker={maxGlobalDdPct != null ? maxGlobalDdPct * 100 : null}
+            />
           </Card>
         </section>
 
         {viewMode === "professional" ? (
-          <section className="grid gap-4 lg:grid-cols-5">
+          <section className="grid gap-4 lg:grid-cols-3">
             <Card title="Risk Panel">
               <Metric label="Daily loss limit" value={pct(risk.daily_loss_limit_pct)} />
               <Metric label="Global DD limit" value={pct(risk.global_dd_limit_pct)} />
@@ -245,15 +323,43 @@ export default function LiveDashboard() {
               <Metric label="Max trades/day" value={`${fmt(risk.max_trades_per_day)} (used ${fmt(risk.trades_today)})`} />
             </Card>
 
+            <Card title="Risk Summary">
+              <Metric label="Max Global DD" value={pct(maxGlobalDdPct)} />
+              {worstDayDdPct != null ? <Metric label="Worst Day" value={`-${(Math.abs(worstDayDdPct) * 100).toFixed(2)}%`} /> : null}
+              <div className="mt-2 space-y-1">
+                <p className="text-xs text-slate-400">Risk Heat</p>
+                <p className={`font-mono text-sm ${riskHeatTone === "red" ? "text-rose-200" : riskHeatTone === "amber" ? "text-amber-200" : "text-emerald-200"}`}>{riskHeat == null ? "—" : `${(riskHeat * 100).toFixed(1)}%`}</p>
+                <div className="h-2 overflow-hidden rounded-full border border-slate-700/70 bg-slate-900/90">
+                  <div
+                    className={`h-full ${riskHeatTone === "red" ? "bg-rose-400/80" : riskHeatTone === "amber" ? "bg-amber-400/80" : "bg-emerald-400/80"}`}
+                    style={{ width: `${Math.max(0, Math.min(100, (riskHeat ?? 0) * 100))}%` }}
+                  />
+                </div>
+              </div>
+            </Card>
+
+            <Card title="Challenge Clock">
+              <MetricWithHint label="Trading days" value={`${fmtMaybeInt(tradingDays)} / ${fmtMaybeInt(minTradingDays)}`} missing={tradingDays == null || minTradingDays == null} />
+              <MetricWithHint label="Day elapsed" value={`${fmtMaybeInt(elapsedDays)} / ${fmtMaybeInt(maxDays)}`} missing={elapsedDays == null || maxDays == null} />
+              <MetricWithHint label="Rollover" value={`Rollover: ${rolloverLabel}`} missing={rolloverLabel === "default"} fallbackLabel="Rollover: default" />
+            </Card>
+
             <Card title="Activity">
               <Metric label="Win rate" value={pct(activity.win_rate_today)} />
               <Metric label="Profit factor" value={fmt(activity.profit_factor)} />
               <Metric label="Expectancy" value={fmt(activity.expectancy)} />
               <Metric label="Avg win/loss" value={`${money(activity.avg_win)} / ${money(activity.avg_loss)}`} />
               <Metric label="Fees today/total" value={`${money(activity.fees_today)} / ${money(activity.fees_rolling)}`} />
-              <Metric label="Max Global DD % (since reset)" value={pct(account.max_global_dd_pct)} />
-              <Metric label="Equity reconcile Δ" value={money(account.equity_reconcile_delta)} />
             </Card>
+
+            {hasRMetrics ? (
+              <Card title="R Metrics">
+                <Metric label="Total R (challenge)" value={fmt(totalR)} />
+                <Metric label="Today R" value={fmt(todayR)} />
+                <Metric label="Avg R/trade" value={fmt(avgRTrade)} />
+                {targetR != null ? <Metric label="R to target" value={fmt(targetR)} /> : null}
+              </Card>
+            ) : null}
 
             <BlockersCard state={state} />
             <SymbolCard symbol={ethCard} fallback="ETHUSDT" />
@@ -262,13 +368,19 @@ export default function LiveDashboard() {
         ) : null}
 
         {viewMode === "professional" ? (
-          <Card title="Config">
-            <div className="grid gap-2 text-sm md:grid-cols-2">
-              <Metric label="Engine mode" value={String(bundle?.debugConfig.effective?.engine_mode ?? "—")} />
-              <Metric label="Strategy profile" value={String(bundle?.debugConfig.effective?.strategy_profile ?? "—")} />
-              <Metric label="Account size" value={String(bundle?.debugConfig.effective?.account_size ?? "—")} />
-              <Metric label="Min signal score" value={String(bundle?.debugConfig.effective?.min_signal_score ?? "—")} />
-            </div>
+          <Card className="p-0">
+            <details className="group">
+              <summary className="cursor-pointer list-none rounded-2xl px-5 py-4 text-sm font-semibold text-slate-200 marker:content-none">
+                Config
+                <span className="ml-2 text-xs text-slate-400 group-open:hidden">(collapsed)</span>
+              </summary>
+              <div className="grid gap-2 px-5 pb-5 text-sm md:grid-cols-2">
+                <Metric label="Engine mode" value={String(bundle?.debugConfig.effective?.engine_mode ?? "—")} />
+                <Metric label="Strategy profile" value={String(bundle?.debugConfig.effective?.strategy_profile ?? "—")} />
+                <Metric label="Account size" value={String(bundle?.debugConfig.effective?.account_size ?? "—")} />
+                <Metric label="Min signal score" value={String(bundle?.debugConfig.effective?.min_signal_score ?? "—")} />
+              </div>
+            </details>
           </Card>
         ) : null}
 
@@ -422,15 +534,67 @@ function Card({ title, className = "", children }: { title?: string; className?:
   );
 }
 
-function Kpi({ loading, label, value, valueClass = "" }: { loading?: boolean; label: string; value: string; valueClass?: string }) {
+function Kpi({
+  loading,
+  label,
+  value,
+  valueClass = "",
+  tier = "b",
+  cardClass = "",
+}: {
+  loading?: boolean;
+  label: string;
+  value: string;
+  valueClass?: string;
+  tier?: "a" | "b" | "c";
+  cardClass?: string;
+}) {
+  const sizeClass = tier === "a" ? "text-4xl" : tier === "b" ? "text-3xl" : "text-xl";
   return (
-    <Card className="p-4">
+    <Card className={`h-full p-4 ${cardClass}`}>
       {loading ? (
         <div className="h-11 animate-pulse rounded bg-slate-700/70" />
       ) : (
         <>
-          <p className="text-[10px] text-slate-400/75">{label}</p>
-          <p className={`mt-1 font-mono text-[2.7rem] font-semibold leading-none tabular-nums text-slate-50 text-right ${valueClass}`}>{value}</p>
+          <p className="text-[11px] text-slate-400/80">{label}</p>
+          <p className={`mt-1 font-mono ${sizeClass} font-semibold leading-tight tabular-nums text-slate-50 ${valueClass}`}>{value}</p>
+        </>
+      )}
+    </Card>
+  );
+}
+
+function ProfitProgressCard({
+  loading,
+  progress,
+  realized,
+  targetAmount,
+  targetPct,
+  riskTone,
+}: {
+  loading?: boolean;
+  progress: number | null;
+  realized: number | null;
+  targetAmount: number | null;
+  targetPct: number | null;
+  riskTone: "neutral" | "amber" | "red";
+}) {
+  const width = progress == null ? 0 : Math.max(0, Math.min(100, progress * 100));
+  return (
+    <Card className={`h-full p-4 ${toneClasses(riskTone)}`}>
+      {loading ? (
+        <div className="h-11 animate-pulse rounded bg-slate-700/70" />
+      ) : (
+        <>
+          <p className="text-[11px] text-slate-400/80">Profit Target Progress</p>
+          <p className="mt-1 font-mono text-3xl font-semibold text-emerald-200">{progress == null ? "—" : `${width.toFixed(1)}%`}</p>
+          <p className="mt-1 text-xs text-slate-300">
+            {realized != null ? money(realized) : "—"} / {targetAmount != null ? money(targetAmount) : "—"}
+          </p>
+          <p className="text-xs text-slate-400">{progress == null ? "—" : `${width.toFixed(1)}%`} / {targetPct != null ? `${(targetPct * 100).toFixed(2)}%` : "target pct unknown"}</p>
+          <div className="mt-3 h-2.5 overflow-hidden rounded-full border border-emerald-500/30 bg-slate-900/85">
+            <div className="h-full rounded-full bg-emerald-400/75" style={{ width: `${width}%` }} />
+          </div>
         </>
       )}
     </Card>
@@ -622,26 +786,77 @@ function Metric({ label, value }: { label: string; value: string }) {
   );
 }
 
-function Spark({ data, color, glow = false }: { data: number[]; color: string; glow?: boolean }) {
+function MetricWithHint({
+  label,
+  value,
+  missing,
+  fallbackLabel = "—",
+}: {
+  label: string;
+  value: string;
+  missing?: boolean;
+  fallbackLabel?: string;
+}) {
+  return (
+    <p className="flex items-center justify-between gap-2 py-0.5 text-sm">
+      <span className="text-slate-400">{label}</span>
+      <span className="font-mono tabular-nums text-right" title={missing ? "Not provided by API" : undefined}>{missing ? fallbackLabel : value}</span>
+    </p>
+  );
+}
+
+function Spark({
+  data,
+  color,
+  glow = false,
+  fill = false,
+  invert = false,
+  baseline = null,
+  target = null,
+  marker = null,
+  highWatermark = false,
+}: {
+  data: number[];
+  color: string;
+  glow?: boolean;
+  fill?: boolean;
+  invert?: boolean;
+  baseline?: number | null;
+  target?: number | null;
+  marker?: number | null;
+  highWatermark?: boolean;
+}) {
   if (!data.length) {
     return (
       <div className="flex h-44 flex-col items-center justify-center rounded-xl border border-slate-700/80 bg-slate-950/72 text-xs text-slate-400">
         <span className="mb-1 text-sm">📉</span>
         <p>No data yet</p>
+        <p className="mt-1 text-[11px] text-slate-500">Populates after first closed trade snapshot.</p>
       </div>
     );
   }
 
-  const min = Math.min(...data);
-  const max = Math.max(...data);
+  const min = Math.min(...data, ...(baseline != null ? [baseline] : []), ...(target != null ? [target] : []), ...(marker != null ? [marker] : []));
+  const max = Math.max(...data, ...(baseline != null ? [baseline] : []), ...(target != null ? [target] : []), ...(marker != null ? [marker] : []));
   const range = max - min || 1;
-  const points = data.map((value, index) => `${(index / Math.max(1, data.length - 1)) * 100},${100 - ((value - min) / range) * 100}`).join(" ");
+  const normalizeY = (value: number) => {
+    const pctValue = ((value - min) / range) * 100;
+    return invert ? pctValue : 100 - pctValue;
+  };
+  const points = data.map((value, index) => `${(index / Math.max(1, data.length - 1)) * 100},${normalizeY(value)}`).join(" ");
+  const areaPoints = `0,${normalizeY(data[0])} ${points} 100,${invert ? 100 : 0} 0,${invert ? 100 : 0}`;
+  const hw = highWatermark ? Math.max(...data) : null;
 
   return (
     <svg viewBox="0 0 100 100" className="h-44 w-full rounded-xl border border-slate-700/80 bg-slate-950/72">
       {[20, 40, 60, 80].map((line) => (
         <line key={line} x1="0" y1={line} x2="100" y2={line} stroke="rgba(148,163,184,0.16)" strokeWidth="0.5" />
       ))}
+      {fill ? <polygon points={areaPoints} fill="rgba(227,183,95,0.14)" /> : null}
+      {baseline != null ? <line x1="0" y1={normalizeY(baseline)} x2="100" y2={normalizeY(baseline)} stroke="rgba(148,163,184,0.45)" strokeDasharray="1.5 1.5" strokeWidth="0.7" /> : null}
+      {target != null ? <line x1="0" y1={normalizeY(target)} x2="100" y2={normalizeY(target)} stroke="rgba(74,222,128,0.65)" strokeDasharray="2 1" strokeWidth="0.8" /> : null}
+      {hw != null ? <line x1="0" y1={normalizeY(hw)} x2="100" y2={normalizeY(hw)} stroke="rgba(125,211,252,0.55)" strokeDasharray="2 1" strokeWidth="0.8" /> : null}
+      {marker != null ? <line x1="0" y1={normalizeY(marker)} x2="100" y2={normalizeY(marker)} stroke="rgba(244,114,182,0.65)" strokeDasharray="2 1" strokeWidth="0.8" /> : null}
       <polyline points={points} fill="none" stroke={color} strokeWidth="1.8" style={glow ? { filter: "drop-shadow(0 0 4px rgba(117,224,203,0.35))" } : undefined} />
     </svg>
   );
@@ -667,6 +882,11 @@ const fmt = (value: unknown): string => {
   return parsed == null ? "—" : parsed.toFixed(2);
 };
 
+const fmtMaybeInt = (value: number | null): string => {
+  if (value == null) return "—";
+  return Number.isInteger(value) ? String(value) : value.toFixed(2);
+};
+
 const money = (value: unknown): string => {
   const parsed = num(value);
   return parsed == null ? "—" : `${parsed < 0 ? "-$" : "$"}${Math.abs(parsed).toFixed(2)}`;
@@ -681,6 +901,14 @@ const buttonTone = (kind: "primary" | "secondary" | "danger"): string => {
   if (kind === "primary") return "border-cyan-500/42 bg-cyan-500/8 text-cyan-100 shadow-[0_4px_10px_rgba(8,145,178,0.12)]";
   if (kind === "danger") return "border-rose-500/42 bg-rose-500/8 text-rose-100 shadow-[0_4px_10px_rgba(225,29,72,0.12)]";
   return "border-slate-600 bg-slate-800/70 text-slate-100";
+};
+
+const pnlToneClass = (value: number | null): string => {
+  if (value == null) return "text-slate-100";
+  if (value > 0) return "text-emerald-300";
+  if (value < -50) return "text-rose-300";
+  if (value < 0) return "text-amber-300";
+  return "text-slate-100";
 };
 
 const pnlClass = (value: unknown): string => {

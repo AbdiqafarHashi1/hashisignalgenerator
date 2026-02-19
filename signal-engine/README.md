@@ -126,6 +126,28 @@ Returns aggregated account metrics for the dashboard:
 - `equity_curve`: array of equity values used for the dashboard chart.
 - `last_updated_ts`: server timestamp for the snapshot.
 
+### Dashboard KPI guide (what each KPI means)
+- **Equity Now**: current account equity from canonical dashboard metrics (balance + unrealized PnL).
+- **Equity Start**: challenge baseline equity (configured account size), not the intraday day-start anchor.
+- **Daily DD**: drawdown from the trading-day start equity; this resets at each trading-day rollover.
+- **Global DD**: drawdown from equity high-watermark (with high-watermark seeded from current equity if not yet set).
+- **Profit Target Progress**: `(Equity Now - Equity Start) / target_amount`, shown as both dollar progress and percent-to-target.
+- **Realized PnL (Total)**: closed-trade realized PnL aggregate since challenge/session start.
+- **Unrealized PnL**: live mark-to-market PnL for open positions.
+- **Fees (Today / Total)**: current-day fees and total cumulative fees.
+- **Trades (today)**: number of closed trades counted in the current trading day.
+- **Status / Reason / Blocker**: engine run state plus readable gate/cooldown context.
+- **Risk Heat**: max of daily and global drawdown utilization ratios (`used/limit`) as a fast severity signal.
+- **Risk Summary (Max Global DD / Worst Day)**: drawdown stress checkpoints when available.
+
+### How to interpret this dashboard for prop challenges
+- Start with **Tier A**: Equity Now, DD usage, and Profit Target Progress to confirm challenge viability.
+- Keep **Risk Heat** below warning/critical zones before scaling aggressiveness.
+- Read **Reason** + **Blocker** before assuming strategy inactivity is a bug.
+- Use **Challenge Clock** to track minimum trading-day and elapsed-day constraints when API fields are present.
+- Treat **Daily DD** as rollover-scoped and **Global DD** as challenge-scoped.
+- Use chart reference lines (baseline/high-water/target) to quickly assess trajectory quality.
+
 ## TradingView webhook payload
 Send a single JSON payload that includes the TradingView structure plus normalized market + bias inputs.
 

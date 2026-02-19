@@ -23,6 +23,7 @@ from .services.database import Database
 from .services.paper_trader import PaperTrader
 from .services.stats import compute_stats
 from .services.performance import PerformanceStore, build_performance_snapshot
+from .services.dashboard_metrics import build_dashboard_metrics
 from .services.challenge import ChallengeService
 from .services.prop_governor import PropRiskGovernor
 from .strategy.decision import decide
@@ -197,98 +198,6 @@ def _get_runtime_text(db: Database, key: str, default: str) -> str:
     return str(row.value_text)
 
 
-def _build_accounting_snapshot(cfg: Settings, db: Database, trader: PaperTrader, state_store: StateStore, now: datetime) -> dict[str, Any]:
-    trades = db.fetch_trades()
-    start_of_day = now.replace(hour=0, minute=0, second=0, microsecond=0)
-    day_key = start_of_day.date().isoformat()
-
-    starting_equity = float(cfg.account_size or 0.0)
-    realized_net = 0.0
-    realized_gross = 0.0
-    unrealized = 0.0
-    fees_total = 0.0
-    fees_today = 0.0
-    trades_today = 0
-    wins_today = 0
-    losses_today = 0
-    realized_today_net = 0.0
-    trades_today_by_symbol: dict[str, int] = {}
-    realized_pnl_by_symbol: dict[str, float] = {}
-    fees_by_symbol: dict[str, float] = {}
-
-    for trade in trades:
-        symbol = str(getattr(trade, "symbol", ""))
-        if trade.closed_at is not None:
-            pnl_net = float(getattr(trade, "pnl_usd", 0.0) or 0.0)
-            fee = _trade_fee(trade, cfg)
-            realized_net += pnl_net
-            fees_total += fee
-            realized_gross += (pnl_net + fee)
-            realized_pnl_by_symbol[symbol] = realized_pnl_by_symbol.get(symbol, 0.0) + pnl_net
-            fees_by_symbol[symbol] = fees_by_symbol.get(symbol, 0.0) + fee
-            closed_at = _as_datetime_utc(getattr(trade, "closed_at", None))
-            if closed_at and closed_at >= start_of_day:
-                trades_today += 1
-                trades_today_by_symbol[symbol] = trades_today_by_symbol.get(symbol, 0) + 1
-                realized_today_net += pnl_net
-                fees_today += fee
-                if pnl_net > 0:
-                    wins_today += 1
-                elif pnl_net < 0:
-                    losses_today += 1
-        else:
-            mark = _mark_price_for_trade(trader, trade)
-            side_sign = 1.0 if trade.side == "long" else -1.0
-            unrealized += (mark - trade.entry) * trade.size * side_sign
-
-    equity = starting_equity + realized_net + unrealized
-    reconcile_expected = starting_equity + realized_gross + unrealized - fees_total
-    reconcile_delta = equity - reconcile_expected
-
-    prev_day_key = _get_runtime_text(db, "accounting.day_key", day_key)
-    if prev_day_key != day_key:
-        db.set_runtime_state("accounting.day_key", value_text=day_key)
-        db.set_runtime_state("accounting.daily_start_equity", value_number=equity)
-        db.set_runtime_state("accounting.daily_peak_equity", value_number=equity)
-
-    daily_start_equity = _get_runtime_float(db, "accounting.daily_start_equity", equity)
-    daily_peak_equity = max(_get_runtime_float(db, "accounting.daily_peak_equity", equity), equity)
-    db.set_runtime_state("accounting.daily_peak_equity", value_number=daily_peak_equity)
-
-    global_peak_equity = max(_get_runtime_float(db, "accounting.global_peak_equity", equity), equity)
-    db.set_runtime_state("accounting.global_peak_equity", value_number=global_peak_equity)
-
-    daily_dd_pct = ((daily_peak_equity - equity) / daily_peak_equity) if daily_peak_equity > 0 else 0.0
-    global_dd_pct = ((global_peak_equity - equity) / global_peak_equity) if global_peak_equity > 0 else 0.0
-
-    state_store.set_global_equity(equity)
-
-    return {
-        "trades": trades,
-        "starting_equity": starting_equity,
-        "equity": equity,
-        "balance": starting_equity + realized_net,
-        "realized_pnl": realized_gross,
-        "realized_pnl_net": realized_net,
-        "unrealized_pnl": unrealized,
-        "fees_total": fees_total,
-        "fees_today": fees_today,
-        "equity_reconcile_delta": reconcile_delta,
-        "trades_today": trades_today,
-        "wins_today": wins_today,
-        "losses_today": losses_today,
-        "realized_pnl_today": realized_today_net,
-        "trades_today_by_symbol": trades_today_by_symbol,
-        "realized_pnl_by_symbol": realized_pnl_by_symbol,
-        "fees_by_symbol": fees_by_symbol,
-        "daily_start_equity": daily_start_equity,
-        "daily_peak_equity": daily_peak_equity,
-        "daily_dd_pct": daily_dd_pct,
-        "global_peak_equity": global_peak_equity,
-        "global_dd_pct": global_dd_pct,
-    }
-
-
 def _build_engine_state_snapshot() -> EngineState:
     scheduler = _require_scheduler()
     cfg = _require_settings()
@@ -297,7 +206,7 @@ def _build_engine_state_snapshot() -> EngineState:
     trader = _require_paper_trader()
     now = _runtime_now()
 
-    acct = _build_accounting_snapshot(cfg, db, trader, state_store, now)
+    acct = build_dashboard_metrics(cfg, db, trader, state_store, now)
     challenge = None
     challenge_ready = False
     challenge_error: str | None = "engine_not_ready"
@@ -305,8 +214,8 @@ def _build_engine_state_snapshot() -> EngineState:
     if maybe_challenge_service is not None:
         try:
             challenge = maybe_challenge_service.update(
-                equity=float(acct["equity"]),
-                daily_start_equity=float(acct["daily_start_equity"]),
+                equity=float(acct["equity_now"]),
+                daily_start_equity=float(acct["day_start_equity"]),
                 now=now,
                 traded_today=bool(acct["trades_today"]),
             )
@@ -321,11 +230,11 @@ def _build_engine_state_snapshot() -> EngineState:
     wins = int(acct["wins_today"])
     losses = int(acct["losses_today"])
     trades_today = int(acct["trades_today"])
-    realized_pnl_today = float(acct["realized_pnl_today"])
+    realized_pnl_today = float(acct["pnl_realized_today"])
 
-    unrealized = float(acct["unrealized_pnl"])
+    unrealized = float(acct["pnl_unrealized"])
     balance = float(acct["balance"])
-    equity = float(acct["equity"])
+    equity = float(acct["equity_now"])
     max_dd_today_pct = float(acct["daily_dd_pct"]) * 100
     db.record_equity(equity=equity, realized_pnl_today=realized_pnl_today, drawdown_pct=max_dd_today_pct)
 
@@ -379,15 +288,15 @@ def _build_engine_state_snapshot() -> EngineState:
         ema_fast=decision_meta.get("ema_fast"),
         ema_slow=decision_meta.get("ema_slow"),
         ema_trend=decision_meta.get("ema_trend"),
-        starting_equity=float(acct["starting_equity"]),
-        realized_pnl=float(acct["realized_pnl"]),
-        unrealized_pnl=float(acct["unrealized_pnl"]),
+        starting_equity=float(acct["equity_start"]),
+        realized_pnl=float(acct["pnl_realized_total"]),
+        unrealized_pnl=float(acct["pnl_unrealized"]),
         fees_total=float(acct["fees_total"]),
         fees_today=float(acct["fees_today"]),
         equity_reconcile_delta=float(acct["equity_reconcile_delta"]),
-        daily_start_equity=float(acct["daily_start_equity"]),
-        daily_peak_equity=float(acct["daily_peak_equity"]),
-        global_peak_equity=float(acct["global_peak_equity"]),
+        daily_start_equity=float(acct["day_start_equity"]),
+        daily_peak_equity=float(acct["day_start_equity"]),
+        global_peak_equity=float(acct["equity_high_watermark"]),
         daily_dd_pct=float(acct["daily_dd_pct"]),
         global_dd_pct=float(acct["global_dd_pct"]),
         trades_today_by_symbol=dict(acct["trades_today_by_symbol"]),
@@ -799,7 +708,7 @@ async def account_summary() -> AccountSummary:
         pnl_pct = (total_pnl / abs(equity)) * 100
 
     # --- TODAY METRICS from DB (correct, not state_store) ---
-    start_of_day = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+    start_of_day = _runtime_now().replace(hour=0, minute=0, second=0, microsecond=0)
 
     trades_today = 0
     wins_today = 0
@@ -863,7 +772,7 @@ async def account_summary() -> AccountSummary:
         last_trade_ts=last_trade_ts,
         engine_status="RUNNING" if _require_scheduler().running else "STOPPED",
         pnl_curve=summary.equity_curve,
-        last_updated_ts=datetime.now(timezone.utc).isoformat(),
+        last_updated_ts=_runtime_now().isoformat(),
         equity_curve=equity_curve,
     )
 
@@ -906,24 +815,23 @@ async def dashboard_overview() -> DashboardOverview:
     db = _require_database()
     trader = _require_paper_trader()
     scheduler = _require_scheduler()
-    now = datetime.now(timezone.utc)
-    acct = _build_accounting_snapshot(cfg, db, trader, state_store, now)
+    now = _runtime_now()
+    acct = build_dashboard_metrics(cfg, db, trader, state_store, now)
     trades = acct["trades"]
     perf = build_performance_snapshot(trades, account_size=float(cfg.account_size or 0.0), skip_reason_counts=state_store.skip_reason_counts())
 
-    starting_equity = float(acct["starting_equity"])
-    realized_net = float(acct["realized_pnl_net"])
-    realized = float(acct["realized_pnl"])
-    unrealized = float(acct["unrealized_pnl"])
-    equity = float(acct["equity"])
+    starting_equity = float(acct["equity_start"])
+    realized = float(acct["pnl_realized_total"])
+    unrealized = float(acct["pnl_unrealized"])
+    equity = float(acct["equity_now"])
     fees_total = float(acct["fees_total"])
     fees_today = float(acct["fees_today"])
     trades_today = int(acct["trades_today"])
 
     daily_dd_pct = float(acct["daily_dd_pct"])
     global_dd_pct = float(acct["global_dd_pct"])
-    daily_dd_usd = max(0.0, float(acct["daily_peak_equity"]) - equity)
-    global_dd_usd = max(0.0, float(acct["global_peak_equity"]) - equity)
+    daily_dd_usd = float(acct["daily_dd_abs"])
+    global_dd_usd = float(acct["global_dd_abs"])
 
     active_reasons = _active_risk_gates(cfg.symbols[0] if cfg.symbols else "BTCUSDT", now)
 
@@ -983,20 +891,22 @@ async def dashboard_overview() -> DashboardOverview:
         account={
             "live_equity": equity,
             "starting_equity": starting_equity,
-            "balance": starting_equity + realized_net,
+            "balance": float(acct["balance"]),
             "unrealized_pnl": unrealized,
             "realized_pnl": realized,
-            "realized_pnl_today": float(acct["realized_pnl_today"]),
+            "realized_pnl_today": float(acct["pnl_realized_today"]),
             "fees_total": fees_total,
             "fees_today": fees_today,
+            "metrics_version": int(acct["metrics_version"]),
             "equity_reconcile_delta": float(acct["equity_reconcile_delta"]),
-            "daily_start_equity": float(acct["daily_start_equity"]),
-            "daily_peak_equity": float(acct["daily_peak_equity"]),
-            "global_peak_equity": float(acct["global_peak_equity"]),
+            "daily_start_equity": float(acct["day_start_equity"]),
+            "global_peak_equity": float(acct["equity_high_watermark"]),
             "daily_drawdown_usd": daily_dd_usd,
             "daily_drawdown_pct": daily_dd_pct,
             "global_drawdown_usd": global_dd_usd,
             "global_drawdown_pct": global_dd_pct,
+            "max_global_dd_abs": float(acct["max_global_dd_abs"]),
+            "max_global_dd_pct": float(acct["max_global_dd_pct"]),
             "trades_today_by_symbol": dict(acct["trades_today_by_symbol"]),
             "realized_pnl_by_symbol": dict(acct["realized_pnl_by_symbol"]),
             "fees_by_symbol": dict(acct["fees_by_symbol"]),
@@ -1038,6 +948,15 @@ async def dashboard_overview() -> DashboardOverview:
         equity_curve=[{"index": idx, "equity": starting_equity + val} for idx, val in enumerate(perf.equity_curve)],
         skip_reasons={"global": state_store.skip_reason_counts(), "by_symbol": skip_by_symbol},
     )
+
+
+@app.get("/dashboard/metrics")
+async def dashboard_metrics() -> dict[str, Any]:
+    cfg = _require_settings()
+    state_store = _require_state()
+    db = _require_database()
+    trader = _require_paper_trader()
+    return build_dashboard_metrics(cfg, db, trader, state_store, _runtime_now())
 @app.get("/positions")
 async def positions() -> dict:
     return {"positions": [trade.__dict__ for trade in _require_database().fetch_open_trades()]}
@@ -1173,7 +1092,7 @@ async def state_today(symbol: str = Query(..., min_length=1)) -> dict:
     latest_decision = getattr(daily_state, "latest_decision", None)
 
     # Compute today metrics from DB trades (source of truth)
-    start_of_day = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+    start_of_day = _runtime_now().replace(hour=0, minute=0, second=0, microsecond=0)
 
     trades = db.fetch_trades()
 

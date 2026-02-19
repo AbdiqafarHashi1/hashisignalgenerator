@@ -498,7 +498,18 @@ async def health() -> dict[str, Any]:
         _require_settings()
     except Exception as exc:
         cfg_errors.append(str(exc))
-    return {"status": "ok", "config_errors": cfg_errors}
+    cfg = _require_settings()
+    return {
+        "status": "ok",
+        "config_errors": cfg_errors,
+        "provider_type": cfg.market_data_provider,
+        "config_summary": {
+            "run_mode": cfg.run_mode,
+            "symbols": cfg.symbols,
+            "candle_interval": cfg.candle_interval,
+            "replay_path": cfg.market_data_replay_path,
+        },
+    }
 
 
 @app.get("/run")
@@ -609,12 +620,13 @@ async def engine_replay_reset(clear_storage: bool = False) -> dict[str, str]:
     cfg = _require_settings()
     db = _require_database()
     state_store = _require_state()
-    for symbol in cfg.symbols:
-        replay_reset(cfg.market_data_replay_path, symbol, cfg.candle_interval or "3m")
-    if clear_storage:
-        db.reset_all()
-        state_store.reset()
-    _require_prop_governor().reset(_runtime_now())
+    async with engine_reset_lock:
+        for symbol in cfg.symbols:
+            replay_reset(cfg.market_data_replay_path, symbol, cfg.candle_interval or "5m")
+        if clear_storage:
+            db.reset_all()
+            state_store.reset()
+        _require_prop_governor().reset(_runtime_now())
     return {"status": "ok"}
 
 
@@ -646,6 +658,20 @@ async def challenge_reset() -> dict[str, Any]:
     elapsed_ms = round((time.perf_counter() - start) * 1000, 2)
     return {"status": "reset", "elapsed_ms": elapsed_ms, "challenge": challenge.__dict__}
 
+
+@app.get("/replay/progress")
+async def replay_progress() -> dict[str, Any]:
+    cfg = _require_settings()
+    symbol = cfg.symbols[0] if cfg.symbols else "ETHUSDT"
+    interval = cfg.candle_interval or "5m"
+    status = replay_status(cfg.market_data_replay_path, symbol, interval)
+    trades_closed = len([t for t in _require_database().fetch_trades() if t.closed_at is not None])
+    return {
+        "current_ts": status.get("current_ts"),
+        "bars_processed": status.get("bars_processed", status.get("bar_index", 0) + 1),
+        "total_bars": status.get("total_bars", status.get("row_count", 0)),
+        "trades_closed": trades_closed,
+    }
 
 @app.get("/replay/status")
 async def replay_dataset_status() -> dict[str, Any]:

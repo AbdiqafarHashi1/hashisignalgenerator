@@ -78,7 +78,7 @@ def test_replay_speed_does_not_change_trade_outcomes(monkeypatch, tmp_path: Path
     main_module = _load_main(monkeypatch, tmp_path / "speed1", replay_speed="1")
     first_trades, first_equity, first_details = _run_and_collect(main_module)
 
-    main_module = _load_main(monkeypatch, tmp_path / "speed5", replay_speed="5")
+    main_module = _load_main(monkeypatch, tmp_path / "speed5", replay_speed="50")
     second_trades, second_equity, second_details = _run_and_collect(main_module)
 
     assert first_trades == second_trades

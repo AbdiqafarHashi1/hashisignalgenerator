@@ -153,6 +153,8 @@ class ReplayProvider:
             "exists": path.exists(),
             "interval": interval,
             "bar_index": idx,
+            "bars_processed": idx + 1,
+            "total_bars": len(candles),
             "row_count": len(candles),
             "first_ts": candles[0].close_time.isoformat(),
             "last_ts": candles[-1].close_time.isoformat(),

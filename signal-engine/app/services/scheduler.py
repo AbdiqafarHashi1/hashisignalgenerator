@@ -24,6 +24,7 @@ from ..state import StateStore
 from ..strategy.decision import decide
 from ..providers.bybit import BybitKlineSnapshot, fetch_symbol_klines
 from ..utils.intervals import interval_to_ms
+from ..utils.clock import Clock, ReplayClock
 from .notifier import format_trade_message, send_telegram_message
 
 logger = logging.getLogger(__name__)
@@ -64,6 +65,7 @@ class DecisionScheduler:
         paper_trader=None,
         interval_seconds: int = 60,
         heartbeat_cb: Callable[[], None] | None = None,
+        clock: Clock | None = None,
     ) -> None:
         self._settings = settings
         self._state = state
@@ -79,6 +81,7 @@ class DecisionScheduler:
                     settings.force_trade_every_seconds,
                 )
         self._heartbeat_cb = heartbeat_cb
+        self._clock = clock
         self._last_tick_time: datetime | None = None
         self._last_heartbeat_monotonic = time.monotonic()
         self._stall_recoveries = 0
@@ -135,7 +138,11 @@ class DecisionScheduler:
         return self._last_symbol_tick_time.get(symbol)
 
     def engine_now(self) -> datetime:
-        return self._engine_clock or datetime.now(timezone.utc)
+        if self._settings.run_mode == "replay" and self._engine_clock is not None:
+            return self._engine_clock
+        if self._clock is not None:
+            return self._clock.now_dt()
+        return datetime.now(timezone.utc)
 
     @property
     def replay_active(self) -> bool:
@@ -371,7 +378,7 @@ class DecisionScheduler:
         if self._heartbeat_cb is not None:
             self._heartbeat_cb()
         symbols = list(self._settings.symbols)
-        self._last_tick_time = datetime.now(timezone.utc)
+        self._last_tick_time = self.engine_now()
         force_mode = force or self._settings.smoke_test_force_trade or self._settings.force_trade_mode
         dedupe_bypass = force
         logger.info("scheduler_tick_start symbols=%s force=%s", ",".join(symbols), force_mode)
@@ -412,7 +419,7 @@ class DecisionScheduler:
         for symbol in symbols:
             try:
                 snapshot = self._last_snapshots.get(symbol)
-                tick_ts = datetime.now(timezone.utc)
+                tick_ts = self.engine_now()
                 now_ms = int(tick_ts.timestamp() * 1000)
                 next_fetch_after_ms = self._next_fetch_after_ms.get(symbol, 0)
                 should_refresh = snapshot is None or force_mode or now_ms >= next_fetch_after_ms
@@ -435,6 +442,8 @@ class DecisionScheduler:
                 if self._settings.run_mode == "replay" or self._settings.market_data_provider == "replay":
                     tick_ts = snapshot.candle.close_time
                     self._engine_clock = tick_ts
+                    if isinstance(self._clock, ReplayClock):
+                        self._clock.set_ts(int(tick_ts.timestamp()))
                     now_ms = snapshot.kline_close_time_ms
                 self._last_symbol_tick_time[symbol] = tick_ts
                 if snapshot is None:
@@ -1006,6 +1015,7 @@ class DecisionScheduler:
 
     async def _run_loop(self) -> None:
         logger.info("scheduler_loop_start")
+        replay_steps_per_cycle = max(1, int(round(float(self._settings.market_data_replay_speed or 1.0))))
         while not self._stop_event.is_set():
             logger.info("scheduler_loop_tick_start")
             try:
@@ -1013,17 +1023,21 @@ class DecisionScheduler:
                 if heartbeat_age > max(5.0, self._interval * 3):
                     self._stall_recoveries += 1
                     logger.error("scheduler_watchdog_stall_detected age=%.2fs recoveries=%s", heartbeat_age, self._stall_recoveries)
-                await self.run_once()
-                if self._settings.run_mode == "replay":
-                    closed = len([trade for trade in self._database.fetch_trades() if getattr(trade, "closed_at", None)]) if self._database is not None else 0
-                    if closed >= max(1, self._settings.replay_max_trades):
-                        self._stop_reason = "replay_max_trades_reached"
-                        self._stop_event.set()
-                        break
-                    if self._replay_bars_processed >= max(1, self._settings.replay_max_bars):
-                        self._stop_reason = "replay_max_bars_reached"
-                        self._stop_event.set()
-                        break
+                steps_this_cycle = replay_steps_per_cycle if self._settings.run_mode == "replay" else 1
+                for _ in range(steps_this_cycle):
+                    await self.run_once()
+                    if self._settings.run_mode == "replay":
+                        closed = len([trade for trade in self._database.fetch_trades() if getattr(trade, "closed_at", None)]) if self._database is not None else 0
+                        if closed >= max(1, self._settings.replay_max_trades):
+                            self._stop_reason = "replay_max_trades_reached"
+                            self._stop_event.set()
+                            break
+                        if self._replay_bars_processed >= max(1, self._settings.replay_max_bars):
+                            self._stop_reason = "replay_max_bars_reached"
+                            self._stop_event.set()
+                            break
+                if self._stop_event.is_set():
+                    break
                 self._consecutive_failures = 0
                 logger.info("scheduler_loop_tick_end status=ok")
             except Exception as exc:
@@ -1042,7 +1056,7 @@ class DecisionScheduler:
                     continue
                 break
             if self._settings.run_mode == "replay":
-                await asyncio.sleep(0)
+                await self._clock.sleep(0) if self._clock is not None else asyncio.sleep(0)
                 continue
             try:
                 await asyncio.wait_for(self._stop_event.wait(), timeout=self._interval)

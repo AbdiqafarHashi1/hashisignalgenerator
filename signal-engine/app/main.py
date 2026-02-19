@@ -29,6 +29,7 @@ from .strategy.decision import decide
 from .services.scheduler import DecisionScheduler
 from .providers.bybit import BybitClient, fetch_symbol_klines, replay_reset, replay_status, replay_validate_dataset
 from .providers.replay import ReplayDatasetError
+from .utils.clock import RealClock, ReplayClock
 def _as_datetime_utc(value: Any) -> Optional[datetime]:
     """
     Normalize DB timestamps to timezone-aware UTC datetimes.
@@ -111,6 +112,7 @@ last_status_reason_logged: str | None = None
 replay_last_error: str | None = None
 state_subscribers: set[asyncio.Queue[str]] = set()
 latest_engine_state: EngineState | None = None
+runtime_clock: RealClock | ReplayClock | None = None
 
 
 def _record_heartbeat() -> None:
@@ -419,18 +421,19 @@ def _publish_state_snapshot() -> None:
 
 
 def _initialize_engine(app: FastAPI) -> None:
-    global settings, state, database, paper_trader, scheduler, performance_store, challenge_service, prop_governor
+    global settings, state, database, paper_trader, scheduler, performance_store, challenge_service, prop_governor, runtime_clock
     global running, last_heartbeat_ts, last_action, last_correlation_id, last_status_reason_logged, replay_last_error
 
     settings = get_settings()
+    runtime_clock = ReplayClock() if settings.run_mode == "replay" else RealClock()
     state = StateStore()
     state.set_symbols(settings.symbols)
     database = Database(settings)
     database.init_schema()
     challenge_service = ChallengeService(settings, database)
-    challenge_service.load(now=datetime.now(timezone.utc), start_equity=float(settings.account_size or 0.0))
+    challenge_service.load(now=runtime_clock.now_dt(), start_equity=float(settings.account_size or 0.0))
     prop_governor = PropRiskGovernor(settings, database)
-    prop_governor.load(now=datetime.now(timezone.utc))
+    prop_governor.load(now=runtime_clock.now_dt())
     paper_trader = PaperTrader(settings, database)
     scheduler = DecisionScheduler(
         settings,
@@ -439,6 +442,7 @@ def _initialize_engine(app: FastAPI) -> None:
         paper_trader,
         interval_seconds=settings.tick_interval_seconds,
         heartbeat_cb=_record_heartbeat,
+        clock=runtime_clock,
     )
     state.set_clock(_runtime_now)
     paper_trader.set_clock(scheduler.engine_now)
@@ -558,6 +562,8 @@ def _runtime_now() -> datetime:
         cfg = _require_settings()
         if cfg.run_mode == "replay" or cfg.market_data_provider == "replay":
             return scheduler.engine_now()
+    if runtime_clock is not None:
+        return runtime_clock.now_dt()
     return datetime.now(timezone.utc)
 
 def _require_performance_store() -> PerformanceStore:

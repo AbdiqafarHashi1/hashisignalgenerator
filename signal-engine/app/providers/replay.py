@@ -176,8 +176,8 @@ class ReplayProvider:
         cursor = self._cursor.setdefault(key, ReplayCursor(index=0))
         if cursor.index == 0:
             cursor.index = max(0, min(len(candles) - 1, limit - 1))
-        step = max(1, int(round(speed)))
-        cursor.index = min(len(candles) - 1, cursor.index + step)
+        _ = speed  # speed is scheduler pacing only; replay data advances one candle at a time for deterministic outcomes.
+        cursor.index = min(len(candles) - 1, cursor.index + 1)
         window_start = max(0, cursor.index - max(2, limit) + 1)
         window = candles[window_start : cursor.index + 1]
         candle = window[-1]

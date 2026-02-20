@@ -21,7 +21,7 @@ from ..models import (
     TradePlan,
 )
 from ..state import StateStore
-from ..strategy.decision import decide
+from ..strategy.decision import decide, evaluate_warmup_status, required_warmup_bars_5m
 from ..providers.bybit import BybitKlineSnapshot, fetch_symbol_klines
 from ..utils.intervals import interval_to_ms
 from ..utils.clock import Clock, ReplayClock
@@ -439,10 +439,12 @@ class DecisionScheduler:
                         should_refresh,
                     )
                 if should_refresh:
+                    required_history = required_warmup_bars_5m(self._settings)
+                    fetch_limit = max(int(self._settings.candle_history_limit), int(required_history))
                     snapshot = await fetch_symbol_klines(
                         symbol=symbol,
                         interval=self._settings.candle_interval,
-                        limit=self._settings.candle_history_limit,
+                        limit=fetch_limit,
                         rest_base=self._settings.bybit_rest_base,
                         provider=self._settings.market_data_provider,
                         fallback_provider=self._settings.market_data_fallbacks,
@@ -864,6 +866,16 @@ class DecisionScheduler:
                 persisted,
             )
             debug_reason = skip_reason if skip_reason is not None else ("ready" if should_process else "candle_open")
+            warmup = evaluate_warmup_status(snapshot.candles, self._settings)
+            warmup_meta: dict[str, object] = {
+                "ready": warmup.ready,
+                "bars_5m_have": warmup.bars_5m_have,
+                "bars_5m_need": warmup.bars_5m_need,
+                "missing_components": warmup.missing_components,
+            }
+            if self._settings.htf_bias_enabled:
+                warmup_meta["bars_htf_have"] = warmup.bars_htf_have
+                warmup_meta["bars_htf_need"] = warmup.bars_htf_need
             self._state.set_decision_meta(
                 snapshot.symbol,
                 {
@@ -872,6 +884,9 @@ class DecisionScheduler:
                     "last_processed_candle_ts": last_processed,
                     "should_process": should_process,
                     "should_process_reason": debug_reason,
+                    "warmup_status": warmup_meta,
+                    "candles_loaded_5m_count": len(snapshot.candles),
+                    "candles_loaded_htf_count": warmup.bars_htf_have if self._settings.htf_bias_enabled else 0,
                 },
             )
             if self._database is not None:

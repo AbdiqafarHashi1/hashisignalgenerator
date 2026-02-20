@@ -667,11 +667,28 @@ async def replay_progress() -> dict[str, Any]:
     status = replay_status(cfg.market_data_replay_path, symbol, interval)
     trades_closed = len([t for t in _require_database().fetch_trades() if t.closed_at is not None])
     snapshot = _require_state().get_decision_meta(symbol)
+    bars_processed = status.get("bars_processed", status.get("bar_index", 0) + 1)
+    total_bars = status.get("total_bars", status.get("row_count", 0))
+    warmup_meta = snapshot.get("warmup_status") or {
+        "ready": False,
+        "bars_5m_have": int(snapshot.get("candles_loaded_5m_count") or 0),
+        "bars_5m_need": int(cfg.warmup_min_bars_5m),
+        "missing_components": ["ema_slow"],
+    }
+    if cfg.htf_bias_enabled and "bars_htf_need" not in warmup_meta:
+        warmup_meta["bars_htf_have"] = int(snapshot.get("candles_loaded_htf_count") or 0)
+        warmup_meta["bars_htf_need"] = int(cfg.warmup_min_bars_1h)
     return {
+        "replay_current_ts": status.get("current_ts"),
+        "replay_start_ts": status.get("first_ts"),
+        "replay_end_ts": status.get("last_ts"),
         "current_ts": status.get("current_ts"),
-        "bars_processed": status.get("bars_processed", status.get("bar_index", 0) + 1),
-        "total_bars": status.get("total_bars", status.get("row_count", 0)),
+        "bars_processed": bars_processed,
+        "total_bars": total_bars,
         "trades_closed": trades_closed,
+        "candles_loaded_5m_count": snapshot.get("candles_loaded_5m_count", bars_processed),
+        "candles_loaded_htf_count": snapshot.get("candles_loaded_htf_count", 0),
+        "warmup_status": warmup_meta,
         "state": snapshot.get("equity_state"),
         "regime": snapshot.get("regime_label") or snapshot.get("regime"),
         "bias": snapshot.get("bias"),

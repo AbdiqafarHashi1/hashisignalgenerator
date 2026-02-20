@@ -49,6 +49,7 @@ class ReplayProvider:
         self._base = Path(base_path)
         self._cache: dict[tuple[str, str], list[ReplayCandle]] = {}
         self._cursor: dict[tuple[str, str], ReplayCursor] = {}
+        self._log_every_bars = 250
 
     def _path_for(self, symbol: str, interval: str) -> tuple[Path, str]:
         symbol_dir = self._base / symbol.upper()
@@ -136,6 +137,31 @@ class ReplayProvider:
             "end_ts": candles[-1].close_time.isoformat(),
         }
 
+    def validate_range(self, symbol: str, interval: str, start_ts: str | None, end_ts: str | None) -> dict[str, object]:
+        dataset = self.validate_dataset(symbol, interval)
+        candles = self._load_series(symbol, interval)
+        start_dt = self._parse_ts(start_ts) if start_ts else candles[0].close_time
+        end_dt = self._parse_ts(end_ts) if end_ts else candles[-1].close_time
+        if start_dt > end_dt:
+            raise ReplayDatasetError("replay_range_invalid start_ts must be <= end_ts")
+        dataset_start = candles[0].close_time
+        dataset_end = candles[-1].close_time
+        if start_dt < dataset_start or start_dt > dataset_end:
+            raise ReplayDatasetError(
+                f"replay_start_ts_out_of_range start={start_dt.isoformat()} dataset=[{dataset_start.isoformat()}..{dataset_end.isoformat()}]"
+            )
+        if end_dt < dataset_start or end_dt > dataset_end:
+            raise ReplayDatasetError(
+                f"replay_end_ts_out_of_range end={end_dt.isoformat()} dataset=[{dataset_start.isoformat()}..{dataset_end.isoformat()}]"
+            )
+        filtered_bars = len([c for c in candles if start_dt <= c.close_time <= end_dt])
+        if filtered_bars <= 0:
+            raise ReplayDatasetError("replay_range_empty no candles in configured timestamp range")
+        dataset["configured_start_ts"] = start_dt.isoformat()
+        dataset["configured_end_ts"] = end_dt.isoformat()
+        dataset["configured_total_bars"] = filtered_bars
+        return dataset
+
     def reset_cursor(self, symbol: str, interval: str) -> None:
         key = (symbol.upper(), interval)
         self._cursor[key] = ReplayCursor(index=0)
@@ -183,28 +209,19 @@ class ReplayProvider:
         if cursor.index == 0:
             cursor.index = max(0, min(len(candles) - 1, limit - 1))
         _ = speed  # speed is scheduler pacing only; replay data advances one candle at a time for deterministic outcomes.
-        prev_index = cursor.index
-        prev_ts = candles[prev_index].close_time.isoformat()
         cursor.index = min(len(candles) - 1, cursor.index + 1)
-        logger.info(
-            "replay_cursor_advance symbol=%s interval=%s prev_index=%s next_index=%s prev_ts=%s next_ts=%s",
-            symbol.upper(),
-            interval,
-            prev_index,
-            cursor.index,
-            prev_ts,
-            candles[cursor.index].close_time.isoformat(),
-        )
+        if cursor.index % self._log_every_bars == 0:
+            logger.info(
+                "replay_cursor_progress symbol=%s interval=%s next_index=%s total=%s ts=%s",
+                symbol.upper(),
+                interval,
+                cursor.index,
+                len(candles),
+                candles[cursor.index].close_time.isoformat(),
+            )
         window_start = max(0, cursor.index - max(2, limit) + 1)
         window = candles[window_start : cursor.index + 1]
         candle = window[-1]
-        logger.info(
-            "replay_candle_current symbol=%s interval=%s cursor_index=%s candle_ts=%s",
-            symbol.upper(),
-            interval,
-            cursor.index,
-            candle.close_time.isoformat(),
-        )
         return ReplayKlineSnapshot(
             symbol=symbol.upper(),
             interval=interval,

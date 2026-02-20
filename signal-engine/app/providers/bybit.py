@@ -673,12 +673,18 @@ def replay_status(replay_path: str, symbol: str, interval: str) -> dict[str, obj
     return provider.status(symbol, interval)
 
 
-def replay_validate_dataset(replay_path: str, symbol: str, interval: str) -> dict[str, object]:
+def replay_validate_dataset(
+    replay_path: str,
+    symbol: str,
+    interval: str,
+    start_ts: str | None = None,
+    end_ts: str | None = None,
+) -> dict[str, object]:
     provider = _replay_providers.get(replay_path)
     if provider is None:
         provider = ReplayProvider(replay_path)
         _replay_providers[replay_path] = provider
-    return provider.validate_dataset(symbol, interval)
+    return provider.validate_range(symbol, interval, start_ts=start_ts, end_ts=end_ts)
 
 
 def replay_reset(replay_path: str, symbol: str, interval: str) -> None:

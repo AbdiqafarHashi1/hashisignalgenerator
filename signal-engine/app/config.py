@@ -293,6 +293,7 @@ class Settings(BaseSettings):
     prop_max_days: int = Field(60, validation_alias=AliasChoices("PROP_MAX_DAYS", "prop_max_days"))
     prop_max_daily_loss_pct: float = Field(0.05, validation_alias=AliasChoices("PROP_MAX_DAILY_LOSS_PCT", "prop_max_daily_loss_pct"))
     prop_max_global_dd_pct: float = Field(0.10, validation_alias=AliasChoices("PROP_MAX_GLOBAL_DD_PCT", "prop_max_global_dd_pct"))
+    prop_dd_includes_unrealized: bool = Field(True, validation_alias=AliasChoices("PROP_DD_INCLUDES_UNREALIZED", "prop_dd_includes_unrealized"))
 
     prop_governor_enabled: bool = Field(True, validation_alias=AliasChoices("PROP_GOVERNOR_ENABLED", "prop_governor_enabled"))
     prop_risk_base_pct: float = Field(0.0015, validation_alias=AliasChoices("PROP_RISK_BASE_PCT", "prop_risk_base_pct"))

@@ -666,11 +666,18 @@ async def replay_progress() -> dict[str, Any]:
     interval = cfg.candle_interval or "5m"
     status = replay_status(cfg.market_data_replay_path, symbol, interval)
     trades_closed = len([t for t in _require_database().fetch_trades() if t.closed_at is not None])
+    snapshot = _require_state().get_decision_meta(symbol)
     return {
         "current_ts": status.get("current_ts"),
         "bars_processed": status.get("bars_processed", status.get("bar_index", 0) + 1),
         "total_bars": status.get("total_bars", status.get("row_count", 0)),
         "trades_closed": trades_closed,
+        "state": snapshot.get("equity_state"),
+        "regime": snapshot.get("regime_label") or snapshot.get("regime"),
+        "bias": snapshot.get("bias"),
+        "confidence": snapshot.get("confidence"),
+        "entry_reasons": snapshot.get("entry_reasons") or [],
+        "entry_block_reasons": snapshot.get("entry_block_reasons") or [],
     }
 
 @app.get("/replay/status")

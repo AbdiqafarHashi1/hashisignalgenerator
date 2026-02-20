@@ -6,6 +6,8 @@ from datetime import datetime
 from ..config import Settings
 from ..utils.trading_day import trading_day_key
 from .database import Database
+from signal_engine.accounting import compute_accounting_snapshot
+from signal_engine.governor.prop import GovernorBlock, evaluate_prop_block
 
 STATE_KEY = "prop.governor"
 
@@ -44,6 +46,37 @@ class PropRiskGovernor:
         self.save(state)
         return state
 
+    def block_reason(self, now: datetime) -> GovernorBlock | None:
+        st = self.load(now)
+        trades = self._db.fetch_trades()
+        realized = sum(float(t.pnl_usd or 0.0) for t in trades if t.closed_at)
+        fees = sum(float(t.fees or 0.0) for t in trades if t.closed_at)
+        unrealized = 0.0
+        acct = compute_accounting_snapshot(
+            equity_start=float(self._s.account_size or 0.0),
+            realized_pnl=realized,
+            unrealized_pnl=unrealized,
+            fees=fees,
+            day_start_equity=float(self._s.account_size or 0.0),
+            hwm=float(self._s.account_size or 0.0),
+            trade_close_dates=[t.closed_at for t in trades if t.closed_at],
+            profit_target_pct=float(self._s.prop_profit_target_pct or 0.0),
+        )
+        return evaluate_prop_block(
+            now=now,
+            day_key=trading_day_key(now),
+            stored_day_key=st.day_key,
+            daily_trades=st.daily_trades,
+            consecutive_losses=st.consecutive_losses,
+            last_loss_at=datetime.fromisoformat(st.locked_until_ts) if st.locked_until_ts else None,
+            accounting=acct,
+            max_daily_loss_pct=float(self._s.prop_max_daily_loss_pct or 0.0),
+            max_global_dd_pct=float(self._s.prop_max_global_dd_pct or 0.0),
+            max_trades_per_day=int(self._s.prop_max_trades_per_day or 0),
+            max_consecutive_losses=int(self._s.prop_max_consec_losses or 0),
+            cooldown_minutes=int(self._s.prop_time_cooldown_minutes or 0),
+        )
+
     def applied_risk_pct(self, now: datetime) -> tuple[float, str]:
         st = self.load(now)
         self._roll_day(st, now)
@@ -54,18 +87,9 @@ class PropRiskGovernor:
         return st.risk_pct, reason
 
     def allow_new_trade(self, now: datetime) -> tuple[bool, str | None]:
-        st = self.load(now)
-        self._roll_day(st, now)
-        if self._is_locked(st, now):
-            return False, "prop_governor_lock"
-        if st.daily_losses >= self._s.prop_daily_stop_after_losses:
-            return False, "daily_loss_streak_lock"
-        if st.daily_trades >= self._s.prop_max_trades_per_day:
-            return False, "max_trades_per_day"
-        if st.consecutive_losses >= self._s.prop_max_consec_losses:
-            return False, "max_consecutive_losses"
-        if st.daily_net_r >= self._s.prop_daily_stop_after_net_r:
-            return False, "daily_target_r_lock"
+        block = self.block_reason(now)
+        if block:
+            return False, block.code
         return True, None
 
     def on_trade_close(self, net_r: float, now: datetime) -> None:

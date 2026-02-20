@@ -59,6 +59,9 @@ class BybitKlineSnapshot(BaseModel):
     provider_name: str = "bybit"
     provider_category: str = "linear"
     provider_endpoint: str = "/v5/market/kline"
+    replay_cursor_index: int | None = None
+    replay_total_bars: int | None = None
+    replay_source_file_path: str | None = None
 
 
 class BybitClient:
@@ -448,11 +451,12 @@ async def fetch_symbol_klines(
     replay_speed: float = 1.0,
     replay_start_ts: str | None = None,
     replay_end_ts: str | None = None,
+    replay_history_limit: int | None = None,
 ) -> BybitKlineSnapshot | None:
     provider_normalized = (provider or "bybit").lower()
     fallback_order = _parse_fallbacks(fallback_provider)
     if provider_normalized == "replay":
-        return await _fetch_from_replay(symbol=symbol, interval=interval, limit=limit, replay_path=replay_path, replay_speed=replay_speed, replay_start_ts=replay_start_ts, replay_end_ts=replay_end_ts)
+        return await _fetch_from_replay(symbol=symbol, interval=interval, limit=limit, replay_path=replay_path, replay_speed=replay_speed, replay_start_ts=replay_start_ts, replay_end_ts=replay_end_ts, history_limit=replay_history_limit)
     if provider_normalized == "binance":
         return await _fetch_from_binance(symbol=symbol, interval=interval, limit=limit)
     if provider_normalized == "okx":
@@ -492,6 +496,7 @@ async def fetch_symbol_klines(
                     replay_start_ts=replay_start_ts,
                     replay_end_ts=replay_end_ts,
                     trigger_reason=reason,
+                    replay_history_limit=replay_history_limit,
                 )
             if attempt >= threshold:
                 break
@@ -509,6 +514,7 @@ async def fetch_symbol_klines(
         replay_start_ts=replay_start_ts,
         replay_end_ts=replay_end_ts,
         trigger_reason="threshold_exceeded",
+        replay_history_limit=replay_history_limit,
     )
 
 
@@ -523,6 +529,7 @@ async def _try_fallback_chain(
     replay_start_ts: str | None,
     replay_end_ts: str | None,
     trigger_reason: str,
+    replay_history_limit: int | None = None,
 ) -> BybitKlineSnapshot:
     logger.warning("market_data_failover_trigger symbol=%s reason=%s chain=%s", symbol, trigger_reason, ",".join(fallbacks))
     errors: list[str] = []
@@ -533,7 +540,7 @@ async def _try_fallback_chain(
             if fallback == "okx":
                 return await _fetch_from_okx(symbol=symbol, interval=interval, limit=limit)
             if fallback == "replay":
-                return await _fetch_from_replay(symbol=symbol, interval=interval, limit=limit, replay_path=replay_path, replay_speed=replay_speed, replay_start_ts=replay_start_ts, replay_end_ts=replay_end_ts)
+                return await _fetch_from_replay(symbol=symbol, interval=interval, limit=limit, replay_path=replay_path, replay_speed=replay_speed, replay_start_ts=replay_start_ts, replay_end_ts=replay_end_ts, history_limit=replay_history_limit)
         except Exception as exc:
             errors.append(f"{fallback}:{type(exc).__name__}")
             continue
@@ -629,12 +636,20 @@ async def _fetch_from_okx(symbol: str, interval: str, limit: int) -> BybitKlineS
     )
 
 
-async def _fetch_from_replay(symbol: str, interval: str, limit: int, replay_path: str, replay_speed: float, replay_start_ts: str | None = None, replay_end_ts: str | None = None) -> BybitKlineSnapshot:
+async def _fetch_from_replay(symbol: str, interval: str, limit: int, replay_path: str, replay_speed: float, replay_start_ts: str | None = None, replay_end_ts: str | None = None, history_limit: int | None = None) -> BybitKlineSnapshot:
     provider = _replay_providers.get(replay_path)
     if provider is None:
         provider = ReplayProvider(replay_path)
         _replay_providers[replay_path] = provider
-    replay = await provider.fetch_symbol_klines(symbol=symbol, interval=interval, limit=limit, speed=replay_speed, start_ts=replay_start_ts, end_ts=replay_end_ts)
+    replay = await provider.fetch_symbol_klines(
+        symbol=symbol,
+        interval=interval,
+        limit=limit,
+        speed=replay_speed,
+        start_ts=replay_start_ts,
+        end_ts=replay_end_ts,
+        history_limit=history_limit,
+    )
     candles = [
         BybitCandle(
             open_time=item.open_time,
@@ -661,6 +676,9 @@ async def _fetch_from_replay(symbol: str, interval: str, limit: int, replay_path
         provider_name="replay",
         provider_category="local",
         provider_endpoint="replay",
+        replay_cursor_index=replay.cursor_index,
+        replay_total_bars=replay.total_bars,
+        replay_source_file_path=replay.source_file_path,
     )
 
 

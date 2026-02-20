@@ -11,6 +11,7 @@ from ..state import StateStore
 from signal_engine.features import compute_features
 from signal_engine.regime import Bias, Regime, classify_regime
 from signal_engine.strategy.entries import evaluate_entries
+from ..utils.intervals import interval_to_ms
 
 
 @dataclass(frozen=True)
@@ -53,6 +54,18 @@ def required_warmup_bars_5m(cfg: Settings) -> int:
 def required_warmup_bars_htf(cfg: Settings) -> int:
     htf_default = max(int(cfg.htf_ema_slow) + 20, 220)
     return max(int(cfg.warmup_min_bars_1h), int(cfg.htf_ema_slow) + 2, htf_default)
+
+
+def required_replay_history_bars(cfg: Settings, base_interval: str, margin_bars: int = 50) -> int:
+    base_need = required_warmup_bars_5m(cfg)
+    htf_need_in_base = 0
+    if cfg.htf_bias_enabled:
+        base_ms = interval_to_ms(base_interval)
+        htf_ms = interval_to_ms(cfg.htf_interval)
+        if htf_ms > 0 and base_ms > 0:
+            ratio = max(1, htf_ms // base_ms)
+            htf_need_in_base = required_warmup_bars_htf(cfg) * ratio
+    return max(base_need, htf_need_in_base) + max(0, int(margin_bars))
 
 
 def evaluate_warmup_status(candles: list[Any], cfg: Settings) -> WarmupStatus:

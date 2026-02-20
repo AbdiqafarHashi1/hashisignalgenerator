@@ -110,6 +110,26 @@ def test_debug_runtime_includes_profile(monkeypatch) -> None:
         assert payload["settings"]["min_signal_score"] == 35
 
 
+def test_risk_summary_uses_usd_risk_precedence(monkeypatch) -> None:
+    main_module = _fresh_main(
+        monkeypatch,
+        {
+            "RUN_MODE": "replay",
+            "MODE": "paper",
+            "ENGINE_MODE": "paper",
+            "ACCOUNT_SIZE": "25000",
+            "RISK_PER_TRADE_USD": "100",
+            "BASE_RISK_PCT": "0.0015",
+            "SETTINGS_ENABLE_LEGACY": "true",
+        },
+    )
+    with TestClient(main_module.app) as client:
+        cfg = client.get("/debug/config").json()["effective"]
+        summary = client.get("/risk/summary").json()
+        assert cfg["risk_per_trade_usd"] == 100.0
+        assert summary["risk_per_trade_pct"] == 0.004
+
+
 def test_force_signal_respects_hard_gates(monkeypatch) -> None:
     main_module = _fresh_main(
         monkeypatch,

@@ -3,8 +3,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import csv
+import inspect
 import json
 import logging
+import os
 from pathlib import Path
 
 from pydantic import BaseModel
@@ -37,6 +39,9 @@ class ReplayKlineSnapshot(BaseModel):
     kline_is_closed: bool
     candle: ReplayCandle
     candles: list[ReplayCandle]
+    cursor_index: int = 0
+    total_bars: int = 0
+    source_file_path: str = ""
 
 
 @dataclass
@@ -50,6 +55,31 @@ class ReplayProvider:
         self._cache: dict[tuple[str, str], list[ReplayCandle]] = {}
         self._cursor: dict[tuple[str, str], ReplayCursor] = {}
         self._log_every_bars = 250
+
+    def _debug_trace_enabled(self) -> bool:
+        return os.getenv("DEBUG_REPLAY_TRACE", "false").strip().lower() in {"1", "true", "yes", "on"}
+
+    def _debug_trace_every(self) -> int:
+        raw = os.getenv("DEBUG_REPLAY_TRACE_EVERY", "250").strip()
+        return max(1, int(raw)) if raw.isdigit() else 250
+
+    def _debug_trace(self, *, event: str, symbol: str, interval: str, cursor_index: int, candles_len: int, total_bars: int, source_file_path: str, slice_note: str) -> None:
+        if not self._debug_trace_enabled() or (cursor_index % self._debug_trace_every() != 0):
+            return
+        caller = inspect.stack()[1]
+        logger.info(
+            "replay_trace event=%s symbol=%s interval=%s cursor_index=%s candles_len=%s total_bars=%s source=%s caller=%s:%s slice=%s",
+            event,
+            symbol.upper(),
+            interval,
+            cursor_index,
+            candles_len,
+            total_bars,
+            source_file_path,
+            caller.filename,
+            caller.lineno,
+            slice_note,
+        )
 
     def _path_for(self, symbol: str, interval: str) -> tuple[Path, str]:
         symbol_dir = self._base / symbol.upper()
@@ -196,6 +226,7 @@ class ReplayProvider:
         speed: float = 1.0,
         start_ts: str | None = None,
         end_ts: str | None = None,
+        history_limit: int | None = None,
     ) -> ReplayKlineSnapshot:
         candles = self._load_series(symbol, interval)
         if start_ts or end_ts:
@@ -219,8 +250,20 @@ class ReplayProvider:
                 len(candles),
                 candles[cursor.index].close_time.isoformat(),
             )
-        window_start = max(0, cursor.index - max(2, limit) + 1)
+        path, _ = self._path_for(symbol, interval)
+        effective_history_limit = max(2, int(history_limit)) if history_limit and history_limit > 0 else max(2, limit)
+        window_start = max(0, cursor.index - effective_history_limit + 1)
         window = candles[window_start : cursor.index + 1]
+        self._debug_trace(
+            event="snapshot_window",
+            symbol=symbol,
+            interval=interval,
+            cursor_index=cursor.index,
+            candles_len=len(window),
+            total_bars=len(candles),
+            source_file_path=str(path),
+            slice_note=f"window_start={window_start};cursor={cursor.index};history_limit={effective_history_limit};limit={limit}",
+        )
         candle = window[-1]
         return ReplayKlineSnapshot(
             symbol=symbol.upper(),
@@ -232,4 +275,7 @@ class ReplayProvider:
             kline_is_closed=True,
             candle=candle,
             candles=window,
+            cursor_index=cursor.index,
+            total_bars=len(candles),
+            source_file_path=str(path),
         )

@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 from app.config import Settings
 from app.models import BiasSignal, Candle, DecisionRequest, Direction, MarketSnapshot, SetupType, TradingViewPayload
 from app.state import StateStore
-from app.strategy.decision import decide, evaluate_warmup_status
+from app.strategy.decision import decide, evaluate_warmup_status, required_replay_history_bars
 
 
 def _candles(count: int) -> list[Candle]:
@@ -75,3 +75,17 @@ def test_decision_does_not_return_insufficient_once_warmup_satisfied() -> None:
     )
     plan = decide(_request(_candles(260)), StateStore(), cfg)
     assert "insufficient_candles" not in plan.rationale
+
+
+def test_required_replay_history_bars_covers_htf_warmup() -> None:
+    cfg = Settings(
+        _env_file=None,
+        CANDLE_INTERVAL="5m",
+        HTF_BIAS_ENABLED=True,
+        HTF_INTERVAL="1h",
+        WARMUP_MIN_BARS_5M=250,
+        WARMUP_MIN_BARS_1H=220,
+        SCALP_REGIME_ENABLED=False,
+    )
+    required = required_replay_history_bars(cfg, "5m")
+    assert required >= (220 * 12)

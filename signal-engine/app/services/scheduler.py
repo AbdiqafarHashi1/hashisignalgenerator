@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
+import os
 import random
 import time
 import traceback
@@ -21,7 +23,7 @@ from ..models import (
     TradePlan,
 )
 from ..state import StateStore
-from ..strategy.decision import decide, evaluate_warmup_status, required_warmup_bars_5m
+from ..strategy.decision import decide, evaluate_warmup_status, required_replay_history_bars, required_warmup_bars_5m, required_warmup_bars_htf
 from ..providers.bybit import BybitKlineSnapshot, fetch_symbol_klines
 from ..utils.intervals import interval_to_ms
 from ..utils.clock import Clock, ReplayClock
@@ -113,6 +115,40 @@ class DecisionScheduler:
         self._engine_clock: datetime | None = None
         if settings.run_mode == "replay" and settings.replay_seed is not None:
             random.seed(settings.replay_seed)
+
+    def _replay_trace_enabled(self) -> bool:
+        return os.getenv("DEBUG_REPLAY_TRACE", "false").strip().lower() in {"1", "true", "yes", "on"}
+
+    def _replay_trace_every(self) -> int:
+        raw = os.getenv("DEBUG_REPLAY_TRACE_EVERY", "250").strip()
+        return max(1, int(raw)) if raw.isdigit() else 250
+
+    def _log_replay_trace(self, *, symbol: str, snapshot: BybitKlineSnapshot, warmup) -> None:
+        replay_mode = self._settings.run_mode == "replay" or self._settings.market_data_provider == "replay"
+        if not replay_mode or not self._replay_trace_enabled():
+            return
+        cursor_index = getattr(snapshot, "replay_cursor_index", None)
+        if cursor_index is None or (cursor_index % self._replay_trace_every() != 0):
+            return
+        frame = inspect.stack()[1]
+        required_5m = required_warmup_bars_5m(self._settings)
+        required_htf = required_warmup_bars_htf(self._settings) if self._settings.htf_bias_enabled else 0
+        source = "replay_provider" if getattr(snapshot, "provider_name", "") == "replay" else "external"
+        logger.info(
+            "replay_warmup_trace symbol=%s cursor_index=%s snapshot_candles=%s bars_5m_have=%s bars_htf_have=%s required_5m=%s required_htf=%s source=%s replay_path=%s func=%s file=%s line=%s",
+            symbol,
+            cursor_index,
+            len(snapshot.candles),
+            warmup.bars_5m_have,
+            warmup.bars_htf_have,
+            required_5m,
+            required_htf,
+            source,
+            getattr(snapshot, "replay_source_file_path", None),
+            frame.function,
+            frame.filename,
+            frame.lineno,
+        )
 
     @property
     def running(self) -> bool:
@@ -440,7 +476,10 @@ class DecisionScheduler:
                     )
                 if should_refresh:
                     required_history = required_warmup_bars_5m(self._settings)
+                    replay_history_limit = required_replay_history_bars(self._settings, self._settings.candle_interval or "5m")
                     fetch_limit = max(int(self._settings.candle_history_limit), int(required_history))
+                    if self._settings.run_mode == "replay" or self._settings.market_data_provider == "replay":
+                        fetch_limit = max(fetch_limit, replay_history_limit)
                     snapshot = await fetch_symbol_klines(
                         symbol=symbol,
                         interval=self._settings.candle_interval,
@@ -455,6 +494,7 @@ class DecisionScheduler:
                         replay_speed=self._settings.market_data_replay_speed,
                         replay_start_ts=self._settings.replay_start_ts,
                         replay_end_ts=self._settings.replay_end_ts,
+                        replay_history_limit=replay_history_limit,
                     )
                 if self._settings.run_mode == "replay" or self._settings.market_data_provider == "replay":
                     tick_ts = snapshot.candle.close_time
@@ -867,6 +907,7 @@ class DecisionScheduler:
             )
             debug_reason = skip_reason if skip_reason is not None else ("ready" if should_process else "candle_open")
             warmup = evaluate_warmup_status(snapshot.candles, self._settings)
+            self._log_replay_trace(symbol=symbol, snapshot=snapshot, warmup=warmup)
             warmup_meta: dict[str, object] = {
                 "ready": warmup.ready,
                 "bars_5m_have": warmup.bars_5m_have,

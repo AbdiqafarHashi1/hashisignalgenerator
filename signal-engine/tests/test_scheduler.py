@@ -38,6 +38,28 @@ def _build_snapshot(close_time_ms: int, closed: bool) -> BinanceKlineSnapshot:
     )
 
 
+def _build_snapshot_with_count(close_time_ms: int, closed: bool, count: int) -> BinanceKlineSnapshot:
+    base = _build_snapshot(close_time_ms, closed)
+    candles: list[BinanceCandle] = []
+    for idx in range(count):
+        shift = (count - idx) * 300_000
+        open_time = datetime.fromtimestamp((close_time_ms - shift) / 1000, tz=timezone.utc)
+        close_time = datetime.fromtimestamp((close_time_ms - shift + 300_000) / 1000, tz=timezone.utc)
+        candles.append(
+            BinanceCandle(
+                open_time=open_time,
+                open=100.0,
+                high=110.0,
+                low=95.0,
+                close=105.0,
+                volume=123.0,
+                close_time=close_time,
+            )
+        )
+    latest = candles[-1]
+    return base.model_copy(update={"candle": latest, "candles": candles, "kline_open_time_ms": int(latest.open_time.timestamp() * 1000), "kline_close_time_ms": int(latest.close_time.timestamp() * 1000)})
+
+
 def _trade_plan() -> TradePlan:
     return TradePlan(
         status=Status.TRADE,
@@ -277,6 +299,38 @@ def test_scheduler_trade_pipeline_creates_paper_trade(monkeypatch, tmp_path) -> 
         assert len(database.fetch_open_trades()) == 1
 
     asyncio.run(run())
+
+
+def test_scheduler_replay_requests_extended_history(monkeypatch) -> None:
+    capture: dict[str, int] = {}
+    snapshot = _build_snapshot_with_count(close_time_ms=9_000_000, closed=True, count=2700)
+
+    async def fake_fetch(*args, **kwargs):
+        capture["limit"] = int(kwargs["limit"])
+        capture["replay_history_limit"] = int(kwargs["replay_history_limit"])
+        return snapshot
+
+    monkeypatch.setattr(scheduler_module, "fetch_symbol_klines", fake_fetch)
+
+    settings = Settings(
+        run_mode="replay",
+        market_data_provider="replay",
+        telegram_enabled=False,
+        candle_interval="5m",
+        htf_bias_enabled=True,
+        htf_interval="1h",
+        warmup_min_bars_1h=220,
+        warmup_min_bars_5m=250,
+        _env_file=None,
+    )
+    scheduler = DecisionScheduler(settings, StateStore())
+
+    async def run():
+        await scheduler.run_once(force=True)
+
+    asyncio.run(run())
+    assert capture["replay_history_limit"] >= (220 * 12)
+    assert capture["limit"] >= capture["replay_history_limit"]
 
 
 def test_scheduler_dedupes_trades_per_candle(monkeypatch, tmp_path) -> None:

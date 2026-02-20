@@ -198,6 +198,21 @@ def test_zero_global_reentry_cooldown_allows_immediate_reentry_in_scalp_mode(tmp
     assert reopened is not None
 
 
+def test_usd_risk_overrides_pct_based_position_cap(tmp_path):
+    settings = _settings(tmp_path)
+    settings.account_size = 25_000
+    settings.risk_per_trade_usd = 100.0
+    settings.base_risk_pct = 0.0015
+    db = Database(settings)
+    trader = PaperTrader(settings, db)
+
+    capped_plan = _plan().model_copy(update={"position_size_usd": 37.5})
+    trade_id = trader.maybe_open_trade("ETHUSDT", capped_plan, allow_multiple=True)
+    assert trade_id is not None
+    trade = db.fetch_open_trades("ETHUSDT")[0]
+    assert trade.size == 10.0
+
+
 def test_risk_reduction_moves_stop_from_minus_1r_to_minus_target_r(tmp_path):
     settings = _settings(tmp_path)
     settings.risk_reduction_enabled = True

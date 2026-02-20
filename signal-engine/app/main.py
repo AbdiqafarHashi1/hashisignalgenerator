@@ -876,7 +876,11 @@ async def risk_summary(symbol: str = Query(None)) -> dict[str, Any]:
     snapshot["open_positions"] = len(_require_database().fetch_open_trades())
     snapshot["blocked_premature_exits"] = settings.sweet8_blocked_close_total
     snapshot["daily_loss_pct"] = float(settings.max_daily_loss_pct or 0.0)
-    snapshot["risk_per_trade_pct"] = float(settings.base_risk_pct or 0.0)
+    configured_risk_usd = float(settings.risk_per_trade_usd or 0.0)
+    account_size = float(settings.account_size or 0.0)
+    snapshot["risk_per_trade_pct"] = (
+        (configured_risk_usd / account_size) if configured_risk_usd > 0 and account_size > 0 else float(settings.base_risk_pct or 0.0)
+    )
     return snapshot
 
 

@@ -108,8 +108,12 @@ class PaperTrader:
                 min_score = self._settings.sweet8_swing_min_score
             if score < min_score:
                 return None
-            risk_pct = min(self._settings.sweet8_base_risk_pct, self._settings.sweet8_max_risk_pct)
             configured_risk_usd = float(getattr(self._settings, "risk_per_trade_usd", 0.0) or 0.0)
+            risk_pct = (
+                configured_risk_usd / float(self._settings.account_size or 0.0)
+                if configured_risk_usd > 0 and float(self._settings.account_size or 0.0) > 0
+                else min(self._settings.sweet8_base_risk_pct, self._settings.sweet8_max_risk_pct)
+            )
             risk_usd = configured_risk_usd if configured_risk_usd > 0 else (self._settings.account_size * risk_pct)
             size = (risk_usd / sl_distance) if sl_distance > 0 else 0.0
             if size <= 0:
@@ -148,7 +152,9 @@ class PaperTrader:
         entry_with_costs = self._apply_entry_price(side, entry)
         configured_risk_usd = float(getattr(self._settings, "risk_per_trade_usd", 0.0) or 0.0)
         applied_risk_pct = float(plan.risk_pct_used or self._settings.base_risk_pct or 0.0)
-        if self._settings.prop_governor_enabled:
+        if configured_risk_usd > 0 and float(self._settings.account_size or 0.0) > 0:
+            applied_risk_pct = configured_risk_usd / float(self._settings.account_size)
+        elif self._settings.prop_governor_enabled:
             row = self._db.get_runtime_state("prop.governor")
             if row and row.value_text:
                 try:
@@ -159,7 +165,7 @@ class PaperTrader:
         risk_usd = configured_risk_usd if configured_risk_usd > 0 else (self._settings.account_size * applied_risk_pct)
         stop_distance = abs(entry_with_costs - stop)
         size = (risk_usd / stop_distance) if stop_distance > 0 else 0.0
-        if plan.position_size_usd:
+        if plan.position_size_usd and configured_risk_usd <= 0:
             size = min(size, float(plan.position_size_usd) / entry_with_costs)
         if size <= 0:
             return None

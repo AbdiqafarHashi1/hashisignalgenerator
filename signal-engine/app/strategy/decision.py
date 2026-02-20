@@ -177,8 +177,14 @@ def decide(request: DecisionRequest, state: StateStore, cfg: Settings) -> TradeP
     target_r = 3.0 if regime.confidence >= 0.75 and sig.playbook.value == "TREND_PULLBACK" else sig.target_r
     tp = sig.entry + (risk * target_r) if sig.side == "long" else sig.entry - (risk * target_r)
     direction = Direction.long if sig.side == "long" else Direction.short
-    risk_pct = min(float(cfg.max_risk_pct or cfg.base_risk_pct or 0.0), float((cfg.base_risk_pct or 0.0) * risk_mult))
-    size = float(cfg.account_size or 0.0) * risk_pct
+    configured_risk_usd = float(cfg.risk_per_trade_usd or 0.0)
+    account_size = float(cfg.account_size or 0.0)
+    if configured_risk_usd > 0:
+        risk_pct = (configured_risk_usd / account_size) if account_size > 0 else 0.0
+        size = configured_risk_usd
+    else:
+        risk_pct = min(float(cfg.max_risk_pct or cfg.base_risk_pct or 0.0), float((cfg.base_risk_pct or 0.0) * risk_mult))
+        size = account_size * risk_pct
 
     return TradePlan(
         status=Status.TRADE,

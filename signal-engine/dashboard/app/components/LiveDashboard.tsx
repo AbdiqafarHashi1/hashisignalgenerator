@@ -549,7 +549,7 @@ function Kpi({
   tier?: "a" | "b" | "c";
   cardClass?: string;
 }) {
-  const sizeClass = tier === "a" ? "text-4xl" : tier === "b" ? "text-3xl" : "text-xl";
+  const sizeClass = tier === "a" ? "text-2xl sm:text-3xl lg:text-4xl" : tier === "b" ? "text-2xl sm:text-3xl" : "text-lg sm:text-xl";
   return (
     <Card className={`h-full p-4 ${cardClass}`}>
       {loading ? (
@@ -557,7 +557,7 @@ function Kpi({
       ) : (
         <>
           <p className="text-[11px] text-slate-400/80">{label}</p>
-          <p className={`mt-1 font-mono ${sizeClass} font-semibold leading-tight tabular-nums text-slate-50 ${valueClass}`}>{value}</p>
+          <p className={`mt-1 overflow-hidden text-ellipsis whitespace-nowrap font-mono ${sizeClass} font-semibold leading-tight tabular-nums text-slate-50 ${valueClass}`} title={value}>{value}</p>
         </>
       )}
     </Card>

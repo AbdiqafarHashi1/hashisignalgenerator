@@ -1066,31 +1066,34 @@ class DecisionScheduler:
 
     async def _run_loop(self) -> None:
         logger.info("scheduler_loop_start")
-        replay_steps_per_cycle = max(1, int(round(float(self._settings.market_data_replay_speed or 1.0))))
+        replay_speed = max(0.1, float(self._settings.market_data_replay_speed or 1.0))
+        replay_pause_seconds = 1.0 / replay_speed
+        progress_log_every = max(50, int(replay_speed * 25))
         while not self._stop_event.is_set():
-            logger.info("scheduler_loop_tick_start")
             try:
                 heartbeat_age = time.monotonic() - self._last_heartbeat_monotonic
                 if heartbeat_age > max(5.0, self._interval * 3):
                     self._stall_recoveries += 1
                     logger.error("scheduler_watchdog_stall_detected age=%.2fs recoveries=%s", heartbeat_age, self._stall_recoveries)
-                steps_this_cycle = replay_steps_per_cycle if self._settings.run_mode == "replay" else 1
-                for _ in range(steps_this_cycle):
-                    await self.run_once()
-                    if self._settings.run_mode == "replay":
-                        closed = len([trade for trade in self._database.fetch_trades() if getattr(trade, "closed_at", None)]) if self._database is not None else 0
-                        if closed >= max(1, self._settings.replay_max_trades):
-                            self._stop_reason = "replay_max_trades_reached"
-                            self._stop_event.set()
-                            break
-                        if self._replay_bars_processed >= max(1, self._settings.replay_max_bars):
-                            self._stop_reason = "replay_max_bars_reached"
-                            self._stop_event.set()
-                            break
-                if self._stop_event.is_set():
-                    break
+                await self.run_once()
+                if self._settings.run_mode == "replay":
+                    closed = len([trade for trade in self._database.fetch_trades() if getattr(trade, "closed_at", None)]) if self._database is not None else 0
+                    if closed >= max(1, self._settings.replay_max_trades):
+                        self._stop_reason = "replay_max_trades_reached"
+                        self._stop_event.set()
+                        break
+                    if self._replay_bars_processed >= max(1, self._settings.replay_max_bars):
+                        self._stop_reason = "replay_max_bars_reached"
+                        self._stop_event.set()
+                        break
+                    if self._replay_bars_processed % progress_log_every == 0:
+                        logger.info(
+                            "replay_progress bars_processed=%s replay_max_bars=%s replay_speed=%s",
+                            self._replay_bars_processed,
+                            self._settings.replay_max_bars,
+                            replay_speed,
+                        )
                 self._consecutive_failures = 0
-                logger.info("scheduler_loop_tick_end status=ok")
             except Exception as exc:
                 self._consecutive_failures += 1
                 backoff_seconds = self._compute_backoff_seconds(self._consecutive_failures)
@@ -1107,7 +1110,13 @@ class DecisionScheduler:
                     continue
                 break
             if self._settings.run_mode == "replay":
-                await self._clock.sleep(0) if self._clock is not None else asyncio.sleep(0)
+                try:
+                    if replay_pause_seconds > 0:
+                        await asyncio.wait_for(self._stop_event.wait(), timeout=replay_pause_seconds)
+                    else:
+                        await asyncio.sleep(0)
+                except asyncio.TimeoutError:
+                    pass
                 continue
             try:
                 await asyncio.wait_for(self._stop_event.wait(), timeout=self._interval)

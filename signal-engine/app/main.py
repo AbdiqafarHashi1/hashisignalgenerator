@@ -499,16 +499,42 @@ async def health() -> dict[str, Any]:
     except Exception as exc:
         cfg_errors.append(str(exc))
     cfg = _require_settings()
+    sch = _require_scheduler()
     return {
+        "ok": True,
         "status": "ok",
-        "config_errors": cfg_errors,
+        "mode": cfg.run_mode,
+        "provider": cfg.market_data_provider,
         "provider_type": cfg.market_data_provider,
+        "replay_running": sch.replay_active,
+        "version": "1",
+        "config_errors": cfg_errors,
         "config_summary": {
             "run_mode": cfg.run_mode,
             "symbols": cfg.symbols,
             "candle_interval": cfg.candle_interval,
             "replay_path": cfg.market_data_replay_path,
         },
+    }
+
+
+
+
+@app.get("/settings")
+async def settings_payload() -> dict[str, Any]:
+    cfg = _require_settings()
+    symbol = cfg.symbols[0] if cfg.symbols else "ETHUSDT"
+    interval = cfg.candle_interval or "5m"
+    data_range = replay_validate_dataset(
+        cfg.market_data_replay_path,
+        symbol,
+        interval,
+        start_ts=cfg.replay_start_ts,
+        end_ts=cfg.replay_end_ts,
+    ) if cfg.run_mode == "replay" else None
+    return {
+        "effective": cfg.resolved_settings(),
+        "data_range": data_range,
     }
 
 
@@ -563,7 +589,7 @@ async def start_scheduler() -> dict[str, str]:
     cfg = _require_settings()
     if cfg.run_mode == "replay":
         try:
-            replay_validate_dataset(cfg.market_data_replay_path, cfg.symbols[0], cfg.candle_interval or "3m")
+            replay_validate_dataset(cfg.market_data_replay_path, cfg.symbols[0], cfg.candle_interval or "3m", start_ts=cfg.replay_start_ts, end_ts=cfg.replay_end_ts)
             replay_last_error = None
         except ReplayDatasetError as exc:
             replay_last_error = str(exc)
@@ -606,11 +632,13 @@ async def engine_stop() -> dict[str, str]:
 
 
 @app.post("/engine/replay/start")
+@app.post("/replay/start")
 async def engine_replay_start() -> dict[str, str]:
     return await start_scheduler()
 
 
 @app.post("/engine/replay/stop")
+@app.post("/replay/stop")
 async def engine_replay_stop() -> dict[str, str]:
     return await stop_scheduler()
 
@@ -686,6 +714,7 @@ async def replay_progress() -> dict[str, Any]:
         "bars_processed": bars_processed,
         "total_bars": total_bars,
         "trades_closed": trades_closed,
+        "speed": float(cfg.market_data_replay_speed or 1.0),
         "candles_loaded_5m_count": snapshot.get("candles_loaded_5m_count", bars_processed),
         "candles_loaded_htf_count": snapshot.get("candles_loaded_htf_count", 0),
         "warmup_status": warmup_meta,
@@ -1479,6 +1508,7 @@ async def debug_smoke_run_full_cycle(payload: DebugSmokeCycleRequest) -> dict:
     }
 
 
+@app.post("/storage/reset")
 @app.post("/debug/storage/reset")
 async def debug_storage_reset() -> dict:
     payload = await challenge_reset()

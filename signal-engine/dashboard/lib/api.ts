@@ -145,19 +145,26 @@ export async function apiFetch<T>(
   options: RequestInit = {}
 ): Promise<T> {
   const url = `${API_BASE}${path}`;
+  const timeoutMs = 5000;
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
   let response: Response;
   try {
     response = await fetch(url, {
       ...options,
+      signal: controller.signal,
       headers: {
         "Content-Type": "application/json",
         ...(options.headers ?? {}),
       },
     });
   } catch (error) {
-    const message = error instanceof Error ? error.message : "Failed to fetch";
+    const aborted = error instanceof Error && error.name === "AbortError";
+    const message = aborted ? `Request timed out after ${timeoutMs}ms` : error instanceof Error ? error.message : "Failed to fetch";
     const apiError: ApiError = { status: 0, message, url };
     throw apiError;
+  } finally {
+    clearTimeout(timeout);
   }
 
   if (!response.ok) {

@@ -913,6 +913,12 @@ class DecisionScheduler:
                     if plan is not None and isinstance(plan.raw_input_snapshot, dict)
                     else None
                 ),
+                "regime": (plan.raw_input_snapshot.get("regime") if plan is not None and isinstance(plan.raw_input_snapshot, dict) else None),
+                "bias": (plan.raw_input_snapshot.get("bias") if plan is not None and isinstance(plan.raw_input_snapshot, dict) else None),
+                "confidence": (plan.raw_input_snapshot.get("confidence") if plan is not None and isinstance(plan.raw_input_snapshot, dict) else None),
+                "entry_reasons": (plan.raw_input_snapshot.get("entry_reasons") if plan is not None and isinstance(plan.raw_input_snapshot, dict) else None),
+                "entry_block_reasons": (plan.raw_input_snapshot.get("entry_block_reasons") if plan is not None and isinstance(plan.raw_input_snapshot, dict) else None),
+                "equity_state": (plan.raw_input_snapshot.get("equity_state") if plan is not None and isinstance(plan.raw_input_snapshot, dict) else None),
                 "provider": getattr(snapshot, "provider_name", "bybit"),
                 "last_candle_age_seconds": max(0.0, (now_ms - snapshot.kline_close_time_ms) / 1000.0),
                 "market_data_status": "OK",

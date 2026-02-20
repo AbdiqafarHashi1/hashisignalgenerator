@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from typing import Any
 
 
 from ..config import Settings
@@ -16,6 +17,80 @@ from signal_engine.strategy.entries import evaluate_entries
 class PipelineBlocker:
     layer: str
     code: str
+
+
+@dataclass(frozen=True)
+class WarmupStatus:
+    ready: bool
+    bars_5m_have: int
+    bars_5m_need: int
+    bars_htf_have: int
+    bars_htf_need: int
+    missing_components: list[str]
+
+
+def _aggregate_closes_for_interval(candles: list[Any], interval: str) -> list[float]:
+    normalized = (interval or "").strip().lower()
+    if normalized not in {"1h", "60m"}:
+        return []
+    if len(candles) < 12:
+        return []
+    closes = [float(item.close) for item in candles]
+    return [closes[idx] for idx in range(11, len(closes), 12)]
+
+
+def required_warmup_bars_5m(cfg: Settings) -> int:
+    component_needs = [
+        int(cfg.strategy_bias_ema_slow) + 2,
+        (int(cfg.scalp_atr_period) * 2) + 1,
+        (int(cfg.adx_period) * 2) + 1,
+    ]
+    if cfg.scalp_regime_enabled:
+        component_needs.append(max(int(cfg.scalp_ema_slow) * 3, 300))
+    return max(int(cfg.warmup_min_bars_5m), *component_needs)
+
+
+def required_warmup_bars_htf(cfg: Settings) -> int:
+    htf_default = max(int(cfg.htf_ema_slow) + 20, 220)
+    return max(int(cfg.warmup_min_bars_1h), int(cfg.htf_ema_slow) + 2, htf_default)
+
+
+def evaluate_warmup_status(candles: list[Any], cfg: Settings) -> WarmupStatus:
+    bars_5m_have = len(candles)
+    bars_5m_need = required_warmup_bars_5m(cfg)
+    missing_components: list[str] = []
+    if bars_5m_have < int(cfg.warmup_min_bars_5m):
+        missing_components.append("ema_slow")
+    if bars_5m_have < (int(cfg.scalp_atr_period) * 2) + 1:
+        missing_components.append("atr")
+    if bars_5m_have < (int(cfg.adx_period) * 2) + 1:
+        missing_components.append("adx")
+    regime_window_5m = max(int(cfg.scalp_ema_slow) * 3, 300)
+    if cfg.scalp_regime_enabled and bars_5m_have < regime_window_5m:
+        missing_components.append("regime_percentile")
+
+    htf_required = bool(cfg.htf_bias_enabled)
+    if cfg.warmup_ignore_htf_if_disabled and not cfg.htf_bias_enabled:
+        htf_required = False
+
+    bars_htf_have = 0
+    bars_htf_need = 0
+    if htf_required:
+        htf_closes = _aggregate_closes_for_interval(candles, cfg.htf_interval)
+        bars_htf_have = len(htf_closes)
+        bars_htf_need = required_warmup_bars_htf(cfg)
+        if bars_htf_have < bars_htf_need:
+            missing_components.append("htf_ema")
+
+    ready = bars_5m_have >= bars_5m_need and (not htf_required or bars_htf_have >= bars_htf_need)
+    return WarmupStatus(
+        ready=ready,
+        bars_5m_have=bars_5m_have,
+        bars_5m_need=bars_5m_need,
+        bars_htf_have=bars_htf_have,
+        bars_htf_need=bars_htf_need,
+        missing_components=sorted(set(missing_components)),
+    )
 
 
 def choose_effective_blocker(*, terminal: str | None = None, governor: str | None = None, risk: str | None = None, strategy: str | None = None) -> tuple[PipelineBlocker | None, list[PipelineBlocker]]:
@@ -47,8 +122,18 @@ def decide(request: DecisionRequest, state: StateStore, cfg: Settings) -> TradeP
     allowed, risk_status, risk_reasons = state.check_limits(symbol, cfg, now)
     if not allowed:
         return _skip_plan(request, Posture.RISK_OFF, risk_status, *risk_reasons)
-    if len(candles) < 220:
-        return _skip_plan(request, Posture.NORMAL, Status.NO_TRADE, "insufficient_candles")
+    warmup = evaluate_warmup_status(candles, cfg)
+    warmup_gate_enabled = not (cfg.run_mode == "replay" and not cfg.warmup_require_replay_ready)
+    if warmup_gate_enabled and not warmup.ready:
+        details: dict[str, object] = {
+            "bars_5m_have": warmup.bars_5m_have,
+            "bars_5m_need": warmup.bars_5m_need,
+            "missing_components": warmup.missing_components,
+        }
+        if cfg.htf_bias_enabled:
+            details["bars_htf_have"] = warmup.bars_htf_have
+            details["bars_htf_need"] = warmup.bars_htf_need
+        return _skip_plan(request, Posture.NORMAL, Status.NO_TRADE, "insufficient_candles", details)
 
     rows = [c.model_dump() for c in candles]
     feats = compute_features(rows, ema_fast=cfg.strategy_bias_ema_fast, ema_slow=cfg.strategy_bias_ema_slow)

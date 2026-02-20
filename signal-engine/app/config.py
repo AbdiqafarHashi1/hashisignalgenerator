@@ -120,6 +120,22 @@ class Settings(BaseSettings):
         False,
         validation_alias=AliasChoices("HTF_BIAS_REQUIRE_SLOPE", "htf_bias_require_slope"),
     )
+    warmup_min_bars_5m: int = Field(
+        250,
+        validation_alias=AliasChoices("WARMUP_MIN_BARS_5M", "warmup_min_bars_5m"),
+    )
+    warmup_min_bars_1h: int = Field(
+        220,
+        validation_alias=AliasChoices("WARMUP_MIN_BARS_1H", "warmup_min_bars_1h"),
+    )
+    warmup_ignore_htf_if_disabled: bool = Field(
+        True,
+        validation_alias=AliasChoices("WARMUP_IGNORE_HTF_IF_DISABLED", "warmup_ignore_htf_if_disabled"),
+    )
+    warmup_require_replay_ready: bool = Field(
+        True,
+        validation_alias=AliasChoices("WARMUP_REQUIRE_REPLAY_READY", "warmup_require_replay_ready"),
+    )
     trigger_body_ratio_min: float = Field(0.0, validation_alias=AliasChoices("TRIGGER_BODY_RATIO_MIN", "trigger_body_ratio_min"))
     trigger_close_location_min: float = Field(
         0.0,

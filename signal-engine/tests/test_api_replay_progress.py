@@ -35,6 +35,10 @@ def test_replay_progress_endpoint(monkeypatch, tmp_path: Path) -> None:
         payload = resp.json()
         assert payload["bars_processed"] >= 1
         assert payload["total_bars"] >= payload["bars_processed"]
+        assert payload["replay_start_ts"]
+        assert payload["replay_end_ts"]
+        assert "candles_loaded_5m_count" in payload
+        assert "warmup_status" in payload
 
 
 def test_health_has_provider_summary(monkeypatch, tmp_path: Path) -> None:

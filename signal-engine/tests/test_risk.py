@@ -39,9 +39,9 @@ def test_manual_kill_switch_locks_state() -> None:
 
 def test_risk_env_knobs_override_defaults(monkeypatch) -> None:
     monkeypatch.setenv("ACCOUNT_SIZE", "5000")
-    monkeypatch.setenv("BASE_RISK_PCT", "0.01")
+    monkeypatch.setenv("PROP_RISK_BASE_PCT", "0.01")
     cfg = Settings(_env_file=None)
-    risk = position_size(100.0, 99.0, cfg.base_risk_pct, cfg)
+    risk = position_size(100.0, 99.0, cfg.prop_risk_base_pct, cfg)
     assert risk.position_size_usd > 0
     assert cfg.account_size == 5000
-    assert cfg.base_risk_pct == 0.01
+    assert cfg.prop_risk_base_pct == 0.01

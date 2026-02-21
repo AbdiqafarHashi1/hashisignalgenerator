@@ -421,9 +421,11 @@ Replay controls:
 
 - `REPLAY_MAX_TRADES` (default `120`)
 - `REPLAY_MAX_BARS` (default `5000`)
-- `REPLAY_START_TS` (optional)
+- `REPLAY_START_TS` (optional, ISO 8601 including `Z`)
 - `REPLAY_END_TS` (optional)
-- `REPLAY_RESUME` (default `false`; when `false` replay runtime state is never read/written)
+- `REPLAY_RESUME` (default `false`)
+  - `true`: if a valid runtime cursor exists it wins over `REPLAY_START_TS`.
+  - `false`: runtime cursor files are ignored and replay is anchored by `REPLAY_START_TS` or CSV start fallback.
 - `REPLAY_SEED` (optional)
 
 Engine control endpoints:
@@ -437,12 +439,19 @@ Engine control endpoints:
 - `run_mode`
 - `replay` object with progress (`bar_index`, `total_bars`, `progress_pct`, `max_trades`, `trades_so_far`, etc.)
 
-`GET /debug/runtime` now reports replay precedence and warmup anchors:
+`GET /debug/runtime` reports replay precedence and warmup anchors:
 
-- `trade_start_ts`: user-intended replay start (`REPLAY_START_TS` when set).
-- `history_preload_start_ts`: warmup preload start used only for indicator history.
+- `trade_start_ts`: actual trading anchor. Resolved once at init with precedence `resume_enabled > start_ts_used > csv_first_ts_fallback`.
+- `history_preload_start_ts`: warmup preload anchor used only to load indicator history; it can be earlier than `trade_start_ts`.
+- `effective_replay_start_ts`: resolved trading anchor used by the replay cursor (never null after resolution).
 - `warmup_ready_at_ts`: first bar where full warmup windows are satisfied.
+- `why_start_ts_overridden`: explicit reason (`resume_enabled`, `start_ts_used`, or `csv_first_ts_fallback`).
 - `replay_resume_files_in_use.enabled`: whether resume override is active (`REPLAY_RESUME=true`).
+
+Notes:
+- `REPLAY_START_TS` picks the first candle timestamp `>= REPLAY_START_TS` in the replay interval series.
+- If `REPLAY_START_TS` is before dataset start, engine falls back to the CSV first candle and reports `csv_first_ts_fallback`.
+- If `REPLAY_START_TS` is after dataset end, startup raises `replay_start_ts_out_of_range`.
 
 ### Run replay locally (100+ trades)
 ```bash

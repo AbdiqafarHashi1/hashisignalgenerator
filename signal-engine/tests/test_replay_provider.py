@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
+import pytest
 
-from app.providers.replay import ReplayProvider
+from app.providers.replay import ReplayDatasetError, ReplayProvider
 
 
 def test_replay_provider_advances_cursor() -> None:
@@ -61,12 +62,12 @@ def test_replay_resume_state_ignored_when_disabled(tmp_path: Path) -> None:
     provider = ReplayProvider(str(replay_root), resume_enabled=False)
 
     async def run() -> None:
-        snap = await provider.fetch_symbol_klines("BTCUSDT", "5m", limit=2, speed=1.0, start_ts="2024-01-01T00:00:00+00:00")
+        snap = await provider.fetch_symbol_klines("BTCUSDT", "5m", limit=2, speed=1.0, start_ts="2024-01-01T00:05:00+00:00")
         assert snap.candle.close_time.isoformat() == "2024-01-01T00:10:00+00:00"
         status = provider.status("BTCUSDT", "5m")
-        assert status["start_resolution"]["why_start_ts_overridden"] == "none"
+        assert status["start_resolution"]["why_start_ts_overridden"] == "start_ts_used"
         assert status["start_resolution"]["trade_start_ts"] == "2024-01-01T00:05:00+00:00"
-        assert status["start_resolution"]["selection_logic"] == "REPLAY_START_TS > CSV bounds (resume disabled)"
+        assert status["start_resolution"]["selection_logic"] == "REPLAY_START_TS >= first candle > csv_first_ts_fallback"
 
     asyncio.run(run())
 
@@ -90,12 +91,73 @@ def test_replay_resume_state_overrides_start_ts_when_enabled(tmp_path: Path) -> 
     provider = ReplayProvider(str(replay_root), resume_enabled=True)
 
     async def run() -> None:
-        snap = await provider.fetch_symbol_klines("BTCUSDT", "5m", limit=2, speed=1.0, start_ts="2024-01-01T00:00:00+00:00")
+        snap = await provider.fetch_symbol_klines("BTCUSDT", "5m", limit=2, speed=1.0, start_ts="2024-01-01T00:05:00+00:00")
         assert snap.candle.close_time.isoformat() >= "2024-01-01T00:10:00+00:00"
         status = provider.status("BTCUSDT", "5m")
-        assert status["start_resolution"]["why_start_ts_overridden"] == "resume_state_override"
+        assert status["start_resolution"]["why_start_ts_overridden"] == "resume_enabled"
         assert status["start_resolution"]["trade_start_ts"] == "2024-01-01T00:05:00+00:00"
-        assert status["start_resolution"]["selection_logic"] == "resume cursor/state > REPLAY_START_TS > CSV bounds"
+        assert status["start_resolution"]["selection_logic"] == "resume cursor/state > REPLAY_START_TS >= first candle > csv_first_ts_fallback"
+
+    asyncio.run(run())
+
+
+def test_replay_start_ts_anchors_to_first_candle_at_or_after_requested_ts(tmp_path: Path) -> None:
+    replay_root = tmp_path / "replay"
+    symbol_dir = replay_root / "BTCUSDT"
+    symbol_dir.mkdir(parents=True, exist_ok=True)
+    (symbol_dir / "5m.csv").write_text(
+        "timestamp,open,high,low,close,volume,close_time\n"
+        "2024-06-01T00:00:00+00:00,1,1,1,1,1,2024-06-01T00:05:00+00:00\n"
+        "2024-06-01T00:05:00+00:00,1,1,1,1,1,2024-06-01T00:10:00+00:00\n"
+        "2024-06-01T00:10:00+00:00,1,1,1,1,1,2024-06-01T00:15:00+00:00\n",
+        encoding="utf-8",
+    )
+    provider = ReplayProvider(str(replay_root), resume_enabled=False)
+
+    async def run() -> None:
+        snap = await provider.fetch_symbol_klines("BTCUSDT", "5m", limit=2, speed=1.0, start_ts="2024-06-01T00:06:00Z")
+        assert snap.cursor_index == 1
+        assert snap.candle.close_time.isoformat() == "2024-06-01T00:10:00+00:00"
+
+    asyncio.run(run())
+
+
+def test_replay_start_ts_before_first_candle_falls_back_to_csv_start(tmp_path: Path) -> None:
+    replay_root = tmp_path / "replay"
+    symbol_dir = replay_root / "BTCUSDT"
+    symbol_dir.mkdir(parents=True, exist_ok=True)
+    (symbol_dir / "5m.csv").write_text(
+        "timestamp,open,high,low,close,volume,close_time\n"
+        "2024-06-01T00:00:00+00:00,1,1,1,1,1,2024-06-01T00:05:00+00:00\n"
+        "2024-06-01T00:05:00+00:00,1,1,1,1,1,2024-06-01T00:10:00+00:00\n",
+        encoding="utf-8",
+    )
+    provider = ReplayProvider(str(replay_root), resume_enabled=False)
+
+    async def run() -> None:
+        await provider.fetch_symbol_klines("BTCUSDT", "5m", limit=2, speed=1.0, start_ts="2024-05-31T12:00:00Z")
+        status = provider.status("BTCUSDT", "5m")
+        resolution = status["start_resolution"]
+        assert resolution["trade_start_ts"] == "2024-06-01T00:05:00+00:00"
+        assert resolution["why_start_ts_overridden"] == "csv_first_ts_fallback"
+
+    asyncio.run(run())
+
+
+def test_replay_start_ts_after_last_candle_raises_clear_error(tmp_path: Path) -> None:
+    replay_root = tmp_path / "replay"
+    symbol_dir = replay_root / "BTCUSDT"
+    symbol_dir.mkdir(parents=True, exist_ok=True)
+    (symbol_dir / "5m.csv").write_text(
+        "timestamp,open,high,low,close,volume,close_time\n"
+        "2024-06-01T00:00:00+00:00,1,1,1,1,1,2024-06-01T00:05:00+00:00\n",
+        encoding="utf-8",
+    )
+    provider = ReplayProvider(str(replay_root), resume_enabled=False)
+
+    async def run() -> None:
+        with pytest.raises(ReplayDatasetError, match="replay_start_ts_out_of_range"):
+            await provider.fetch_symbol_klines("BTCUSDT", "5m", limit=2, speed=1.0, start_ts="2024-06-01T01:00:00Z")
 
     asyncio.run(run())
 

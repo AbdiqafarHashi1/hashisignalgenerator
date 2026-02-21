@@ -12,6 +12,7 @@ from signal_engine.features import compute_features
 from signal_engine.regime import Bias, Regime, classify_regime
 from signal_engine.strategy.entries import evaluate_entries
 from ..utils.intervals import interval_to_ms
+from . import scalper as scalper_engine
 
 
 @dataclass(frozen=True)
@@ -127,6 +128,57 @@ def _equity_state(state: StateStore, symbol: str, cfg: Settings, now: datetime) 
     return "NEUTRAL", 1.0, "balanced"
 
 
+
+
+def _decide_legacy(request: DecisionRequest, cfg: Settings) -> TradePlan:
+    candles = request.candles or []
+    if len(candles) < 2:
+        return _skip_plan(request, Posture.NORMAL, Status.NO_TRADE, "insufficient_candles")
+
+    market = request.market
+    if abs(float(market.funding_rate or 0.0)) >= 0.04 or float(market.leverage_ratio or 0.0) >= 3.0:
+        return _skip_plan(request, Posture.RISK_OFF, Status.RISK_OFF, "extreme_market")
+
+    if not cfg.debug_loosen and int(cfg.adx_threshold or 0) >= 50 and not scalper_engine.momentum_ok(candles, cfg):
+        return _skip_plan(request, Posture.RISK_OFF, Status.RISK_OFF, "no_momentum")
+
+    trend, ema = scalper_engine.trend_direction(candles, cfg.ema_length)
+    direction = request.tradingview.direction_hint if request.tradingview.direction_hint != Direction.none else Direction.long
+    if cfg.scalp_trend_filter_enabled and trend is not None and trend != direction:
+        return _skip_plan(request, Posture.RISK_OFF, Status.RISK_OFF, "no_trigger")
+
+    trigger_ok = False
+    if cfg.debug_loosen:
+        trigger_ok = True
+    elif ema is not None:
+        trigger_ok = scalper_engine.pullback_continuation_trigger(candles, direction, ema, cfg) or scalper_engine.breakout_expansion_trigger(candles, direction, cfg)
+    if not trigger_ok and len(candles) >= 2:
+        prev = candles[-2]
+        cur = candles[-1]
+        if (direction == Direction.long and cur.close > prev.high) or (direction == Direction.short and cur.close < prev.low):
+            trigger_ok = True
+    if not trigger_ok:
+        return _skip_plan(request, Posture.NORMAL, Status.NO_TRADE, "no_valid_setup")
+
+    signal_score = 70
+    if signal_score < int(cfg.min_signal_score or 0):
+        return _skip_plan(request, Posture.NORMAL, Status.NO_TRADE, "score_below_min")
+
+    levels = scalper_engine.build_trade_levels(candles, direction, cfg, "pullback_continuation")
+    return TradePlan(
+        status=Status.TRADE,
+        direction=direction,
+        entry_zone=levels.entry_zone,
+        stop_loss=levels.stop_loss,
+        take_profit=levels.take_profit,
+        risk_pct_used=float(cfg.base_risk_pct or 0.0),
+        position_size_usd=float(cfg.account_size or 0.0) * float(cfg.base_risk_pct or 0.0),
+        signal_score=signal_score,
+        posture=Posture.NORMAL,
+        rationale=["legacy_scalper"],
+        raw_input_snapshot={"strategy": cfg.strategy},
+    )
+
 def decide(request: DecisionRequest, state: StateStore, cfg: Settings) -> TradePlan:
     now = request.timestamp or datetime.now(timezone.utc)
     symbol = request.tradingview.symbol
@@ -135,8 +187,10 @@ def decide(request: DecisionRequest, state: StateStore, cfg: Settings) -> TradeP
     allowed, risk_status, risk_reasons = state.check_limits(symbol, cfg, now)
     if not allowed:
         return _skip_plan(request, Posture.RISK_OFF, risk_status, *risk_reasons)
+    if cfg.strategy in {"scalper", "baseline"}:
+        return _decide_legacy(request, cfg)
     warmup = evaluate_warmup_status(candles, cfg)
-    warmup_gate_enabled = not (cfg.run_mode == "replay" and not cfg.warmup_require_replay_ready)
+    warmup_gate_enabled = cfg.run_mode == "replay" and cfg.warmup_require_replay_ready
     if warmup_gate_enabled and not warmup.ready:
         details: dict[str, object] = {
             "bars_5m_have": warmup.bars_5m_have,

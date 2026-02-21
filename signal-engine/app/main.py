@@ -1344,7 +1344,9 @@ async def debug_runtime() -> dict[str, Any]:
     replay_provider_module = "app.providers.replay.ReplayProvider"
     start_resolution = replay_truth.get("start_resolution", {}) if isinstance(replay_truth, dict) else {}
     resume_file = replay_truth.get("resume_state_file") if isinstance(replay_truth, dict) else None
-    resume_in_use = bool(cfg.replay_resume and start_resolution.get("source") == "resume_state_override")
+    resolved_source = start_resolution.get("source") or "csv_first_ts_fallback"
+    resolved_effective_start_ts = start_resolution.get("effective_replay_start_ts") or replay_truth.get("current_ts") or replay_truth.get("first_ts")
+    resume_in_use = bool(cfg.replay_resume and resolved_source == "resume_enabled")
 
     db_url = cfg_db_path(cfg)
     sqlite_path = None
@@ -1365,6 +1367,23 @@ async def debug_runtime() -> dict[str, Any]:
 
     symbol_gate = symbols[0] if symbols else "BTCUSDT"
     return {
+        "settings": {
+            "profile": resolved.get("profile", resolved.get("PROFILE")),
+            "min_signal_score": cfg.min_signal_score,
+            "run_mode": cfg.run_mode,
+        },
+        "scheduler": {
+            "running": sch.running,
+            "last_tick_time": sch.last_tick_time().isoformat() if sch.last_tick_time() else None,
+            "tick_interval_seconds": sch.tick_interval,
+        },
+        "symbols": [
+            {
+                "symbol": symbol,
+                "candles_fetched_count": len((sch.last_snapshot(symbol).candles if sch.last_snapshot(symbol) else []) or []),
+            }
+            for symbol in symbols
+        ],
         "environment_settings_resolution": env_resolution,
         "effective_settings_snapshot": {"canonical": resolved, "aliases": aliases},
         "replay_state": {
@@ -1375,22 +1394,22 @@ async def debug_runtime() -> dict[str, Any]:
             "replay_resume_files_in_use": {
                 "enabled": cfg.replay_resume,
                 "files": [resume_file] if resume_in_use and resume_file else [],
-                "selection_logic": start_resolution.get("selection_logic", "REPLAY_START_TS > CSV bounds (resume disabled)"),
+                "selection_logic": start_resolution.get("selection_logic", "REPLAY_START_TS >= first candle > csv_first_ts_fallback"),
             },
             "trade_start_ts": start_resolution.get("trade_start_ts") or replay_truth.get("first_ts"),
             "history_preload_start_ts": start_resolution.get("history_preload_start_ts") or replay_truth.get("first_ts"),
             "warmup_ready_at_ts": start_resolution.get("warmup_ready_at_ts"),
             "warmup_missing_bars": start_resolution.get("warmup_missing_bars", 0),
-            "effective_replay_start_ts": start_resolution.get("effective_replay_start_ts"),
-            "why_start_ts_overridden": start_resolution.get("why_start_ts_overridden", "none"),
+            "effective_replay_start_ts": resolved_effective_start_ts,
+            "why_start_ts_overridden": start_resolution.get("why_start_ts_overridden", resolved_source),
             "replay_pointer_now": {
                 "engine_time": _runtime_now().isoformat(),
                 "cursor_index": replay_truth.get("bar_index"),
                 "last_processed_timestamp": replay_truth.get("current_ts"),
             },
             "truth_precedence": {
-                "replay_resume": "resume cursor/state can override REPLAY_START_TS" if cfg.replay_resume else "resume disabled; REPLAY_START_TS anchors trade_start_ts",
-                "trade_start_ts": start_resolution.get("source", "csv_first_ts"),
+                "replay_resume": "resume_enabled > start_ts_used > csv_first_ts_fallback" if cfg.replay_resume else "start_ts_used > csv_first_ts_fallback (resume disabled)",
+                "trade_start_ts": resolved_source,
                 "warmup": "history_preload_start_ts is used for indicators only; trade_start_ts remains user anchor",
             },
         },
@@ -1504,6 +1523,10 @@ async def debug_kline(interval: str = Query("5m")) -> dict[str, Any]:
                 backoff_max_ms=settings.market_data_backoff_max_ms,
                 replay_path=settings.market_data_replay_path,
                 replay_speed=settings.market_data_replay_speed,
+                replay_start_ts=settings.replay_start_ts,
+                replay_end_ts=settings.replay_end_ts,
+                replay_history_limit=getattr(settings, "replay_history_limit", None),
+                replay_resume=settings.replay_resume,
             )
         except Exception as exc:
             error = type(exc).__name__

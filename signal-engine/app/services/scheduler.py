@@ -980,6 +980,26 @@ class DecisionScheduler:
                 "market_data_status": "OK",
             }
             self._state.set_decision_meta(symbol, decision_meta)
+            self._state.record_gate_event(
+                symbol,
+                {
+                    "ts": tick_ts.isoformat(),
+                    "decision": decision,
+                    "pass": decision != "skip",
+                    "final_entry_gate": final_entry_gate,
+                    "regime_dead": "regime_dead" in (plan.rationale if plan is not None else []),
+                    "range_reversion_not_ready": "range_reversion_not_ready" in (plan.rationale if plan is not None else []),
+                    "rationale": list(plan.rationale) if plan is not None else [],
+                    "metrics": {
+                        "atr_pct": decision_meta.get("atr_pct"),
+                        "ema_fast": decision_meta.get("ema_fast"),
+                        "ema_slow": decision_meta.get("ema_slow"),
+                        "ema_trend": decision_meta.get("ema_trend"),
+                        "trend_strength": decision_meta.get("trend_strength"),
+                        "signal_score": decision_meta.get("signal_score"),
+                    },
+                },
+            )
             if decision == "skip":
                 self._state.record_skip_reason(skip_reason)
                 self._log_skip_blocker(symbol, effective_blocker, tick_ts)

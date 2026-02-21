@@ -1,5 +1,6 @@
 ﻿from __future__ import annotations
 
+from collections import deque
 from datetime import datetime, timezone
 from threading import Lock
 
@@ -36,6 +37,7 @@ class StateStore:
         self._global_realized_pnl_usd: float = 0.0
         self._global_peak_equity_usd: float | None = None
         self._market_data_errors: dict[str, int] = {}
+        self._gate_events: dict[str, deque[dict[str, object]]] = {}
         self._clock = lambda: datetime.now(timezone.utc)
 
     def set_clock(self, clock_fn) -> None:
@@ -193,6 +195,16 @@ class StateStore:
         with self._lock:
             return dict(self._market_data_errors)
 
+    def record_gate_event(self, symbol: str, payload: dict[str, object], max_events: int = 50) -> None:
+        with self._lock:
+            queue = self._gate_events.setdefault(symbol, deque(maxlen=max_events))
+            queue.append(dict(payload))
+
+    def gate_events(self, symbol: str, limit: int = 50) -> list[dict[str, object]]:
+        with self._lock:
+            events = list(self._gate_events.get(symbol, deque()))
+        return events[-max(1, limit):]
+
     def reset(self) -> None:
         with self._lock:
             self._daily.clear()
@@ -208,6 +220,7 @@ class StateStore:
             self._global_realized_pnl_usd = 0.0
             self._global_peak_equity_usd = None
             self._market_data_errors.clear()
+            self._gate_events.clear()
 
     def risk_snapshot(self, symbol: str, cfg: Settings, now: datetime) -> dict[str, object]:
         state = self.get_daily_state(symbol, now)

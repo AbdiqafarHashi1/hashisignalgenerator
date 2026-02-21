@@ -354,3 +354,41 @@ def test_debug_storage_reset_clears_governor_lock(monkeypatch) -> None:
         allowed, reason = governor.allow_new_trade(now)
         assert allowed is True
         assert reason is None
+
+
+def test_debug_runtime_contains_truth_sections(monkeypatch) -> None:
+    main_module = _fresh_main(monkeypatch, {"RUN_MODE": "replay", "MODE": "paper", "ENGINE_MODE": "paper"})
+    with TestClient(main_module.app) as client:
+        payload = client.get("/debug/runtime").json()
+        assert "environment_settings_resolution" in payload
+        assert "replay_state" in payload
+        assert "database_truth" in payload
+        assert "risk_sizing_truth" in payload
+        assert "strategy_gating_blockers" in payload
+
+
+def test_debug_reset_does_not_delete_csv(monkeypatch, tmp_path) -> None:
+    data_dir = tmp_path / "data"
+    replay_dir = data_dir / "replay" / "BTCUSDT"
+    replay_dir.mkdir(parents=True, exist_ok=True)
+    csv_path = replay_dir / "5m.csv"
+    csv_path.write_text("timestamp,open,high,low,close,volume,close_time\n", encoding="utf-8")
+    state_path = data_dir / "replay_cursor.state"
+    state_path.write_text("x", encoding="utf-8")
+
+    main_module = _fresh_main(monkeypatch, {"DATA_DIR": str(data_dir), "MARKET_DATA_REPLAY_PATH": str(data_dir / "replay")})
+    with TestClient(main_module.app) as client:
+        resp = client.post("/debug/reset", json={"reset_replay_state": True, "dry_run": False})
+        assert resp.status_code == 200
+        assert csv_path.exists()
+        assert not state_path.exists()
+
+
+def test_debug_reset_clears_governor_row(monkeypatch) -> None:
+    main_module = _fresh_main(monkeypatch, {})
+    with TestClient(main_module.app) as client:
+        db = client.app.state.database
+        db.set_runtime_state("prop.governor", value_text='{"risk_pct":0.001}')
+        response = client.post("/debug/reset", json={"reset_governor_state": True, "dry_run": False})
+        assert response.status_code == 200
+        assert db.get_runtime_state("prop.governor") is None

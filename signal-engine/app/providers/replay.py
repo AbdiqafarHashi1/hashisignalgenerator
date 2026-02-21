@@ -55,6 +55,71 @@ class ReplayProvider:
         self._cache: dict[tuple[str, str], list[ReplayCandle]] = {}
         self._cursor: dict[tuple[str, str], ReplayCursor] = {}
         self._log_every_bars = 250
+        self._state_file = self._base / "replay_runtime_state.json"
+        self._start_resolution: dict[tuple[str, str], dict[str, object]] = {}
+
+
+    def _state_key(self, symbol: str, interval: str) -> str:
+        return f"{symbol.upper()}:{interval}"
+
+    def _load_resume_state(self) -> dict[str, object]:
+        if not self._state_file.exists():
+            return {}
+        try:
+            return json.loads(self._state_file.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            return {}
+
+    def _save_resume_state(self, payload: dict[str, object]) -> None:
+        self._state_file.parent.mkdir(parents=True, exist_ok=True)
+        self._state_file.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+    def _first_index_at_or_after(self, candles: list[ReplayCandle], ts: datetime) -> int | None:
+        for idx, candle in enumerate(candles):
+            if candle.close_time >= ts:
+                return idx
+        return None
+
+    def _resolve_start_index(self, *, symbol: str, interval: str, candles: list[ReplayCandle], start_ts: str | None, limit: int, history_limit: int | None) -> int:
+        key = (symbol.upper(), interval)
+        reason = "default"
+        candidate_index = 0
+        if start_ts:
+            start_dt = self._parse_ts(start_ts)
+            idx = self._first_index_at_or_after(candles, start_dt)
+            if idx is None:
+                raise ReplayDatasetError(f"replay_start_ts_out_of_range start={start_ts}")
+            candidate_index = idx
+            reason = "env(REPLAY_START_TS)"
+        state = self._load_resume_state()
+        resume_entry = state.get(self._state_key(symbol, interval)) if isinstance(state, dict) else None
+        resume_idx = None
+        if isinstance(resume_entry, dict) and resume_entry.get("last_processed_ts"):
+            try:
+                resume_ts = self._parse_ts(resume_entry["last_processed_ts"])
+                resume_idx = self._first_index_at_or_after(candles, resume_ts)
+            except ReplayDatasetError:
+                resume_idx = None
+        if resume_idx is not None:
+            candidate_index = resume_idx
+            reason = "resume_state_override"
+            logger.warning("replay_start_precedence resume_state_active symbol=%s interval=%s", symbol.upper(), interval)
+        warmup_floor = max(0, (max(2, int(history_limit)) if history_limit and history_limit > 0 else max(2, limit)) - 1)
+        warmup_overrode = False
+        if candidate_index < warmup_floor:
+            candidate_index = warmup_floor
+            warmup_overrode = True
+        self._start_resolution[key] = {
+            "effective_replay_start_ts": candles[candidate_index].close_time.isoformat(),
+            "why_start_ts_overridden": "warmup_floor_enforced" if warmup_overrode else ("resume_state_override" if reason == "resume_state_override" else "none"),
+            "selection_logic": "resume cursor/state > REPLAY_START_TS > CSV bounds/warmup",
+            "source": reason,
+            "resume_state_file": str(self._state_file),
+        }
+        return max(0, candidate_index - 1)
+
+    def debug_start_resolution(self, symbol: str, interval: str) -> dict[str, object]:
+        return dict(self._start_resolution.get((symbol.upper(), interval), {}))
 
     def _debug_trace_enabled(self) -> bool:
         return os.getenv("DEBUG_REPLAY_TRACE", "false").strip().lower() in {"1", "true", "yes", "on"}
@@ -216,6 +281,8 @@ class ReplayProvider:
             "last_ts": candles[-1].close_time.isoformat(),
             "current_ts": ts.isoformat(),
             "progress_pct": round(((idx + 1) / len(candles)) * 100.0, 4),
+            "resume_state_file": str(self._state_file),
+            "start_resolution": self._start_resolution.get(key, {}),
         }
 
     async def fetch_symbol_klines(
@@ -237,8 +304,8 @@ class ReplayProvider:
                 raise ReplayDatasetError(f"replay_filter_empty symbol={symbol} interval={interval}")
         key = (symbol.upper(), interval)
         cursor = self._cursor.setdefault(key, ReplayCursor(index=0))
-        if cursor.index == 0:
-            cursor.index = max(0, min(len(candles) - 1, limit - 1))
+        if key not in self._start_resolution:
+            cursor.index = min(len(candles) - 1, self._resolve_start_index(symbol=symbol, interval=interval, candles=candles, start_ts=start_ts, limit=limit, history_limit=history_limit))
         _ = speed  # speed is scheduler pacing only; replay data advances one candle at a time for deterministic outcomes.
         cursor.index = min(len(candles) - 1, cursor.index + 1)
         if cursor.index % self._log_every_bars == 0:
@@ -265,6 +332,13 @@ class ReplayProvider:
             slice_note=f"window_start={window_start};cursor={cursor.index};history_limit={effective_history_limit};limit={limit}",
         )
         candle = window[-1]
+        state = self._load_resume_state()
+        state[self._state_key(symbol, interval)] = {
+            "cursor_index": cursor.index,
+            "last_processed_ts": candle.close_time.isoformat(),
+            **self._start_resolution.get(key, {}),
+        }
+        self._save_resume_state(state)
         return ReplayKlineSnapshot(
             symbol=symbol.upper(),
             interval=interval,

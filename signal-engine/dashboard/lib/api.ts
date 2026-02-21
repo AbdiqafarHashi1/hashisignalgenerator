@@ -192,3 +192,14 @@ export type DebugConfigResponse = {
   sources: Record<string, string>;
   env_keys: Record<string, string>;
 };
+
+
+export type RuntimeDiagnostics = Record<string, unknown>;
+
+export type DebugResetRequest = {
+  reset_replay_state: boolean;
+  reset_governor_state: boolean;
+  reset_trades_db: boolean;
+  reset_performance: boolean;
+  dry_run: boolean;
+};

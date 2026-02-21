@@ -1,8 +1,10 @@
 ﻿from __future__ import annotations
 
 import asyncio
+import csv
 import json
 import logging
+import os
 import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
@@ -184,6 +186,26 @@ def _trade_to_dict(trade: Any, trader: PaperTrader | None = None, cfg: Settings 
     }
 
 
+def cfg_db_path(cfg: Settings) -> str:
+    return cfg.database_url or f"sqlite:///{Path(cfg.data_dir) / 'trades.db'}"
+
+
+def _scan_csv_bounds(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        return {"path": str(path), "exists": False}
+    first_ts = None
+    last_ts = None
+    with path.open("r", encoding="utf-8") as handle:
+        reader = csv.DictReader(handle)
+        for row in reader:
+            ts = row.get("close_time") or row.get("timestamp")
+            if not ts:
+                continue
+            first_ts = first_ts or ts
+            last_ts = ts
+    return {"path": str(path), "exists": True, "size": path.stat().st_size, "first_ts": first_ts, "last_ts": last_ts}
+
+
 def _get_runtime_float(db: Database, key: str, default: float) -> float:
     row = db.get_runtime_state(key)
     if row is None or row.value_number is None:
@@ -363,6 +385,13 @@ def _initialize_engine(app: FastAPI) -> None:
     last_correlation_id = None
     last_status_reason_logged = None
     replay_last_error = None
+
+    if os.getenv("DEBUG_RUNTIME_DIAG", "false").strip().lower() in {"1", "true", "yes", "on"}:
+        env_file = str(Path.cwd() / ".env") if (Path.cwd() / ".env").exists() else None
+        logger.info("runtime_diag env_file=%s", env_file)
+        logger.info("runtime_diag settings=%s", settings.resolved_settings())
+        logger.info("runtime_diag replay_path=%s", Path(settings.market_data_replay_path).resolve())
+        logger.info("runtime_diag db_path=%s", cfg_db_path(settings))
 
     app.state.settings = settings
     app.state.state_store = state
@@ -1264,83 +1293,169 @@ def debug_db() -> dict[str, Any]:
         "trade_count": len(trades),
     }
 @app.get("/debug/runtime")
-async def debug_runtime() -> dict:
-    now = datetime.now(timezone.utc)
-    settings = _require_settings()
-    state_store = _require_state()
-    scheduler = _require_scheduler()
-    symbols = state_store.get_symbols() or list(settings.symbols)
-    storage_health = _storage_health_check(settings.data_dir)
-    symbol_data = []
-    for symbol in symbols:
-        snapshot = scheduler.last_snapshot(symbol)
-        latest_candle_ts = snapshot.candle.close_time.isoformat() if snapshot else None
-        last_tick_ts = scheduler.last_symbol_tick_time(symbol)
-        last_processed_ms = state_store.get_last_processed_close_time_ms(symbol)
-        last_processed_iso = None
-        if last_processed_ms is not None:
-            last_processed_iso = datetime.fromtimestamp(last_processed_ms / 1000, tz=timezone.utc).isoformat()
-        last_decision_ts = state_store.get_last_decision_ts(symbol)
-        latest_decision = state_store.get_daily_state(symbol).latest_decision
-        symbol_data.append(
-            {
-                "symbol": symbol,
-                "last_candle_ts": latest_candle_ts,
-                "last_tick_time": last_tick_ts.isoformat() if last_tick_ts else None,
-                "candles_fetched_count": scheduler.last_fetch_count(symbol),
-                "last_processed_candle_ts": last_processed_iso,
-                "last_decision_ts": last_decision_ts.isoformat() if last_decision_ts else None,
-                "active_risk_gates": _active_risk_gates(symbol, now),
-                "last_decision_status": latest_decision.status if latest_decision else None,
-                "gate_reasons_top3": _top_gate_reasons(latest_decision),
-                "provider": state_store.get_decision_meta(symbol).get("provider"),
-                "last_candle_age_seconds": state_store.get_decision_meta(symbol).get("last_candle_age_seconds"),
-                "market_data_status": state_store.get_decision_meta(symbol).get("market_data_status", "OK"),
-                "latest_candle_ts": state_store.get_decision_meta(symbol).get("latest_candle_ts"),
-                "last_processed_candle_ts_ms": state_store.get_decision_meta(symbol).get("last_processed_candle_ts"),
-                "should_process": state_store.get_decision_meta(symbol).get("should_process"),
-                "should_process_reason": state_store.get_decision_meta(symbol).get("should_process_reason"),
-            }
-        )
-    replay_info: dict[str, Any] = {
-        "active": scheduler.replay_active if settings.run_mode == "replay" else False,
-        "error": replay_last_error,
-    }
-    if settings.run_mode == "replay":
-        try:
-            status = replay_status(settings.market_data_replay_path, symbols[0], settings.candle_interval or "3m")
-            replay_info.update(
-                {
-                    **status,
-                    "max_trades": settings.replay_max_trades,
-                    "max_bars": settings.replay_max_bars,
-                    "trades_so_far": len([t for t in _require_database().fetch_trades() if getattr(t, "closed_at", None)]),
-                }
-            )
-        except ReplayDatasetError as exc:
-            replay_info["error"] = str(exc)
+async def debug_runtime() -> dict[str, Any]:
+    cfg = _require_settings()
+    db = _require_database()
+    st = _require_state()
+    sch = _require_scheduler()
+    trader = _require_paper_trader()
+    symbols = st.get_symbols() or list(cfg.symbols)
 
+    aliases = cfg.env_alias_map()
+    sources = cfg.config_sources()
+    resolved = cfg.resolved_settings()
+    env_keys = [
+        "MODE", "ENGINE_MODE", "RUN_MODE", "STRATEGY_PROFILE", "PROFILE", "SETTINGS_ENABLE_LEGACY", "SYMBOLS",
+        "MARKET_DATA_PROVIDER", "MARKET_DATA_REPLAY_PATH", "CANDLE_INTERVAL", "CANDLE_HISTORY_LIMIT", "TICK_INTERVAL_SECONDS", "MARKET_DATA_REPLAY_SPEED",
+        "REPLAY_START_TS", "REPLAY_END_TS", "REPLAY_MAX_TRADES", "REPLAY_MAX_BARS", "REPLAY_SEED", "REPLAY_HISTORY_LIMIT",
+        "ACCOUNT_SIZE", "PROP_ENABLED", "PROP_GOVERNOR_ENABLED",
+        "PROP_RISK_BASE_PCT", "PROP_RISK_MIN_PCT", "PROP_RISK_MAX_PCT",
+        "RISK_PER_TRADE_USD", "BASE_RISK_PCT", "DATABASE_URL", "DATA_DIR",
+    ]
+    env_resolution: dict[str, Any] = {}
+    for env_key in env_keys:
+        field_name = next((k for k, v in aliases.items() if v == env_key), env_key.lower())
+        source = "legacy_alias" if env_key != aliases.get(field_name, env_key) else ("env" if env_key in os.environ else ("computed" if sources.get(field_name) == "profile_default" else "default"))
+        env_resolution[env_key] = {
+            "raw_env_value": os.environ.get(env_key),
+            "parsed_value": getattr(cfg, field_name, resolved.get(field_name)),
+            "source": source,
+        }
+
+    replay_root = Path(cfg.market_data_replay_path).resolve()
+    csv_files = []
+    for interval in ("5m", "1h"):
+        for symbol in symbols:
+            csv_files.append(_scan_csv_bounds(replay_root / symbol / f"{interval}.csv"))
+
+    data_root = Path("/app/data") if Path("/app/data").exists() else Path(cfg.data_dir).resolve()
+    replay_resume_files = [
+        str(path) for path in data_root.rglob("*")
+        if path.is_file() and (path.suffix == ".json" or path.name.endswith(".state") or "cursor" in path.name or path.name == "performance.json")
+    ]
+
+    interval = cfg.candle_interval or "5m"
+    replay_truth: dict[str, Any] = {}
+    if symbols:
+        try:
+            replay_truth = replay_status(cfg.market_data_replay_path, symbols[0], interval)
+        except ReplayDatasetError as exc:
+            replay_truth = {"error": str(exc)}
+    replay_provider_module = "app.providers.replay.ReplayProvider"
+    start_resolution = replay_truth.get("start_resolution", {}) if isinstance(replay_truth, dict) else {}
+
+    db_url = cfg_db_path(cfg)
+    sqlite_path = None
+    if db_url.startswith("sqlite:///"):
+        sqlite_path = str(Path(db_url.replace("sqlite:///", "")).resolve())
+    db_files = [
+        {"path": str(path), "size": path.stat().st_size}
+        for path in data_root.rglob("*.db") if path.is_file()
+    ]
+    runtime_rows = db.list_runtime_state()
+    gov_row = db.get_runtime_state("prop.governor")
+    gov_payload = None
+    if gov_row and gov_row.value_text:
+        try:
+            gov_payload = json.loads(gov_row.value_text)
+        except json.JSONDecodeError:
+            gov_payload = {"raw": gov_row.value_text}
+
+    symbol_gate = symbols[0] if symbols else "BTCUSDT"
     return {
-        "settings": {
-            **settings.resolved_settings(),
-            "telegram_bot_token": _mask_secret(settings.telegram_bot_token),
-            "telegram_enabled": settings.telegram_enabled,
+        "environment_settings_resolution": env_resolution,
+        "effective_settings_snapshot": {"canonical": resolved, "aliases": aliases},
+        "replay_state": {
+            "replay_provider_class": replay_provider_module,
+            "replay_path_resolved": str(replay_root),
+            "csv_files_found": csv_files,
+            "replay_resume_files_found": replay_resume_files,
+            "replay_resume_files_in_use": {
+                "files": [replay_truth.get("resume_state_file")],
+                "selection_logic": start_resolution.get("selection_logic", "resume cursor/state > REPLAY_START_TS > CSV bounds/warmup"),
+            },
+            "effective_replay_start_ts": start_resolution.get("effective_replay_start_ts"),
+            "why_start_ts_overridden": start_resolution.get("why_start_ts_overridden", "none"),
+            "replay_pointer_now": {
+                "engine_time": _runtime_now().isoformat(),
+                "cursor_index": replay_truth.get("bar_index"),
+                "last_processed_timestamp": replay_truth.get("current_ts"),
+            },
         },
-        "run_mode": settings.run_mode,
-        "replay": replay_info,
-        "scheduler": {
-            "tick_interval_seconds": scheduler.tick_interval,
-            "last_tick_time": scheduler.last_tick_time().isoformat() if scheduler.last_tick_time() else None,
+        "database_truth": {
+            "database_url_resolved": db_url,
+            "sqlite_file_path": sqlite_path,
+            "db_files_found": db_files,
+            "active_runtime_state_keys": [row.key for row in runtime_rows],
+            "prop_governor_state_row": gov_payload,
         },
-        "symbols": symbol_data,
-        "market_data_errors": state_store.market_data_error_counts(),
-        "storage": {
-            "data_dir": settings.data_dir,
-            "last_decision_file": _decision_log_path(settings.data_dir),
-            "last_decision_key": last_correlation_id,
-            "health_check": storage_health,
+        "risk_sizing_truth": {
+            symbol: (trader.last_sizing_decision(symbol) or {}) for symbol in symbols
+        },
+        "strategy_gating_blockers": {
+            symbol: st.gate_events(symbol, limit=50) for symbol in symbols
+        },
+        "dashboard_vs_engine": {
+            "dashboard_base_risk_pct": cfg.base_risk_pct,
+            "engine_last_risk_pct": (trader.last_sizing_decision(symbol_gate) or {}).get("engine_risk_pct"),
         },
     }
+
+
+class DebugResetRequest(BaseModel):
+    reset_replay_state: bool = False
+    reset_governor_state: bool = False
+    reset_trades_db: bool = False
+    reset_performance: bool = False
+    dry_run: bool = False
+
+
+@app.post("/debug/reset")
+async def debug_reset(payload: DebugResetRequest) -> dict[str, Any]:
+    cfg = _require_settings()
+    db = _require_database()
+    data_root = Path("/app/data") if Path("/app/data").exists() else Path(cfg.data_dir).resolve()
+    replay_root = Path(cfg.market_data_replay_path).resolve()
+
+    replay_targets = [
+        path for path in data_root.rglob("*")
+        if path.is_file() and (path.name.endswith(".state") or "cursor" in path.name or path.name == "performance.json" or (path.suffix == ".json" and "replay" in str(path).lower()))
+        and path.suffix.lower() != ".csv"
+    ]
+    deleted: dict[str, Any] = {"files": [], "db_rows": {}}
+
+    if payload.reset_replay_state:
+        for path in replay_targets:
+            deleted["files"].append(str(path))
+            if not payload.dry_run:
+                path.unlink(missing_ok=True)
+
+    if payload.reset_performance:
+        perf = Path(cfg.data_dir) / "performance.json"
+        deleted["files"].append(str(perf.resolve()))
+        if not payload.dry_run:
+            perf.unlink(missing_ok=True)
+
+    if payload.reset_governor_state:
+        keys = [row.key for row in db.list_runtime_state() if row.key.startswith("prop.governor")]
+        deleted["db_rows"]["governor_keys"] = keys
+        if not payload.dry_run:
+            db.delete_runtime_state_keys(keys)
+
+    if payload.reset_trades_db:
+        db_url = cfg_db_path(cfg)
+        if db_url.startswith("sqlite:///"):
+            sqlite_path = Path(db_url.replace("sqlite:///", "")).resolve()
+            deleted["files"].append(str(sqlite_path))
+            if not payload.dry_run and sqlite_path.exists():
+                sqlite_path.unlink()
+                db.init_schema()
+        else:
+            deleted["db_rows"]["trades_reset"] = True
+            if not payload.dry_run:
+                db.reset_trades()
+
+    return {"dry_run": payload.dry_run, "deleted": deleted, "replay_csvs_deleted": []}
 
 
 @app.get("/debug/kline")

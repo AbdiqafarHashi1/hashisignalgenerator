@@ -6,8 +6,10 @@ import { API_BASE, EngineState, stateEventsUrl } from "../../lib/api";
 import {
   fetchDashboardBundle,
   fetchEngineStateSafe,
+  fetchRuntimeDiagnostics,
   NormalizedSymbol,
   NormalizedTrade,
+  postDebugReset,
   triggerEngineAction,
 } from "../../lib/dashboardClient";
 import { formatBlocker, formatStatusReason, getRiskHeat, getRiskTone, toneClasses } from "../../lib/dashboardDisplay";
@@ -46,6 +48,10 @@ export default function LiveDashboard() {
   const [confirmForce, setConfirmForce] = useState(false);
   const [toasts, setToasts] = useState<Toast[]>([]);
 
+  const [diag, setDiag] = useState<Record<string, unknown> | null>(null);
+  const [diagLoading, setDiagLoading] = useState(false);
+  const [resetFlags, setResetFlags] = useState({ reset_replay_state: false, reset_governor_state: false, reset_trades_db: false, reset_performance: false, dry_run: true });
+
   const pushToast = useCallback((message: string, type: Toast["type"]) => {
     const id = Date.now() + Math.floor(Math.random() * 10000);
     setToasts((prev) => [...prev, { id, message, type }]);
@@ -69,6 +75,29 @@ export default function LiveDashboard() {
     if (payload) setState(payload);
   }, []);
 
+
+  const loadDiagnostics = useCallback(async () => {
+    setDiagLoading(true);
+    try {
+      const payload = await fetchRuntimeDiagnostics();
+      setDiag(payload as Record<string, unknown>);
+    } catch (err) {
+      pushToast((err as Error).message || "Diagnostics failed", "error");
+    } finally {
+      setDiagLoading(false);
+    }
+  }, [pushToast]);
+
+  const runReset = useCallback(async () => {
+    try {
+      const payload = await postDebugReset(resetFlags);
+      pushToast(`reset: ${JSON.stringify(payload)}`, "success");
+      await loadDiagnostics();
+    } catch (err) {
+      pushToast((err as Error).message || "Reset failed", "error");
+    }
+  }, [loadDiagnostics, pushToast, resetFlags]);
+
   const handleAction = useCallback(
     async (key: ControlKey, path: string) => {
       setActionLoading(key);
@@ -89,9 +118,10 @@ export default function LiveDashboard() {
   useEffect(() => {
     loadOverview();
     refreshState();
+    loadDiagnostics();
     const timer = setInterval(loadOverview, HEAVY_REFRESH_MS);
     return () => clearInterval(timer);
-  }, [loadOverview, refreshState]);
+  }, [loadDiagnostics, loadOverview, refreshState]);
 
   useEffect(() => {
     const source = new EventSource(stateEventsUrl);
@@ -313,6 +343,28 @@ export default function LiveDashboard() {
           </Card>
         </section>
 
+        <section>
+          <Card title="Diagnostics">
+            <div className="mb-3 flex flex-wrap gap-2">
+              <button className="btn rounded-xl border px-3 py-1.5 text-sm" onClick={loadDiagnostics} disabled={diagLoading}>{diagLoading ? "Loading..." : "Refresh Diagnostics"}</button>
+              <button className="btn rounded-xl border px-3 py-1.5 text-sm" onClick={runReset}>Run Reset</button>
+              {Object.keys(resetFlags).map((key) => (
+                <label key={key} className="text-xs text-slate-300">
+                  <input
+                    type="checkbox"
+                    className="mr-1"
+                    checked={(resetFlags as Record<string, boolean>)[key]}
+                    onChange={(e) => setResetFlags((prev) => ({ ...prev, [key]: e.target.checked }))}
+                  />
+                  {key}
+                </label>
+              ))}
+            </div>
+            <pre className="max-h-96 overflow-auto rounded-xl bg-slate-950/70 p-3 text-xs text-slate-200">{JSON.stringify(diag ?? {}, null, 2)}</pre>
+          </Card>
+        </section>
+
+
         {viewMode === "professional" ? (
           <section className="grid gap-4 lg:grid-cols-3">
             <Card title="Risk Panel">
@@ -366,6 +418,8 @@ export default function LiveDashboard() {
             <SymbolCard symbol={btcCard} fallback="BTCUSDT" />
           </section>
         ) : null}
+
+
 
         {viewMode === "professional" ? (
           <Card className="p-0">

@@ -1,4 +1,4 @@
-import { apiFetch, DashboardOverview, DebugConfigResponse, EngineState } from "./api";
+import { apiFetch, DashboardOverview, DebugConfigResponse, DebugResetRequest, EngineState, RuntimeDiagnostics } from "./api";
 
 export type NormalizedTrade = {
   id: string;
@@ -187,4 +187,13 @@ export async function fetchEngineStateSafe(): Promise<EngineState | null> {
 export async function triggerEngineAction(path: string): Promise<string> {
   const response = await apiFetch<{ status?: string; detail?: string }>(path);
   return response.status ?? response.detail ?? "ok";
+}
+
+
+export async function fetchRuntimeDiagnostics(): Promise<RuntimeDiagnostics> {
+  return apiFetch<RuntimeDiagnostics>("/debug/runtime");
+}
+
+export async function postDebugReset(payload: DebugResetRequest): Promise<Record<string, unknown>> {
+  return apiFetch<Record<string, unknown>>("/debug/reset", { method: "POST", body: JSON.stringify(payload) });
 }

@@ -291,6 +291,19 @@ class Database:
         with self._Session() as session:
             return session.get(RuntimeStateRow, key)
 
+
+    def list_runtime_state(self) -> list[RuntimeStateRow]:
+        with self._Session() as session:
+            return session.execute(select(RuntimeStateRow).order_by(RuntimeStateRow.key.asc())).scalars().all()
+
+    def delete_runtime_state_keys(self, keys: list[str]) -> int:
+        if not keys:
+            return 0
+        with self._Session() as session:
+            deleted = session.query(RuntimeStateRow).filter(RuntimeStateRow.key.in_(keys)).delete(synchronize_session=False)
+            session.commit()
+            return int(deleted)
+
     def reset_trades(self) -> None:
         with self._Session() as session:
             session.query(TradeRow).delete()

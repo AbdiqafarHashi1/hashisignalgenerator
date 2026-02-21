@@ -34,6 +34,7 @@ class PaperTrader:
         self._risk_reduced_trade_ids: set[int] = set()
         self._partial_taken_trade_ids: set[int] = set()
         self._trail_state: dict[int, float] = {}
+        self._last_sizing_decisions: dict[str, dict[str, object]] = {}
         self._clock = lambda: datetime.now(timezone.utc)
 
 
@@ -42,6 +43,9 @@ class PaperTrader:
 
     def _now(self) -> datetime:
         return self._clock()
+
+    def last_sizing_decision(self, symbol: str) -> dict[str, object] | None:
+        return self._last_sizing_decisions.get(symbol)
     def update_mark_price(self, symbol: str, price: float) -> None:
         self._last_mark_prices[symbol] = price
 
@@ -165,8 +169,29 @@ class PaperTrader:
         risk_usd = configured_risk_usd if configured_risk_usd > 0 else (self._settings.account_size * applied_risk_pct)
         stop_distance = abs(entry_with_costs - stop)
         size = (risk_usd / stop_distance) if stop_distance > 0 else 0.0
+        why_size_small: list[str] = []
+        if stop_distance <= 0:
+            why_size_small.append("invalid_stop_distance")
         if plan.position_size_usd and configured_risk_usd <= 0:
-            size = min(size, float(plan.position_size_usd) / entry_with_costs)
+            cap_size = float(plan.position_size_usd) / entry_with_costs
+            if size > cap_size:
+                why_size_small.append("position_size_usd_cap")
+            size = min(size, cap_size)
+        size_usd = size * entry_with_costs
+        if size_usd < 5:
+            why_size_small.append("min_notional")
+        self._last_sizing_decisions[symbol] = {
+            "timestamp": self._now().isoformat(),
+            "configured_risk_per_trade_usd": configured_risk_usd if configured_risk_usd > 0 else None,
+            "applied_risk_pct": applied_risk_pct,
+            "computed_risk_usd": risk_usd,
+            "stop_distance": stop_distance,
+            "units": size,
+            "size_usd": size_usd,
+            "why_size_small": why_size_small,
+            "dashboard_risk_pct": float(self._settings.base_risk_pct or 0.0),
+            "engine_risk_pct": applied_risk_pct,
+        }
         if size <= 0:
             return None
         take_profit = plan.take_profit

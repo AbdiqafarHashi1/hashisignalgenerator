@@ -495,6 +495,7 @@ class DecisionScheduler:
                         replay_start_ts=self._settings.replay_start_ts,
                         replay_end_ts=self._settings.replay_end_ts,
                         replay_history_limit=replay_history_limit,
+                        replay_resume=self._settings.replay_resume,
                     )
                 if self._settings.run_mode == "replay" or self._settings.market_data_provider == "replay":
                     tick_ts = snapshot.candle.close_time

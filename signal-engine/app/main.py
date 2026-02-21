@@ -30,7 +30,7 @@ from .services.challenge import ChallengeService
 from .services.prop_governor import PropRiskGovernor
 from .strategy.decision import decide
 from .services.scheduler import DecisionScheduler
-from .providers.bybit import BybitClient, fetch_symbol_klines, replay_reset, replay_status, replay_validate_dataset
+from .providers.bybit import BybitClient, fetch_symbol_klines, replay_reset, replay_reset_all_state, replay_status, replay_validate_dataset
 from .providers.replay import ReplayDatasetError
 from .utils.clock import RealClock, ReplayClock
 def _as_datetime_utc(value: Any) -> Optional[datetime]:
@@ -721,7 +721,7 @@ async def replay_progress() -> dict[str, Any]:
     cfg = _require_settings()
     symbol = cfg.symbols[0] if cfg.symbols else "ETHUSDT"
     interval = cfg.candle_interval or "5m"
-    status = replay_status(cfg.market_data_replay_path, symbol, interval)
+    status = replay_status(cfg.market_data_replay_path, symbol, interval, replay_resume=cfg.replay_resume)
     trades_closed = len([t for t in _require_database().fetch_trades() if t.closed_at is not None])
     snapshot = _require_state().get_decision_meta(symbol)
     bars_processed = status.get("bars_processed", status.get("bar_index", 0) + 1)
@@ -760,7 +760,7 @@ async def replay_dataset_status() -> dict[str, Any]:
     cfg = _require_settings()
     symbol = cfg.symbols[0] if cfg.symbols else "ETHUSDT"
     interval = cfg.candle_interval or "3m"
-    status = replay_status(cfg.market_data_replay_path, symbol, interval)
+    status = replay_status(cfg.market_data_replay_path, symbol, interval, replay_resume=cfg.replay_resume)
     return status
 
 @app.get("/stats")
@@ -1307,7 +1307,7 @@ async def debug_runtime() -> dict[str, Any]:
     env_keys = [
         "MODE", "ENGINE_MODE", "RUN_MODE", "STRATEGY_PROFILE", "PROFILE", "SETTINGS_ENABLE_LEGACY", "SYMBOLS",
         "MARKET_DATA_PROVIDER", "MARKET_DATA_REPLAY_PATH", "CANDLE_INTERVAL", "CANDLE_HISTORY_LIMIT", "TICK_INTERVAL_SECONDS", "MARKET_DATA_REPLAY_SPEED",
-        "REPLAY_START_TS", "REPLAY_END_TS", "REPLAY_MAX_TRADES", "REPLAY_MAX_BARS", "REPLAY_SEED", "REPLAY_HISTORY_LIMIT",
+        "REPLAY_START_TS", "REPLAY_END_TS", "REPLAY_RESUME", "REPLAY_MAX_TRADES", "REPLAY_MAX_BARS", "REPLAY_SEED", "REPLAY_HISTORY_LIMIT",
         "ACCOUNT_SIZE", "PROP_ENABLED", "PROP_GOVERNOR_ENABLED",
         "PROP_RISK_BASE_PCT", "PROP_RISK_MIN_PCT", "PROP_RISK_MAX_PCT",
         "RISK_PER_TRADE_USD", "BASE_RISK_PCT", "DATABASE_URL", "DATA_DIR",
@@ -1331,18 +1331,20 @@ async def debug_runtime() -> dict[str, Any]:
     data_root = Path("/app/data") if Path("/app/data").exists() else Path(cfg.data_dir).resolve()
     replay_resume_files = [
         str(path) for path in data_root.rglob("*")
-        if path.is_file() and (path.suffix == ".json" or path.name.endswith(".state") or "cursor" in path.name or path.name == "performance.json")
+        if path.is_file() and ("runtime_state" in path.name or "resume" in path.name or "cursor" in path.name or path.name.endswith(".state"))
     ]
 
     interval = cfg.candle_interval or "5m"
     replay_truth: dict[str, Any] = {}
     if symbols:
         try:
-            replay_truth = replay_status(cfg.market_data_replay_path, symbols[0], interval)
+            replay_truth = replay_status(cfg.market_data_replay_path, symbols[0], interval, replay_resume=cfg.replay_resume)
         except ReplayDatasetError as exc:
             replay_truth = {"error": str(exc)}
     replay_provider_module = "app.providers.replay.ReplayProvider"
     start_resolution = replay_truth.get("start_resolution", {}) if isinstance(replay_truth, dict) else {}
+    resume_file = replay_truth.get("resume_state_file") if isinstance(replay_truth, dict) else None
+    resume_in_use = bool(cfg.replay_resume and start_resolution.get("source") == "resume_state_override")
 
     db_url = cfg_db_path(cfg)
     sqlite_path = None
@@ -1371,15 +1373,25 @@ async def debug_runtime() -> dict[str, Any]:
             "csv_files_found": csv_files,
             "replay_resume_files_found": replay_resume_files,
             "replay_resume_files_in_use": {
-                "files": [replay_truth.get("resume_state_file")],
-                "selection_logic": start_resolution.get("selection_logic", "resume cursor/state > REPLAY_START_TS > CSV bounds/warmup"),
+                "enabled": cfg.replay_resume,
+                "files": [resume_file] if resume_in_use and resume_file else [],
+                "selection_logic": start_resolution.get("selection_logic", "REPLAY_START_TS > CSV bounds (resume disabled)"),
             },
+            "trade_start_ts": start_resolution.get("trade_start_ts") or replay_truth.get("first_ts"),
+            "history_preload_start_ts": start_resolution.get("history_preload_start_ts") or replay_truth.get("first_ts"),
+            "warmup_ready_at_ts": start_resolution.get("warmup_ready_at_ts"),
+            "warmup_missing_bars": start_resolution.get("warmup_missing_bars", 0),
             "effective_replay_start_ts": start_resolution.get("effective_replay_start_ts"),
             "why_start_ts_overridden": start_resolution.get("why_start_ts_overridden", "none"),
             "replay_pointer_now": {
                 "engine_time": _runtime_now().isoformat(),
                 "cursor_index": replay_truth.get("bar_index"),
                 "last_processed_timestamp": replay_truth.get("current_ts"),
+            },
+            "truth_precedence": {
+                "replay_resume": "resume cursor/state can override REPLAY_START_TS" if cfg.replay_resume else "resume disabled; REPLAY_START_TS anchors trade_start_ts",
+                "trade_start_ts": start_resolution.get("source", "csv_first_ts"),
+                "warmup": "history_preload_start_ts is used for indicators only; trade_start_ts remains user anchor",
             },
         },
         "database_truth": {
@@ -1390,7 +1402,10 @@ async def debug_runtime() -> dict[str, Any]:
             "prop_governor_state_row": gov_payload,
         },
         "risk_sizing_truth": {
-            symbol: (trader.last_sizing_decision(symbol) or {}) for symbol in symbols
+            symbol: ({
+                **(trader.last_sizing_decision(symbol) or {}),
+                "position_size_usd_cap_source_key": "TradePlan.position_size_usd",
+            }) for symbol in symbols
         },
         "strategy_gating_blockers": {
             symbol: st.gate_events(symbol, limit=50) for symbol in symbols
@@ -1417,36 +1432,44 @@ async def debug_reset(payload: DebugResetRequest) -> dict[str, Any]:
     data_root = Path("/app/data") if Path("/app/data").exists() else Path(cfg.data_dir).resolve()
     replay_root = Path(cfg.market_data_replay_path).resolve()
 
-    replay_targets = [
-        path for path in data_root.rglob("*")
-        if path.is_file() and (path.name.endswith(".state") or "cursor" in path.name or path.name == "performance.json" or (path.suffix == ".json" and "replay" in str(path).lower()))
-        and path.suffix.lower() != ".csv"
-    ]
-    deleted: dict[str, Any] = {"files": [], "db_rows": {}}
+    replay_targets = sorted({
+        data_root / "replay" / "replay_runtime_state.json",
+        replay_root / "replay_runtime_state.json",
+        *[
+            path for path in data_root.rglob("*")
+            if path.is_file() and (path.name.endswith(".state") or "cursor" in path.name or "runtime_state" in path.name or "resume" in path.name)
+        ],
+    }, key=lambda p: str(p))
+    deleted: dict[str, Any] = {"files": [], "db_rows": {}, "in_memory": {}}
 
     if payload.reset_replay_state:
+        deleted["in_memory"]["replay"] = replay_reset_all_state()
         for path in replay_targets:
-            deleted["files"].append(str(path))
+            existed = path.exists()
+            deleted["files"].append({"path": str(path.resolve()), "existed": existed})
             if not payload.dry_run:
                 path.unlink(missing_ok=True)
 
     if payload.reset_performance:
-        perf = Path(cfg.data_dir) / "performance.json"
-        deleted["files"].append(str(perf.resolve()))
-        if not payload.dry_run:
-            perf.unlink(missing_ok=True)
+        perf_targets = [Path(cfg.data_dir) / "performance.json", data_root / "performance.json"]
+        for perf in perf_targets:
+            existed = perf.exists()
+            deleted["files"].append({"path": str(perf.resolve()), "existed": existed})
+            if not payload.dry_run:
+                perf.unlink(missing_ok=True)
 
     if payload.reset_governor_state:
-        keys = [row.key for row in db.list_runtime_state() if row.key.startswith("prop.governor")]
+        keys = [row.key for row in db.list_runtime_state() if row.key.startswith("prop.governor") or row.key.startswith("prop.")]
         deleted["db_rows"]["governor_keys"] = keys
         if not payload.dry_run:
             db.delete_runtime_state_keys(keys)
+            _require_prop_governor().reset(_runtime_now())
 
     if payload.reset_trades_db:
         db_url = cfg_db_path(cfg)
         if db_url.startswith("sqlite:///"):
             sqlite_path = Path(db_url.replace("sqlite:///", "")).resolve()
-            deleted["files"].append(str(sqlite_path))
+            deleted["files"].append({"path": str(sqlite_path), "existed": sqlite_path.exists()})
             if not payload.dry_run and sqlite_path.exists():
                 sqlite_path.unlink()
                 db.init_schema()

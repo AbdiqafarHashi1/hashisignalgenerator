@@ -50,8 +50,9 @@ class ReplayCursor:
 
 
 class ReplayProvider:
-    def __init__(self, base_path: str) -> None:
+    def __init__(self, base_path: str, *, resume_enabled: bool = False) -> None:
         self._base = Path(base_path)
+        self._resume_enabled = bool(resume_enabled)
         self._cache: dict[tuple[str, str], list[ReplayCandle]] = {}
         self._cursor: dict[tuple[str, str], ReplayCursor] = {}
         self._log_every_bars = 250
@@ -63,6 +64,8 @@ class ReplayProvider:
         return f"{symbol.upper()}:{interval}"
 
     def _load_resume_state(self) -> dict[str, object]:
+        if not self._resume_enabled:
+            return {}
         if not self._state_file.exists():
             return {}
         try:
@@ -71,8 +74,21 @@ class ReplayProvider:
             return {}
 
     def _save_resume_state(self, payload: dict[str, object]) -> None:
+        if not self._resume_enabled:
+            return
         self._state_file.parent.mkdir(parents=True, exist_ok=True)
         self._state_file.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+    def state_file_path(self) -> Path:
+        return self._state_file
+
+    @property
+    def resume_enabled(self) -> bool:
+        return self._resume_enabled
+
+    def clear_runtime_state(self) -> None:
+        self._cursor.clear()
+        self._start_resolution.clear()
 
     def _first_index_at_or_after(self, candles: list[ReplayCandle], ts: datetime) -> int | None:
         for idx, candle in enumerate(candles):
@@ -82,17 +98,18 @@ class ReplayProvider:
 
     def _resolve_start_index(self, *, symbol: str, interval: str, candles: list[ReplayCandle], start_ts: str | None, limit: int, history_limit: int | None) -> int:
         key = (symbol.upper(), interval)
-        reason = "default"
-        candidate_index = 0
+        reason = "csv_first_ts"
+        trade_start_index = 0
         if start_ts:
             start_dt = self._parse_ts(start_ts)
             idx = self._first_index_at_or_after(candles, start_dt)
             if idx is None:
                 raise ReplayDatasetError(f"replay_start_ts_out_of_range start={start_ts}")
-            candidate_index = idx
+            trade_start_index = idx
             reason = "env(REPLAY_START_TS)"
+        selected_cursor_index = trade_start_index
         state = self._load_resume_state()
-        resume_entry = state.get(self._state_key(symbol, interval)) if isinstance(state, dict) else None
+        resume_entry = state.get(self._state_key(symbol, interval)) if self._resume_enabled and isinstance(state, dict) else None
         resume_idx = None
         if isinstance(resume_entry, dict) and resume_entry.get("last_processed_ts"):
             try:
@@ -101,22 +118,29 @@ class ReplayProvider:
             except ReplayDatasetError:
                 resume_idx = None
         if resume_idx is not None:
-            candidate_index = resume_idx
+            selected_cursor_index = resume_idx
             reason = "resume_state_override"
             logger.warning("replay_start_precedence resume_state_active symbol=%s interval=%s", symbol.upper(), interval)
-        warmup_floor = max(0, (max(2, int(history_limit)) if history_limit and history_limit > 0 else max(2, limit)) - 1)
-        warmup_overrode = False
-        if candidate_index < warmup_floor:
-            candidate_index = warmup_floor
-            warmup_overrode = True
+        effective_history_limit = max(2, int(history_limit)) if history_limit and history_limit > 0 else max(2, limit)
+        warmup_lookback = max(0, effective_history_limit - 1)
+        history_preload_index = max(0, trade_start_index - warmup_lookback)
+        available_history_bars = trade_start_index - history_preload_index + 1
+        missing_warmup_bars = max(0, effective_history_limit - available_history_bars)
+        warmup_ready_index = min(len(candles) - 1, trade_start_index + missing_warmup_bars)
+        selection_logic = "resume cursor/state > REPLAY_START_TS > CSV bounds" if self._resume_enabled else "REPLAY_START_TS > CSV bounds (resume disabled)"
         self._start_resolution[key] = {
-            "effective_replay_start_ts": candles[candidate_index].close_time.isoformat(),
-            "why_start_ts_overridden": "warmup_floor_enforced" if warmup_overrode else ("resume_state_override" if reason == "resume_state_override" else "none"),
-            "selection_logic": "resume cursor/state > REPLAY_START_TS > CSV bounds/warmup",
+            "effective_replay_start_ts": candles[selected_cursor_index].close_time.isoformat(),
+            "trade_start_ts": candles[trade_start_index].close_time.isoformat(),
+            "history_preload_start_ts": candles[history_preload_index].close_time.isoformat(),
+            "warmup_ready_at_ts": candles[warmup_ready_index].close_time.isoformat(),
+            "warmup_missing_bars": missing_warmup_bars,
+            "why_start_ts_overridden": "resume_state_override" if reason == "resume_state_override" else "none",
+            "selection_logic": selection_logic,
             "source": reason,
-            "resume_state_file": str(self._state_file),
+            "resume_enabled": self._resume_enabled,
+            "resume_state_file": str(self._state_file) if self._resume_enabled else None,
         }
-        return max(0, candidate_index - 1)
+        return max(0, selected_cursor_index - 1)
 
     def debug_start_resolution(self, symbol: str, interval: str) -> dict[str, object]:
         return dict(self._start_resolution.get((symbol.upper(), interval), {}))
@@ -282,6 +306,7 @@ class ReplayProvider:
             "current_ts": ts.isoformat(),
             "progress_pct": round(((idx + 1) / len(candles)) * 100.0, 4),
             "resume_state_file": str(self._state_file),
+            "replay_resume_enabled": self._resume_enabled,
             "start_resolution": self._start_resolution.get(key, {}),
         }
 
@@ -299,7 +324,9 @@ class ReplayProvider:
         if start_ts or end_ts:
             start_dt = self._parse_ts(start_ts) if start_ts else None
             end_dt = self._parse_ts(end_ts) if end_ts else None
-            candles = [c for c in candles if (start_dt is None or c.close_time >= start_dt) and (end_dt is None or c.close_time <= end_dt)]
+            if start_dt and self._first_index_at_or_after(candles, start_dt) is None:
+                raise ReplayDatasetError(f"replay_start_ts_out_of_range start={start_ts}")
+            candles = [c for c in candles if (end_dt is None or c.close_time <= end_dt)]
             if not candles:
                 raise ReplayDatasetError(f"replay_filter_empty symbol={symbol} interval={interval}")
         key = (symbol.upper(), interval)
@@ -332,13 +359,14 @@ class ReplayProvider:
             slice_note=f"window_start={window_start};cursor={cursor.index};history_limit={effective_history_limit};limit={limit}",
         )
         candle = window[-1]
-        state = self._load_resume_state()
-        state[self._state_key(symbol, interval)] = {
-            "cursor_index": cursor.index,
-            "last_processed_ts": candle.close_time.isoformat(),
-            **self._start_resolution.get(key, {}),
-        }
-        self._save_resume_state(state)
+        if self._resume_enabled:
+            state = self._load_resume_state()
+            state[self._state_key(symbol, interval)] = {
+                "cursor_index": cursor.index,
+                "last_processed_ts": candle.close_time.isoformat(),
+                **self._start_resolution.get(key, {}),
+            }
+            self._save_resume_state(state)
         return ReplayKlineSnapshot(
             symbol=symbol.upper(),
             interval=interval,

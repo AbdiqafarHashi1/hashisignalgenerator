@@ -423,6 +423,7 @@ Replay controls:
 - `REPLAY_MAX_BARS` (default `5000`)
 - `REPLAY_START_TS` (optional)
 - `REPLAY_END_TS` (optional)
+- `REPLAY_RESUME` (default `false`; when `false` replay runtime state is never read/written)
 - `REPLAY_SEED` (optional)
 
 Engine control endpoints:
@@ -435,6 +436,13 @@ Engine control endpoints:
 
 - `run_mode`
 - `replay` object with progress (`bar_index`, `total_bars`, `progress_pct`, `max_trades`, `trades_so_far`, etc.)
+
+`GET /debug/runtime` now reports replay precedence and warmup anchors:
+
+- `trade_start_ts`: user-intended replay start (`REPLAY_START_TS` when set).
+- `history_preload_start_ts`: warmup preload start used only for indicator history.
+- `warmup_ready_at_ts`: first bar where full warmup windows are satisfied.
+- `replay_resume_files_in_use.enabled`: whether resume override is active (`REPLAY_RESUME=true`).
 
 ### Run replay locally (100+ trades)
 ```bash

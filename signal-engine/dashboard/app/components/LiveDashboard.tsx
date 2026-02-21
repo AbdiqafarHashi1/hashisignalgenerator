@@ -50,7 +50,7 @@ export default function LiveDashboard() {
 
   const [diag, setDiag] = useState<Record<string, unknown> | null>(null);
   const [diagLoading, setDiagLoading] = useState(false);
-  const [resetFlags, setResetFlags] = useState({ reset_replay_state: false, reset_governor_state: false, reset_trades_db: false, reset_performance: false, dry_run: true });
+  const [resetFlags, setResetFlags] = useState({ reset_replay_state: false, reset_governor_state: false, reset_trades_db: false, reset_performance: false, dry_run: false });
 
   const pushToast = useCallback((message: string, type: Toast["type"]) => {
     const id = Date.now() + Math.floor(Math.random() * 10000);
@@ -208,6 +208,8 @@ export default function LiveDashboard() {
   const openOrders = Array.isArray(account.open_orders) ? (account.open_orders as Array<Record<string, unknown>>) : [];
   const executions = Array.isArray(account.executions) ? (account.executions as Array<Record<string, unknown>>) : [];
   const eventTape = Array.isArray(account.event_tape) ? (account.event_tape as Array<Record<string, unknown>>) : [];
+  const replayState = (diag?.replay_state as Record<string, unknown> | undefined) ?? {};
+  const replayResume = (replayState?.replay_resume_files_in_use as Record<string, unknown> | undefined) ?? {};
 
   return (
     <div className="min-h-screen bg-gradient-to-b from-[#01040c] via-[#020712] to-[#090f1c] px-3 py-5 text-slate-100 md:px-6">
@@ -359,6 +361,12 @@ export default function LiveDashboard() {
                   {key}
                 </label>
               ))}
+            </div>
+            <div className="mb-3 grid gap-2 text-xs text-slate-300 md:grid-cols-2">
+              <div>REPLAY_RESUME: <span className="font-mono">{String(replayResume.enabled ?? "false")}</span></div>
+              <div>trade_start_ts: <span className="font-mono">{String(replayState.trade_start_ts ?? "—")}</span></div>
+              <div>warmup_ready_at_ts: <span className="font-mono">{String(replayState.warmup_ready_at_ts ?? "—")}</span></div>
+              <div>history_preload_start_ts: <span className="font-mono">{String(replayState.history_preload_start_ts ?? "—")}</span></div>
             </div>
             <pre className="max-h-96 overflow-auto rounded-xl bg-slate-950/70 p-3 text-xs text-slate-200">{JSON.stringify(diag ?? {}, null, 2)}</pre>
           </Card>

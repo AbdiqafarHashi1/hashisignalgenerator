@@ -170,9 +170,11 @@ class PaperTrader:
         stop_distance = abs(entry_with_costs - stop)
         size = (risk_usd / stop_distance) if stop_distance > 0 else 0.0
         why_size_small: list[str] = []
+        position_size_usd_cap_value: float | None = None
         if stop_distance <= 0:
             why_size_small.append("invalid_stop_distance")
         if plan.position_size_usd and configured_risk_usd <= 0:
+            position_size_usd_cap_value = float(plan.position_size_usd)
             cap_size = float(plan.position_size_usd) / entry_with_costs
             if size > cap_size:
                 why_size_small.append("position_size_usd_cap")
@@ -189,6 +191,8 @@ class PaperTrader:
             "units": size,
             "size_usd": size_usd,
             "why_size_small": why_size_small,
+            "position_size_usd_cap_value": position_size_usd_cap_value,
+            "position_size_usd_cap_source_key": "TradePlan.position_size_usd",
             "dashboard_risk_pct": float(self._settings.base_risk_pct or 0.0),
             "engine_risk_pct": applied_risk_pct,
         }

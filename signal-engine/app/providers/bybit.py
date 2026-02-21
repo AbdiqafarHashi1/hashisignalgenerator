@@ -452,11 +452,12 @@ async def fetch_symbol_klines(
     replay_start_ts: str | None = None,
     replay_end_ts: str | None = None,
     replay_history_limit: int | None = None,
+    replay_resume: bool | None = None,
 ) -> BybitKlineSnapshot | None:
     provider_normalized = (provider or "bybit").lower()
     fallback_order = _parse_fallbacks(fallback_provider)
     if provider_normalized == "replay":
-        return await _fetch_from_replay(symbol=symbol, interval=interval, limit=limit, replay_path=replay_path, replay_speed=replay_speed, replay_start_ts=replay_start_ts, replay_end_ts=replay_end_ts, history_limit=replay_history_limit)
+        return await _fetch_from_replay(symbol=symbol, interval=interval, limit=limit, replay_path=replay_path, replay_speed=replay_speed, replay_start_ts=replay_start_ts, replay_end_ts=replay_end_ts, history_limit=replay_history_limit, replay_resume=replay_resume)
     if provider_normalized == "binance":
         return await _fetch_from_binance(symbol=symbol, interval=interval, limit=limit)
     if provider_normalized == "okx":
@@ -497,6 +498,7 @@ async def fetch_symbol_klines(
                     replay_end_ts=replay_end_ts,
                     trigger_reason=reason,
                     replay_history_limit=replay_history_limit,
+                    replay_resume=replay_resume,
                 )
             if attempt >= threshold:
                 break
@@ -515,6 +517,7 @@ async def fetch_symbol_klines(
         replay_end_ts=replay_end_ts,
         trigger_reason="threshold_exceeded",
         replay_history_limit=replay_history_limit,
+        replay_resume=replay_resume,
     )
 
 
@@ -530,6 +533,7 @@ async def _try_fallback_chain(
     replay_end_ts: str | None,
     trigger_reason: str,
     replay_history_limit: int | None = None,
+    replay_resume: bool | None = None,
 ) -> BybitKlineSnapshot:
     logger.warning("market_data_failover_trigger symbol=%s reason=%s chain=%s", symbol, trigger_reason, ",".join(fallbacks))
     errors: list[str] = []
@@ -540,7 +544,7 @@ async def _try_fallback_chain(
             if fallback == "okx":
                 return await _fetch_from_okx(symbol=symbol, interval=interval, limit=limit)
             if fallback == "replay":
-                return await _fetch_from_replay(symbol=symbol, interval=interval, limit=limit, replay_path=replay_path, replay_speed=replay_speed, replay_start_ts=replay_start_ts, replay_end_ts=replay_end_ts, history_limit=replay_history_limit)
+                return await _fetch_from_replay(symbol=symbol, interval=interval, limit=limit, replay_path=replay_path, replay_speed=replay_speed, replay_start_ts=replay_start_ts, replay_end_ts=replay_end_ts, history_limit=replay_history_limit, replay_resume=replay_resume)
         except Exception as exc:
             errors.append(f"{fallback}:{type(exc).__name__}")
             continue
@@ -636,10 +640,11 @@ async def _fetch_from_okx(symbol: str, interval: str, limit: int) -> BybitKlineS
     )
 
 
-async def _fetch_from_replay(symbol: str, interval: str, limit: int, replay_path: str, replay_speed: float, replay_start_ts: str | None = None, replay_end_ts: str | None = None, history_limit: int | None = None) -> BybitKlineSnapshot:
+async def _fetch_from_replay(symbol: str, interval: str, limit: int, replay_path: str, replay_speed: float, replay_start_ts: str | None = None, replay_end_ts: str | None = None, history_limit: int | None = None, replay_resume: bool | None = None) -> BybitKlineSnapshot:
     provider = _replay_providers.get(replay_path)
-    if provider is None:
-        provider = ReplayProvider(replay_path)
+    desired_resume = bool(replay_resume)
+    if provider is None or provider.resume_enabled != desired_resume:
+        provider = ReplayProvider(replay_path, resume_enabled=desired_resume)
         _replay_providers[replay_path] = provider
     replay = await provider.fetch_symbol_klines(
         symbol=symbol,
@@ -683,12 +688,21 @@ async def _fetch_from_replay(symbol: str, interval: str, limit: int, replay_path
 
 
 
-def replay_status(replay_path: str, symbol: str, interval: str) -> dict[str, object]:
+def replay_status(replay_path: str, symbol: str, interval: str, replay_resume: bool | None = None) -> dict[str, object]:
+    desired_resume = bool(replay_resume)
     provider = _replay_providers.get(replay_path)
-    if provider is None:
-        provider = ReplayProvider(replay_path)
+    if provider is None or provider.resume_enabled != desired_resume:
+        provider = ReplayProvider(replay_path, resume_enabled=desired_resume)
         _replay_providers[replay_path] = provider
     return provider.status(symbol, interval)
+
+
+def replay_reset_all_state() -> dict[str, object]:
+    cleared_paths: list[str] = []
+    for provider in _replay_providers.values():
+        provider.clear_runtime_state()
+        cleared_paths.append(str(provider.state_file_path()))
+    return {"providers_cleared": len(_replay_providers), "state_files": cleared_paths}
 
 
 def replay_validate_dataset(

@@ -205,6 +205,7 @@ class Settings(BaseSettings):
     replay_max_bars: int = Field(5000, validation_alias=AliasChoices("REPLAY_MAX_BARS", "replay_max_bars"))
     replay_start_ts: str | None = Field(None, validation_alias=AliasChoices("REPLAY_START_TS", "replay_start_ts"))
     replay_end_ts: str | None = Field(None, validation_alias=AliasChoices("REPLAY_END_TS", "replay_end_ts"))
+    replay_resume: bool = Field(False, validation_alias=AliasChoices("REPLAY_RESUME", "replay_resume"))
     replay_seed: int | None = Field(None, validation_alias=AliasChoices("REPLAY_SEED", "replay_seed"))
     market_data_allow_stale: int = Field(
         60,
@@ -864,6 +865,7 @@ class Settings(BaseSettings):
             "replay_max_bars": self.replay_max_bars,
             "replay_start_ts": self.replay_start_ts,
             "replay_end_ts": self.replay_end_ts,
+            "replay_resume": self.replay_resume,
             "replay_seed": self.replay_seed,
             "market_data_allow_stale": self.market_data_allow_stale,
             "market_data_failover_threshold": self.market_data_failover_threshold,

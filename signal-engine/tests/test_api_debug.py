@@ -391,4 +391,91 @@ def test_debug_reset_clears_governor_row(monkeypatch) -> None:
         db.set_runtime_state("prop.governor", value_text='{"risk_pct":0.001}')
         response = client.post("/debug/reset", json={"reset_governor_state": True, "dry_run": False})
         assert response.status_code == 200
-        assert db.get_runtime_state("prop.governor") is None
+        row = db.get_runtime_state("prop.governor")
+        assert row is not None and row.value_text
+
+
+def test_debug_runtime_replay_resume_disabled_not_in_use(monkeypatch, tmp_path) -> None:
+    replay_root = tmp_path / "replay"
+    symbol_dir = replay_root / "BTCUSDT"
+    symbol_dir.mkdir(parents=True, exist_ok=True)
+    (symbol_dir / "5m.csv").write_text(
+        "timestamp,open,high,low,close,volume,close_time\n"
+        "2024-01-01T00:00:00+00:00,1,1,1,1,1,2024-01-01T00:05:00+00:00\n"
+        "2024-01-01T00:05:00+00:00,1,1,1,1,1,2024-01-01T00:10:00+00:00\n",
+        encoding="utf-8",
+    )
+    (replay_root / "replay_runtime_state.json").write_text('{"BTCUSDT:5m":{"last_processed_ts":"2024-01-01T00:10:00+00:00"}}', encoding="utf-8")
+
+    main_module = _fresh_main(monkeypatch, {
+        "RUN_MODE": "replay",
+        "MARKET_DATA_PROVIDER": "replay",
+        "MARKET_DATA_REPLAY_PATH": str(replay_root),
+        "DATA_DIR": str(tmp_path / "data"),
+        "REPLAY_RESUME": "false",
+        "REPLAY_START_TS": "2024-01-01T00:00:00+00:00",
+    })
+    with TestClient(main_module.app) as client:
+        client.get("/debug/kline", params={"interval": "5m"})
+        payload = client.get("/debug/runtime").json()
+        in_use = payload["replay_state"]["replay_resume_files_in_use"]
+        assert in_use["enabled"] is False
+        assert in_use["files"] == []
+        assert "resume disabled" in in_use["selection_logic"]
+
+
+def test_debug_runtime_replay_resume_enabled_can_use_state(monkeypatch, tmp_path) -> None:
+    replay_root = tmp_path / "replay"
+    symbol_dir = replay_root / "BTCUSDT"
+    symbol_dir.mkdir(parents=True, exist_ok=True)
+    (symbol_dir / "5m.csv").write_text(
+        "timestamp,open,high,low,close,volume,close_time\n"
+        "2024-01-01T00:00:00+00:00,1,1,1,1,1,2024-01-01T00:05:00+00:00\n"
+        "2024-01-01T00:05:00+00:00,1,1,1,1,1,2024-01-01T00:10:00+00:00\n"
+        "2024-01-01T00:10:00+00:00,1,1,1,1,1,2024-01-01T00:15:00+00:00\n",
+        encoding="utf-8",
+    )
+    (replay_root / "replay_runtime_state.json").write_text('{"BTCUSDT:5m":{"last_processed_ts":"2024-01-01T00:10:00+00:00"}}', encoding="utf-8")
+
+    main_module = _fresh_main(monkeypatch, {
+        "RUN_MODE": "replay",
+        "MARKET_DATA_PROVIDER": "replay",
+        "MARKET_DATA_REPLAY_PATH": str(replay_root),
+        "DATA_DIR": str(tmp_path / "data"),
+        "REPLAY_RESUME": "true",
+        "REPLAY_START_TS": "2024-01-01T00:00:00+00:00",
+    })
+    with TestClient(main_module.app) as client:
+        client.get("/debug/kline", params={"interval": "5m"})
+        payload = client.get("/debug/runtime").json()
+        in_use = payload["replay_state"]["replay_resume_files_in_use"]
+        assert in_use["enabled"] is True
+
+
+def test_debug_reset_deletes_replay_runtime_state(monkeypatch, tmp_path) -> None:
+    data_dir = tmp_path / "data"
+    replay_dir = data_dir / "replay" / "BTCUSDT"
+    replay_dir.mkdir(parents=True, exist_ok=True)
+    (replay_dir / "5m.csv").write_text("timestamp,open,high,low,close,volume,close_time\n", encoding="utf-8")
+    runtime_state = data_dir / "replay" / "replay_runtime_state.json"
+    runtime_state.write_text("{}", encoding="utf-8")
+
+    main_module = _fresh_main(monkeypatch, {"DATA_DIR": str(data_dir), "MARKET_DATA_REPLAY_PATH": str(data_dir / "replay")})
+    with TestClient(main_module.app) as client:
+        resp = client.post("/debug/reset", json={"reset_replay_state": True, "dry_run": False})
+        assert resp.status_code == 200
+        assert runtime_state.exists() is False
+        payload = client.get("/debug/runtime").json()
+        assert not any("replay_runtime_state.json" in p for p in payload["replay_state"]["replay_resume_files_found"])
+
+
+def test_debug_reset_governor_clears_runtime_row(monkeypatch) -> None:
+    main_module = _fresh_main(monkeypatch, {"PROP_RISK_BASE_PCT": "0.0040"})
+    with TestClient(main_module.app) as client:
+        db = client.app.state.database
+        db.set_runtime_state("prop.governor", value_text='{"risk_pct":0.002,"locked_until_ts":"2024-01-01T00:00:00+00:00"}')
+        response = client.post("/debug/reset", json={"reset_governor_state": True, "dry_run": False})
+        assert response.status_code == 200
+        payload = client.get("/debug/runtime").json()
+        gov = payload["database_truth"]["prop_governor_state_row"]
+        assert gov is None or gov.get("risk_pct") == 0.004

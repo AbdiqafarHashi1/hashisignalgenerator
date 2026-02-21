@@ -172,7 +172,7 @@ def _decide_legacy(request: DecisionRequest, cfg: Settings) -> TradePlan:
         stop_loss=levels.stop_loss,
         take_profit=levels.take_profit,
         risk_pct_used=float(cfg.base_risk_pct or 0.0),
-        position_size_usd=float(cfg.account_size or 0.0) * float(cfg.base_risk_pct or 0.0),
+        position_size_usd=cfg.position_size_usd_cap,
         signal_score=signal_score,
         posture=Posture.NORMAL,
         rationale=["legacy_scalper"],

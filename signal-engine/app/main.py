@@ -1310,7 +1310,7 @@ async def debug_runtime() -> dict[str, Any]:
         "REPLAY_START_TS", "REPLAY_END_TS", "REPLAY_RESUME", "REPLAY_MAX_TRADES", "REPLAY_MAX_BARS", "REPLAY_SEED", "REPLAY_HISTORY_LIMIT",
         "ACCOUNT_SIZE", "PROP_ENABLED", "PROP_GOVERNOR_ENABLED",
         "PROP_RISK_BASE_PCT", "PROP_RISK_MIN_PCT", "PROP_RISK_MAX_PCT",
-        "RISK_PER_TRADE_USD", "BASE_RISK_PCT", "DATABASE_URL", "DATA_DIR",
+        "RISK_PER_TRADE_USD", "BASE_RISK_PCT", "POSITION_SIZE_USD_CAP", "MAX_POSITION_SIZE_USD", "POSITION_SIZE_USD_MAX", "MAX_POSITION_USD", "DATABASE_URL", "DATA_DIR",
     ]
     env_resolution: dict[str, Any] = {}
     for env_key in env_keys:
@@ -1421,10 +1421,7 @@ async def debug_runtime() -> dict[str, Any]:
             "prop_governor_state_row": gov_payload,
         },
         "risk_sizing_truth": {
-            symbol: ({
-                **(trader.last_sizing_decision(symbol) or {}),
-                "position_size_usd_cap_source_key": "TradePlan.position_size_usd",
-            }) for symbol in symbols
+            symbol: (trader.last_sizing_decision(symbol) or {}) for symbol in symbols
         },
         "strategy_gating_blockers": {
             symbol: st.gate_events(symbol, limit=50) for symbol in symbols

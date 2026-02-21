@@ -222,6 +222,16 @@ class Settings(BaseSettings):
     account_size: float | None = Field(None, validation_alias=AliasChoices("ACCOUNT_SIZE", "account_size"))
     base_risk_pct: float | None = Field(None, validation_alias=AliasChoices("BASE_RISK_PCT", "base_risk_pct"))
     risk_per_trade_usd: float | None = Field(None, validation_alias=AliasChoices("RISK_PER_TRADE_USD", "risk_per_trade_usd"))
+    position_size_usd_cap: float | None = Field(
+        None,
+        validation_alias=AliasChoices(
+            "POSITION_SIZE_USD_CAP",
+            "MAX_POSITION_SIZE_USD",
+            "POSITION_SIZE_USD_MAX",
+            "MAX_POSITION_USD",
+            "position_size_usd_cap",
+        ),
+    )
     max_risk_pct: float | None = Field(None, validation_alias=AliasChoices("MAX_RISK_PCT", "max_risk_pct"))
     max_trades_per_day: int | None = Field(None, validation_alias=AliasChoices("MAX_TRADES_PER_DAY", "max_trades_per_day"))
     max_daily_loss_pct: float | None = Field(None, validation_alias=AliasChoices("MAX_DAILY_LOSS_PCT", "max_daily_loss_pct"))
@@ -851,6 +861,7 @@ class Settings(BaseSettings):
             "global_drawdown_limit_pct": self.global_drawdown_limit_pct,
             "base_risk_pct": self.base_risk_pct,
             "risk_per_trade_usd": self.risk_per_trade_usd,
+            "position_size_usd_cap": self.position_size_usd_cap,
             "max_risk_pct": self.max_risk_pct,
             "news_blackouts": self.news_blackouts,
             "debug_loosen": self.debug_loosen,

@@ -106,7 +106,16 @@ def position_size(entry: float, stop_loss: float, risk_pct: float, settings: Set
         units = risk_usd / stop_distance
         raw_notional = max(0.0, units * entry)
         max_notional = max(0.0, float(settings.account_size or 0.0) * settings.max_notional_account_multiplier)
-        position_size_usd = min(raw_notional, max_notional)
+        cap_usd = getattr(settings, "position_size_usd_cap", None)
+        if cap_usd is not None:
+            try:
+                cap_usd = float(cap_usd)
+            except (TypeError, ValueError):
+                cap_usd = None
+        if cap_usd is not None and cap_usd > 0:
+            position_size_usd = min(raw_notional, max_notional, cap_usd)
+        else:
+            position_size_usd = min(raw_notional, max_notional)
 
     return RiskResult(
         risk_pct_used=float(risk_pct),

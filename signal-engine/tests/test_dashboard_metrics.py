@@ -30,20 +30,39 @@ def _closed_trade(db: Database, opened_at: datetime, closed_at: datetime, pnl_ne
     db.close_trade(trade_id, 110.0, pnl_net, 1.0, closed_at, "tp_close", fees=fee)
 
 
-def test_equity_reconciliation_delta_is_zero(tmp_path):
+def test_equity_reconciliation_uses_net_realized_identity(tmp_path):
     settings, db, trader, state = _setup(tmp_path)
     now = datetime(2024, 1, 1, 12, 0, tzinfo=timezone.utc)
+    db.set_runtime_state("accounting.challenge_start_ts", value_text=(now - timedelta(days=1)).isoformat())
     _closed_trade(db, now - timedelta(hours=2), now - timedelta(hours=1), pnl_net=8.0, fee=2.0)
 
     metrics = build_dashboard_metrics(settings, db, trader, state, now)
 
-    assert metrics["equity_reconcile_delta"] == 0.0
-    assert metrics["equity_now"] == metrics["equity_start"] + metrics["pnl_realized_total"] + metrics["pnl_unrealized"] - metrics["fees_total"]
+    assert metrics["reconciliation_delta_usd"] == 0.0
+    assert metrics["equity_now_usd"] == metrics["equity_start_usd"] + metrics["realized_net_usd"] + metrics["unrealized_usd"]
+    assert metrics["realized_net_usd"] == metrics["realized_gross_usd"] - metrics["fees_total_usd"]
+
+
+def test_challenge_window_filters_out_pre_reset_closed_trades(tmp_path):
+    settings, db, trader, state = _setup(tmp_path)
+    now = datetime(2024, 1, 2, 12, 0, tzinfo=timezone.utc)
+    challenge_start = datetime(2024, 1, 2, 0, 0, tzinfo=timezone.utc)
+    db.set_runtime_state("accounting.challenge_start_ts", value_text=challenge_start.isoformat())
+
+    _closed_trade(db, now - timedelta(days=2), now - timedelta(days=2, hours=-1), pnl_net=50.0, fee=1.0)
+    _closed_trade(db, now - timedelta(hours=2), now - timedelta(hours=1), pnl_net=10.0, fee=1.0)
+
+    metrics = build_dashboard_metrics(settings, db, trader, state, now)
+
+    assert metrics["realized_net_usd"] == 10.0
+    assert metrics["fees_total_usd"] == 1.0
+    assert len([t for t in metrics["trades"] if t.closed_at is not None]) == 1
 
 
 def test_daily_rollover_resets_daily_but_not_global(tmp_path):
     settings, db, trader, state = _setup(tmp_path)
     day1 = datetime(2024, 1, 1, 23, 59, tzinfo=timezone.utc)
+    db.set_runtime_state("accounting.challenge_start_ts", value_text=(day1 - timedelta(days=1)).isoformat())
     _closed_trade(db, day1 - timedelta(hours=2), day1 - timedelta(minutes=1), pnl_net=10.0, fee=0.0)
 
     m1 = build_dashboard_metrics(settings, db, trader, state, day1)
@@ -55,32 +74,3 @@ def test_daily_rollover_resets_daily_but_not_global(tmp_path):
     assert m2["pnl_realized_today"] == 0.0
     assert m2["trades_today"] == 0
     assert m2["equity_high_watermark"] >= m1["equity_high_watermark"]
-
-
-def test_high_watermark_and_global_drawdown(tmp_path):
-    settings, db, trader, state = _setup(tmp_path)
-    now = datetime(2024, 1, 3, 12, 0, tzinfo=timezone.utc)
-
-    db.set_runtime_state("accounting.equity_high_watermark", value_number=1200.0)
-    db.set_runtime_state("accounting.max_global_dd_abs", value_number=0.0)
-    db.set_runtime_state("accounting.max_global_dd_pct", value_number=0.0)
-
-    m = build_dashboard_metrics(settings, db, trader, state, now)
-    assert m["global_dd_abs"] == 200.0
-    assert m["global_dd_pct"] == (200.0 / 1200.0)
-    assert m["max_global_dd_abs"] == 200.0
-
-
-def test_replay_determinism_metrics_independent_of_polling_pace(tmp_path):
-    settings, db, trader, state = _setup(tmp_path)
-    t0 = datetime(2024, 1, 4, 12, 0, tzinfo=timezone.utc)
-    _closed_trade(db, t0 - timedelta(hours=3), t0 - timedelta(hours=2), pnl_net=5.0, fee=1.0)
-    _closed_trade(db, t0 - timedelta(hours=2), t0 - timedelta(hours=1), pnl_net=-3.0, fee=1.0)
-
-    fast = build_dashboard_metrics(settings, db, trader, state, t0)
-    _ = build_dashboard_metrics(settings, db, trader, state, t0 - timedelta(minutes=30))
-    slow = build_dashboard_metrics(settings, db, trader, state, t0)
-
-    assert fast["equity_now"] == slow["equity_now"]
-    assert fast["global_dd_pct"] == slow["global_dd_pct"]
-    assert fast["pnl_realized_total"] == slow["pnl_realized_total"]

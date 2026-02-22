@@ -317,7 +317,8 @@ class DecisionScheduler:
         except json.JSONDecodeError:
             return [Blocker(code="challenge_state_unavailable", layer="terminal", detail="Challenge state is unreadable; trading disabled for safety.")]
         status = str(challenge.get("status", "")).upper()
-        if status in {"PASSED", "FAILED"}:
+        terminal_statuses = {"PASSED", "FAILED_DRAWDOWN", "FAILED_DAILY", "STOPPED_DAILY_TARGET", "STOPPED_COOLDOWN"}
+        if status in terminal_statuses:
             return [Blocker(code=f"challenge_{status.lower()}", layer="terminal", detail=f"Challenge status is {status}.")]
         return []
 

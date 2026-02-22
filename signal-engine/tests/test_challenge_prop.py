@@ -37,8 +37,9 @@ def test_fail_transition_on_daily_loss(tmp_path):
     now = datetime(2024, 1, 1, tzinfo=timezone.utc)
     svc.reset(now, 1000)
     out = svc.update(equity=940, daily_start_equity=1000, now=now, traded_today=False)
-    assert out.status == "FAILED"
+    assert out.status == "FAILED_DAILY"
     assert out.violation_reason == "daily_loss_limit"
+    assert out.failed_at_equity == 940
 
 
 def test_fail_transition_on_global_drawdown(tmp_path):
@@ -50,8 +51,9 @@ def test_fail_transition_on_global_drawdown(tmp_path):
     st.peak_equity = 1200
     svc.save(st)
     out = svc.update(equity=1070, daily_start_equity=1070, now=now, traded_today=False)
-    assert out.status == "FAILED"
+    assert out.status == "FAILED_DRAWDOWN"
     assert out.violation_reason == "global_drawdown_limit"
+    assert out.failed_at_equity == 1070
 
 
 def test_governor_stepdown_stepup(tmp_path):

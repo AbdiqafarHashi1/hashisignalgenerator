@@ -49,8 +49,24 @@ class PropRiskGovernor:
     def block_reason(self, now: datetime) -> GovernorBlock | None:
         st = self.load(now)
         trades = self._db.fetch_trades()
-        realized = sum(float(t.pnl_usd or 0.0) for t in trades if t.closed_at)
-        fees = sum(float(t.fees or 0.0) for t in trades if t.closed_at)
+        challenge_start_row = self._db.get_runtime_state("accounting.challenge_start_ts")
+        challenge_start_ts = (
+            datetime.fromisoformat(str(challenge_start_row.value_text).replace("Z", "+00:00"))
+            if challenge_start_row and challenge_start_row.value_text
+            else None
+        )
+
+        scoped_closed = []
+        for trade in trades:
+            if not trade.closed_at:
+                continue
+            closed_at = datetime.fromisoformat(str(trade.closed_at).replace("Z", "+00:00"))
+            if challenge_start_ts is not None and closed_at < challenge_start_ts:
+                continue
+            scoped_closed.append(trade)
+
+        realized = sum(float(t.pnl_usd or 0.0) for t in scoped_closed)
+        fees = sum(float(t.fees or 0.0) for t in scoped_closed)
         unrealized = 0.0
         acct = compute_accounting_snapshot(
             equity_start=float(self._s.account_size or 0.0),
@@ -59,7 +75,7 @@ class PropRiskGovernor:
             fees=fees,
             day_start_equity=float(self._s.account_size or 0.0),
             hwm=float(self._s.account_size or 0.0),
-            trade_close_dates=[t.closed_at for t in trades if t.closed_at],
+            trade_close_dates=[t.closed_at for t in scoped_closed if t.closed_at],
             profit_target_pct=float(self._s.prop_profit_target_pct or 0.0),
         )
         return evaluate_prop_block(

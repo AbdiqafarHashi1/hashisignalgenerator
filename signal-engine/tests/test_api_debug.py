@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from fastapi.testclient import TestClient
 
@@ -203,6 +203,23 @@ def test_dashboard_overview_contract() -> None:
         assert "recent_trades" in payload
 
 
+
+def test_dashboard_realized_card_uses_net_value() -> None:
+    from app import main as main_module
+
+    with TestClient(main_module.app) as client:
+        now = datetime.now(timezone.utc)
+        client.app.state.database.set_runtime_state("accounting.challenge_start_ts", value_text=(now - timedelta(days=1)).isoformat())
+        trade_id = client.app.state.database.open_trade("ETHUSDT", 100.0, 90.0, 120.0, 1.0, "long", now - timedelta(hours=2), trade_mode="paper")
+        client.app.state.database.close_trade(trade_id, 110.0, 8.0, 1.0, now - timedelta(hours=1), "tp_close", fees=2.0)
+
+        response = client.get("/dashboard/overview")
+        assert response.status_code == 200
+        account = response.json()["account"]
+        assert account["realized_pnl"] == account["realized_net_usd"]
+        assert account["realized_gross_usd"] - account["realized_net_usd"] == account["fees_total_usd"]
+
+
 def test_kill_switch_endpoint() -> None:
     from app import main as main_module
 
@@ -295,7 +312,7 @@ def test_challenge_service_initialized_on_startup() -> None:
         response = client.get("/challenge/status")
         assert response.status_code == 200
         payload = response.json()
-        assert payload["status"] in {"IN_PROGRESS", "PASSED", "FAILED"}
+        assert payload["status"] in {"RUNNING", "STOPPED_DAILY_TARGET", "STOPPED_COOLDOWN", "FAILED_DRAWDOWN", "FAILED_DAILY", "PASSED"}
 
         state_response = client.get("/state")
         assert state_response.status_code == 200

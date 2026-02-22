@@ -154,14 +154,17 @@ export default function LiveDashboard() {
   const ethCard = findSymbol(symbols, "ETHUSDT");
   const btcCard = findSymbol(symbols, "BTCUSDT");
 
-  const pnlTotal = num(account.realized_pnl);
+  const realizedNet = num(account.realized_net_usd ?? account.realized_pnl);
+  const realizedGross = num(account.realized_gross_usd);
   const equityStart = num(account.starting_equity);
   const equityNow = num(account.live_equity ?? state?.equity);
   const feesToday = num(account.fees_today);
-  const feesTotal = num(account.fees_total);
-  const statusReasonRaw = asText((account.pause_reasons as unknown[] | undefined)?.[0]) || asText(state?.blocker_code) || "none";
+  const feesTotal = num(account.fees_total_usd ?? account.fees_total);
+  const challengeStatus = asText(account.challenge_status) || "RUNNING";
+  const challengeStatusReason = asText(account.challenge_status_reason) || asText((account.pause_reasons as unknown[] | undefined)?.[0]);
+  const statusReasonRaw = challengeStatusReason || asText(state?.blocker_code) || "none";
   const unrealizedPnl = num(account.unrealized_pnl ?? state?.unrealized_pnl_usd);
-  const statusText = running ? "RUNNING" : "STOPPED";
+  const statusText = challengeStatus || (running ? "RUNNING" : "STOPPED");
   const dailyDdPct = num(account.daily_drawdown_pct ?? state?.daily_loss_pct);
   const globalDdPct = num(account.global_drawdown_pct);
   const dailyLimitPct = num(risk.daily_loss_limit_pct);
@@ -203,13 +206,15 @@ export default function LiveDashboard() {
   const maxDays = num(account.prop_max_days ?? risk.prop_max_days ?? bundle?.debugConfig.effective?.prop_max_days);
   const rolloverLabel = asText(account.rollover_label ?? account.trading_day_rollover ?? risk.rollover_label) || "default";
   const blockerCode = asText(state?.blocker_code) || asText((account.pause_reasons as unknown[] | undefined)?.[0]);
-  const blockerSummary = blockerCode ? `${blockerCode} · ${formatBlocker(blockerCode)}` : "No active blocker";
+  const blockerSummary = challengeStatusReason ? `${challengeStatus} · ${challengeStatusReason}` : blockerCode ? `${blockerCode} · ${formatBlocker(blockerCode)}` : "No active blocker";
   const openPositions = Array.isArray(account.open_positions_detail) ? (account.open_positions_detail as Array<Record<string, unknown>>) : [];
   const openOrders = Array.isArray(account.open_orders) ? (account.open_orders as Array<Record<string, unknown>>) : [];
   const executions = Array.isArray(account.executions) ? (account.executions as Array<Record<string, unknown>>) : [];
   const eventTape = Array.isArray(account.event_tape) ? (account.event_tape as Array<Record<string, unknown>>) : [];
   const replayState = (diag?.replay_state as Record<string, unknown> | undefined) ?? {};
   const replayResume = (replayState?.replay_resume_files_in_use as Record<string, unknown> | undefined) ?? {};
+  const reconciliationDelta = Math.abs(num(account.reconciliation_delta_usd ?? account.equity_reconcile_delta) ?? 0);
+  const equityCheckLabel = reconciliationDelta < 0.5 ? "Equity check: OK" : `Mismatch: ${money(reconciliationDelta)}`;
 
   return (
     <div className="min-h-screen bg-gradient-to-b from-[#01040c] via-[#020712] to-[#090f1c] px-3 py-5 text-slate-100 md:px-6">
@@ -280,9 +285,9 @@ export default function LiveDashboard() {
 
           <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
             <Kpi loading={loading} tier="b" label="Equity Start" value={money(equityStart)} />
-            <Kpi loading={loading} tier="b" label="Realized PnL (Total)" value={money(pnlTotal)} valueClass={pnlToneClass(pnlTotal)} />
+            <Kpi loading={loading} tier="b" label="Realized PnL (Net)" value={money(realizedNet)} helper={`Gross: ${money(realizedGross)} | Fees: ${money(feesTotal)}`} valueClass={pnlToneClass(realizedNet)} />
             <Kpi loading={loading} tier="b" label="Unrealized PnL" value={money(unrealizedPnl)} valueClass={pnlToneClass(unrealizedPnl)} />
-            <Kpi loading={loading} tier="b" label="Fees (Today / Total)" value={`${money(feesToday)} / ${money(feesTotal)}`} />
+            <Kpi loading={loading} tier="b" label="Fees (Today / Total)" value={`${money(feesToday)} / ${money(feesTotal)}`} helper={equityCheckLabel} />
             <Kpi loading={loading} tier="b" label="Trades (today)" value={String(activity.trades_today ?? state?.trades_today ?? "—")} />
           </div>
 
@@ -603,6 +608,7 @@ function Kpi({
   valueClass = "",
   tier = "b",
   cardClass = "",
+  helper,
 }: {
   loading?: boolean;
   label: string;
@@ -610,6 +616,7 @@ function Kpi({
   valueClass?: string;
   tier?: "a" | "b" | "c";
   cardClass?: string;
+  helper?: string;
 }) {
   const sizeClass = tier === "a" ? "text-2xl sm:text-3xl lg:text-4xl" : tier === "b" ? "text-2xl sm:text-3xl" : "text-lg sm:text-xl";
   return (
@@ -620,6 +627,7 @@ function Kpi({
         <>
           <p className="text-[11px] text-slate-400/80">{label}</p>
           <p className={`mt-1 overflow-hidden text-ellipsis whitespace-nowrap font-mono ${sizeClass} font-semibold leading-tight tabular-nums text-slate-50 ${valueClass}`} title={value}>{value}</p>
+          {helper ? <p className="mt-1 text-[11px] text-slate-400">{helper}</p> : null}
         </>
       )}
     </Card>

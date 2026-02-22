@@ -254,9 +254,9 @@ def _build_engine_state_snapshot() -> EngineState:
     trades_today = int(acct["trades_today"])
     realized_pnl_today = float(acct["pnl_realized_today"])
 
-    unrealized = float(acct["pnl_unrealized"])
+    unrealized = float(acct["unrealized_usd"])
     balance = float(acct["balance"])
-    equity = float(acct["equity_now"])
+    equity = float(acct["equity_now_usd"])
     max_dd_today_pct = float(acct["daily_dd_pct"]) * 100
     db.record_equity(equity=equity, realized_pnl_today=realized_pnl_today, drawdown_pct=max_dd_today_pct)
 
@@ -933,10 +933,10 @@ async def dashboard_overview() -> DashboardOverview:
     perf = build_performance_snapshot(trades, account_size=float(cfg.account_size or 0.0), skip_reason_counts=state_store.skip_reason_counts())
 
     starting_equity = float(acct["equity_start"])
-    realized = float(acct["pnl_realized_total"])
-    unrealized = float(acct["pnl_unrealized"])
-    equity = float(acct["equity_now"])
-    fees_total = float(acct["fees_total"])
+    realized = float(acct["realized_net_usd"])
+    unrealized = float(acct["unrealized_usd"])
+    equity = float(acct["equity_now_usd"])
+    fees_total = float(acct["fees_total_usd"])
     fees_today = float(acct["fees_today"])
     trades_today = int(acct["trades_today"])
 
@@ -999,18 +999,33 @@ async def dashboard_overview() -> DashboardOverview:
         for item in raw_events
     ]
 
+    challenge_payload = _require_challenge_service().status_payload(now=now)
+
     return DashboardOverview(
         account={
             "live_equity": equity,
             "starting_equity": starting_equity,
             "balance": float(acct["balance"]),
             "unrealized_pnl": unrealized,
-            "realized_pnl": realized,
+            "realized_pnl": realized,  # deprecated: now net
+            "realized_gross_usd": float(acct["realized_gross_usd"]),
+            "realized_net_usd": float(acct["realized_net_usd"]),
             "realized_pnl_today": float(acct["pnl_realized_today"]),
             "fees_total": fees_total,
+            "fees_total_usd": float(acct["fees_total_usd"]),
             "fees_today": fees_today,
             "metrics_version": int(acct["metrics_version"]),
             "equity_reconcile_delta": float(acct["equity_reconcile_delta"]),
+            "equity_calc_usd": float(acct["equity_calc_usd"]),
+            "equity_now_usd": float(acct["equity_now_usd"]),
+            "reconciliation_delta_usd": float(acct["reconciliation_delta_usd"]),
+            "challenge_start_ts": acct["challenge_start_ts"],
+            "challenge_status": challenge_payload.get("status"),
+            "challenge_status_reason": challenge_payload.get("status_reason"),
+            "failed_at_ts": challenge_payload.get("failed_at_ts"),
+            "failed_at_equity": challenge_payload.get("failed_at_equity"),
+            "pass_at_ts": challenge_payload.get("pass_at_ts"),
+            "pass_at_equity": challenge_payload.get("pass_at_equity"),
             "daily_start_equity": float(acct["day_start_equity"]),
             "global_peak_equity": float(acct["equity_high_watermark"]),
             "daily_drawdown_usd": daily_dd_usd,

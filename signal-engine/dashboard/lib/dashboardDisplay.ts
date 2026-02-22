@@ -11,6 +11,12 @@ const STATUS_REASON_LABELS: Record<string, string> = {
   max_trades_reached: "Max trades reached",
   global_drawdown_limit: "Global drawdown limit reached",
   daily_drawdown_limit: "Daily drawdown limit reached",
+  RUNNING: "Challenge running",
+  STOPPED_DAILY_TARGET: "Stopped: daily target reached",
+  STOPPED_COOLDOWN: "Stopped: cooldown active",
+  FAILED_DRAWDOWN: "Failed: global drawdown breached",
+  FAILED_DAILY: "Failed: daily loss breached",
+  PASSED: "Passed",
 };
 
 const BLOCKER_LABELS: Record<string, string> = {

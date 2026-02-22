@@ -930,15 +930,43 @@ async def dashboard_overview() -> DashboardOverview:
     now = _runtime_now()
     acct = build_dashboard_metrics(cfg, db, trader, state_store, now)
     trades = acct["trades"]
-    perf = build_performance_snapshot(trades, account_size=float(cfg.account_size or 0.0), skip_reason_counts=state_store.skip_reason_counts())
+    all_trades = acct.get("trades_all", trades)
+    perf = build_performance_snapshot(all_trades, account_size=float(cfg.account_size or 0.0), skip_reason_counts=state_store.skip_reason_counts())
+
+    fee_rate = float(cfg.fee_rate_bps or 0.0) / 10000
+    realized = 0.0
+    unrealized = 0.0
+    fees_total = 0.0
+    trades_today = 0
+    realized_today = 0.0
+    fees_today = 0.0
+    trades_today_by_symbol: dict[str, int] = {}
+    day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    for trade in all_trades:
+        closed_at = _as_datetime_utc(getattr(trade, "closed_at", None))
+        opened_at = _as_datetime_utc(getattr(trade, "opened_at", None))
+        symbol = str(getattr(trade, "symbol", ""))
+        if closed_at is not None:
+            realized += float(getattr(trade, "pnl_usd", 0.0) or 0.0)
+            fees_total += _trade_fee(trade, cfg)
+            if closed_at >= day_start:
+                trades_today += 1
+                realized_today += float(getattr(trade, "pnl_usd", 0.0) or 0.0)
+                fees_today += _trade_fee(trade, cfg)
+                trades_today_by_symbol[symbol] = trades_today_by_symbol.get(symbol, 0) + 1
+            continue
+
+        mark = float(trader._last_mark_prices.get(trade.symbol, trade.entry))
+        side_sign = 1.0 if trade.side == "long" else -1.0
+        unrealized += (mark - trade.entry) * trade.size * side_sign
+        fees_total += (trade.entry * trade.size) * fee_rate
+        if opened_at is not None and opened_at >= day_start:
+            trades_today += 1
+            fees_today += (trade.entry * trade.size) * fee_rate
+            trades_today_by_symbol[symbol] = trades_today_by_symbol.get(symbol, 0) + 1
 
     starting_equity = float(acct["equity_start"])
-    realized = float(acct["realized_net_usd"])
-    unrealized = float(acct["unrealized_usd"])
-    equity = float(acct["equity_now_usd"])
-    fees_total = float(acct["fees_total_usd"])
-    fees_today = float(acct["fees_today"])
-    trades_today = int(acct["trades_today"])
+    equity = starting_equity + realized + unrealized
 
     daily_dd_pct = float(acct["daily_dd_pct"])
     global_dd_pct = float(acct["global_dd_pct"])
@@ -952,17 +980,17 @@ async def dashboard_overview() -> DashboardOverview:
     open_orders: list[dict[str, Any]] = []
     executions = [
         {
-            "id": t.id,
-            "symbol": t.symbol,
-            "side": t.side,
-            "price": t.exit,
-            "qty": t.size,
-            "fee": _trade_fee(t, cfg),
-            "status": t.result,
-            "time": t.closed_at,
+            "id": item.get("id"),
+            "symbol": item.get("payload", {}).get("symbol"),
+            "side": item.get("payload", {}).get("side"),
+            "price": item.get("payload", {}).get("price"),
+            "qty": item.get("payload", {}).get("qty"),
+            "fee": item.get("payload", {}).get("fee"),
+            "status": item.get("payload", {}).get("reason"),
+            "time": item.get("timestamp"),
         }
-        for t in trades[:200]
-        if t.closed_at is not None and t.exit is not None
+        for item in db.fetch_events(limit=400)
+        if item.get("event_type") == "execution_fill"
     ]
 
     symbol_data: dict[str, dict[str, Any]] = {}
@@ -1008,16 +1036,16 @@ async def dashboard_overview() -> DashboardOverview:
             "balance": float(acct["balance"]),
             "unrealized_pnl": unrealized,
             "realized_pnl": realized,  # deprecated: now net
-            "realized_gross_usd": float(acct["realized_gross_usd"]),
-            "realized_net_usd": float(acct["realized_net_usd"]),
-            "realized_pnl_today": float(acct["pnl_realized_today"]),
+            "realized_gross_usd": float(realized + fees_total),
+            "realized_net_usd": float(realized),
+            "realized_pnl_today": float(realized_today),
             "fees_total": fees_total,
-            "fees_total_usd": float(acct["fees_total_usd"]),
+            "fees_total_usd": float(fees_total),
             "fees_today": fees_today,
             "metrics_version": int(acct["metrics_version"]),
             "equity_reconcile_delta": float(acct["equity_reconcile_delta"]),
-            "equity_calc_usd": float(acct["equity_calc_usd"]),
-            "equity_now_usd": float(acct["equity_now_usd"]),
+            "equity_calc_usd": float(equity),
+            "equity_now_usd": float(equity),
             "reconciliation_delta_usd": float(acct["reconciliation_delta_usd"]),
             "challenge_start_ts": acct["challenge_start_ts"],
             "challenge_status": challenge_payload.get("status"),
@@ -1034,7 +1062,7 @@ async def dashboard_overview() -> DashboardOverview:
             "global_drawdown_pct": global_dd_pct,
             "max_global_dd_abs": float(acct["max_global_dd_abs"]),
             "max_global_dd_pct": float(acct["max_global_dd_pct"]),
-            "trades_today_by_symbol": dict(acct["trades_today_by_symbol"]),
+            "trades_today_by_symbol": trades_today_by_symbol,
             "realized_pnl_by_symbol": dict(acct["realized_pnl_by_symbol"]),
             "fees_by_symbol": dict(acct["fees_by_symbol"]),
             "open_positions_detail": open_positions,
@@ -1071,7 +1099,7 @@ async def dashboard_overview() -> DashboardOverview:
             "market_data_errors": state_store.market_data_error_counts(),
         },
         symbols=symbol_data,
-        recent_trades=[_trade_to_dict(t, trader, cfg) for t in trades[:100]],
+        recent_trades=[_trade_to_dict(t, trader, cfg) for t in all_trades[:100]],
         equity_curve=[{"index": idx, "equity": starting_equity + val} for idx, val in enumerate(perf.equity_curve)],
         skip_reasons={"global": state_store.skip_reason_counts(), "by_symbol": skip_by_symbol},
     )

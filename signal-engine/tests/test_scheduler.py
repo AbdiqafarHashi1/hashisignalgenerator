@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from datetime import datetime, timezone
 
 from app.config import Settings
@@ -961,3 +962,45 @@ def test_tick_listener_error_logs_are_rate_limited(monkeypatch, caplog):
 
     assert len(full_errors) == 2
     assert len(suppressed) == 1
+
+
+def test_replay_sleep_disabled_for_high_speed_and_pause_override() -> None:
+    settings = Settings(run_mode="replay", market_data_replay_speed=2000, replay_pause_seconds=None, telegram_enabled=False, _env_file=None)
+    state = StateStore()
+    scheduler = DecisionScheduler(settings, state)
+
+    assert scheduler._compute_replay_sleep_seconds(0.0001) == 0.0
+
+    settings_pause_zero = Settings(run_mode="replay", market_data_replay_speed=50, replay_pause_seconds=0, telegram_enabled=False, _env_file=None)
+    scheduler_pause_zero = DecisionScheduler(settings_pause_zero, state)
+    assert scheduler_pause_zero._compute_replay_sleep_seconds(0.0) == 0.0
+
+
+def test_replay_loop_2000_ticks_runs_fast_when_sleep_disabled(monkeypatch) -> None:
+    settings = Settings(
+        run_mode="replay",
+        market_data_replay_speed=2000,
+        replay_pause_seconds=0,
+        replay_max_bars=10_000,
+        telegram_enabled=False,
+        _env_file=None,
+    )
+    state = StateStore()
+    scheduler = DecisionScheduler(settings, state)
+
+    async def fake_run_once(force: bool = False):
+        scheduler._replay_bars_processed += 1
+        if scheduler._replay_bars_processed >= 2000:
+            scheduler._stop_event.set()
+        await asyncio.sleep(0)
+        return []
+
+    monkeypatch.setattr(scheduler, "run_once", fake_run_once)
+
+    started = time.perf_counter()
+    asyncio.run(scheduler._run_loop())
+    elapsed = time.perf_counter() - started
+
+    assert scheduler._replay_bars_processed >= 2000
+    assert elapsed < 1.5
+

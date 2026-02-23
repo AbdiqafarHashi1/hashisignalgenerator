@@ -9,6 +9,7 @@ import logging
 from ..config import Settings
 from ..models import Direction, TradePlan
 from ..providers.bybit import BybitKlineSnapshot
+from .cost_model import CostModel, CryptoCostModel, ForexCostModel
 from .database import Database
 
 
@@ -36,6 +37,15 @@ class PaperTrader:
         self._trail_state: dict[int, float] = {}
         self._last_sizing_decisions: dict[str, dict[str, object]] = {}
         self._clock = lambda: datetime.now(timezone.utc)
+        self._cost_model: CostModel = (
+            ForexCostModel(spread_bps=float(settings.spread_bps or 0.0), commission_bps=float(settings.fee_rate_bps or 0.0))
+            if settings.asset_class == "forex"
+            else CryptoCostModel(
+                fee_rate_bps=float(settings.fee_rate_bps or 0.0),
+                spread_bps=float(settings.spread_bps or 0.0),
+                slippage_bps=float(settings.slippage_bps or 0.0),
+            )
+        )
 
 
     def set_clock(self, clock_fn) -> None:
@@ -250,7 +260,7 @@ class PaperTrader:
         results: list[PaperTradeResult] = []
         for trade in self._db.fetch_open_trades(symbol):
             exit_price = self._apply_exit_price(trade.side, price)
-            pnl_usd, pnl_r, fees = self._calculate_pnl(trade.side, trade.entry, exit_price, trade.stop, trade.size)
+            pnl_usd, pnl_r, fees = self._calculate_pnl(trade.symbol, trade.side, trade.entry, exit_price, trade.stop, trade.size)
             self._db.close_trade(
                 trade_id=trade.id,
                 exit_price=exit_price,
@@ -314,7 +324,7 @@ class PaperTrader:
                 continue
             exit_price, result = hit_result
             exit_with_costs = self._apply_exit_price(trade.side, exit_price)
-            pnl_usd, pnl_r, fees = self._calculate_pnl(trade.side, trade.entry, exit_with_costs, trade.stop, trade.size)
+            pnl_usd, pnl_r, fees = self._calculate_pnl(trade.symbol, trade.side, trade.entry, exit_with_costs, trade.stop, trade.size)
             self._db.close_trade(
                 trade_id=trade.id,
                 exit_price=exit_with_costs,
@@ -410,24 +420,13 @@ class PaperTrader:
         return margin_required <= self._available_margin()
 
     def _apply_entry_price(self, side: str, price: float) -> float:
-        spread = self._settings.spread_bps / 10_000
-        slippage = self._settings.slippage_bps / 10_000
-        impact = spread + slippage
-        if side == "long":
-            return price * (1 + impact)
-        return price * (1 - impact)
+        return self._cost_model.apply_entry_price(side, price)
 
     def _apply_exit_price(self, side: str, price: float) -> float:
-        spread = self._settings.spread_bps / 10_000
-        slippage = self._settings.slippage_bps / 10_000
-        impact = spread + slippage
-        if side == "long":
-            return price * (1 - impact)
-        return price * (1 + impact)
+        return self._cost_model.apply_exit_price(side, price)
 
-    def _fees_usd(self, entry: float, exit_price: float, qty_base: float) -> float:
-        fee_rate = self._settings.fee_rate_bps / 10_000
-        return (entry * qty_base + exit_price * qty_base) * fee_rate
+    def _fees_usd(self, symbol: str, entry: float, exit_price: float, qty_base: float) -> float:
+        return self._cost_model.fees(symbol=symbol, entry=entry, exit_price=exit_price, qty=qty_base)
 
     def _unrealized_pnl(self, side: str, entry: float, mark_price: float, qty_base: float) -> float:
         side_sign = 1.0 if side == "long" else -1.0
@@ -490,6 +489,7 @@ class PaperTrader:
 
     def _calculate_pnl(
         self,
+        symbol: str,
         side: str,
         entry: float,
         exit_price: float,
@@ -498,7 +498,7 @@ class PaperTrader:
     ) -> tuple[float, float, float]:
         side_sign = 1.0 if side == "long" else -1.0
         gross_pnl = (exit_price - entry) * size * side_sign
-        fees = self._fees_usd(entry, exit_price, size)
+        fees = self._fees_usd(symbol, entry, exit_price, size)
         pnl_usd = gross_pnl - fees
         risk_per_unit = abs(entry - stop)
         pnl_r = ((exit_price - entry) * side_sign) / risk_per_unit if risk_per_unit else 0.0

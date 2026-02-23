@@ -23,7 +23,8 @@ class Settings(BaseSettings):
     MODE: Literal["prop_cfd", "personal_crypto", "paper", "signal_only", "live"] = Field("prop_cfd", validation_alias=AliasChoices("MODE", "mode"))
     run_mode: Literal["live", "replay"] = Field("live", validation_alias=AliasChoices("RUN_MODE", "run_mode"))
     PROFILE: Literal["profit", "diag", "instant_funded"] = Field("profit", validation_alias=AliasChoices("PROFILE", "profile"))
-    strategy_profile: Literal["SCALPER_FAST", "SCALPER_STABLE", "RANGE_MEAN_REVERT", "INTRADAY_TREND_SELECTIVE", "PROP_PASS", "CRYPTO_SCALP_25", "FTMO_PASS_25", "INSTANT_FUNDED"] = Field("SCALPER_STABLE", validation_alias=AliasChoices("STRATEGY_PROFILE", "strategy_profile"))
+    strategy_profile: Literal["CORE_STRATEGY", "SCALPER_FAST", "SCALPER_STABLE", "RANGE_MEAN_REVERT", "INTRADAY_TREND_SELECTIVE", "PROP_PASS", "CRYPTO_SCALP_25", "FTMO_PASS_25", "INSTANT_FUNDED"] = Field("SCALPER_STABLE", validation_alias=AliasChoices("STRATEGY_PROFILE", "strategy_profile"))
+    risk_mode: Literal["SAFE_75", "FAST_25"] = Field("SAFE_75", validation_alias=AliasChoices("RISK_MODE", "risk_mode"))
     strategy_bias_ema_fast: int = Field(50, validation_alias=AliasChoices("STRATEGY_BIAS_EMA_FAST", "strategy_bias_ema_fast"))
     strategy_bias_ema_slow: int = Field(200, validation_alias=AliasChoices("STRATEGY_BIAS_EMA_SLOW", "strategy_bias_ema_slow"))
     strategy_swing_lookback: int = Field(30, validation_alias=AliasChoices("STRATEGY_SWING_LOOKBACK", "strategy_swing_lookback"))
@@ -618,7 +619,23 @@ class Settings(BaseSettings):
         explicit_prop_enabled = "PROP_ENABLED" in os.environ or "prop_enabled" in os.environ
         explicit_prop_governor_enabled = "PROP_GOVERNOR_ENABLED" in os.environ or "prop_governor_enabled" in os.environ
 
-        if self.PROFILE == "instant_funded" or self.strategy_profile == "INSTANT_FUNDED":
+        if self.strategy_profile in {"INSTANT_FUNDED", "CRYPTO_SCALP_25"}:
+            self.risk_mode = "FAST_25"
+        elif self.strategy_profile in {"PROP_PASS", "FTMO_PASS_25"}:
+            self.risk_mode = "SAFE_75"
+
+        explicit_risk_mode = "RISK_MODE" in os.environ or "risk_mode" in os.environ
+        if explicit_risk_mode or self.PROFILE == "instant_funded":
+            self.risk_mode = "FAST_25" if self.risk_mode == "FAST_25" or self.PROFILE == "instant_funded" else "SAFE_75"
+            if self.risk_mode == "FAST_25":
+                self.base_risk_pct = max(float(self.base_risk_pct or 0.0), 0.0020)
+                self.max_risk_pct = max(float(self.max_risk_pct or 0.0), 0.0030)
+                self.max_daily_loss_pct = max(float(self.max_daily_loss_pct or 0.0), 0.04)
+                self.max_trades_per_day = max(int(self.max_trades_per_day or 0), 10)
+                self.cooldown_minutes_after_loss = min(int(self.cooldown_minutes_after_loss or 0), 15)
+                self.min_signal_score = min(int(self.min_signal_score or 0), 58)
+
+        if self.PROFILE == "instant_funded":
             self.strategy_profile = "INSTANT_FUNDED"
             self.max_daily_loss_pct = float(self.instant_max_daily_dd_pct)
             self.global_drawdown_limit_pct = float(self.instant_max_global_dd_pct)
@@ -698,6 +715,19 @@ class Settings(BaseSettings):
                 "max_trades_per_day": 50,
             }
         profiles: dict[str, dict[str, object]] = {
+            "CORE_STRATEGY": {
+                "account_size": 25000,
+                "base_risk_pct": 0.0015,
+                "max_risk_pct": 0.0020,
+                "max_daily_loss_pct": 0.05,
+                "daily_profit_target_pct": 0.08,
+                "max_consecutive_losses": 2,
+                "candle_interval": "5m",
+                "tick_interval_seconds": 60,
+                "min_signal_score": 65,
+                "cooldown_minutes_after_loss": 60,
+                "max_trades_per_day": 4,
+            },
             "SCALPER_FAST": {
                 "account_size": 25000,
                 "base_risk_pct": 0.0025,

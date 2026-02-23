@@ -6,7 +6,7 @@ import json
 from pathlib import Path
 from typing import Any, Iterable
 
-from sqlalchemy import JSON, DateTime, Float, Integer, String, Text, create_engine, func, select
+from sqlalchemy import JSON, DateTime, Float, Index, Integer, String, Text, create_engine, func, select
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
 
 from ..config import Settings
@@ -37,6 +37,10 @@ class DecisionRow(Base):
 
 class TradeRow(Base):
     __tablename__ = "trades"
+    __table_args__ = (
+        Index("ix_trades_closed_at", "closed_at"),
+        Index("ix_trades_symbol_closed_at", "symbol", "closed_at"),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     symbol: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
@@ -90,6 +94,7 @@ class RuntimeStateRow(Base):
 
 class ReplayStateRow(Base):
     __tablename__ = "replay_state"
+    __table_args__ = (Index("ix_replay_state_updated_at", "updated_at"),)
 
     symbol: Mapped[str] = mapped_column(String(32), primary_key=True)
     interval: Mapped[str] = mapped_column(String(16), primary_key=True)
@@ -102,6 +107,7 @@ class ReplayStateRow(Base):
 
 class EventRow(Base):
     __tablename__ = "events"
+    __table_args__ = (Index("ix_events_timestamp", "timestamp"),)
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     timestamp: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=func.now())

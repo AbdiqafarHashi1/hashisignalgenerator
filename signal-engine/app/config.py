@@ -22,8 +22,8 @@ class Settings(BaseSettings):
 
     MODE: Literal["prop_cfd", "personal_crypto", "paper", "signal_only", "live"] = Field("prop_cfd", validation_alias=AliasChoices("MODE", "mode"))
     run_mode: Literal["live", "replay"] = Field("live", validation_alias=AliasChoices("RUN_MODE", "run_mode"))
-    PROFILE: Literal["profit", "diag"] = Field("profit", validation_alias=AliasChoices("PROFILE", "profile"))
-    strategy_profile: Literal["SCALPER_FAST", "SCALPER_STABLE", "RANGE_MEAN_REVERT", "INTRADAY_TREND_SELECTIVE", "PROP_PASS", "CRYPTO_SCALP_25", "FTMO_PASS_25"] = Field("SCALPER_STABLE", validation_alias=AliasChoices("STRATEGY_PROFILE", "strategy_profile"))
+    PROFILE: Literal["profit", "diag", "instant_funded"] = Field("profit", validation_alias=AliasChoices("PROFILE", "profile"))
+    strategy_profile: Literal["SCALPER_FAST", "SCALPER_STABLE", "RANGE_MEAN_REVERT", "INTRADAY_TREND_SELECTIVE", "PROP_PASS", "CRYPTO_SCALP_25", "FTMO_PASS_25", "INSTANT_FUNDED"] = Field("SCALPER_STABLE", validation_alias=AliasChoices("STRATEGY_PROFILE", "strategy_profile"))
     strategy_bias_ema_fast: int = Field(50, validation_alias=AliasChoices("STRATEGY_BIAS_EMA_FAST", "strategy_bias_ema_fast"))
     strategy_bias_ema_slow: int = Field(200, validation_alias=AliasChoices("STRATEGY_BIAS_EMA_SLOW", "strategy_bias_ema_slow"))
     strategy_swing_lookback: int = Field(30, validation_alias=AliasChoices("STRATEGY_SWING_LOOKBACK", "strategy_swing_lookback"))
@@ -355,6 +355,15 @@ class Settings(BaseSettings):
     )
     prop_time_cooldown_minutes: int = Field(60, validation_alias=AliasChoices("PROP_TIME_COOLDOWN_MINUTES", "prop_time_cooldown_minutes"))
 
+    instant_monthly_target_pct: float = Field(0.06, validation_alias=AliasChoices("INSTANT_MONTHLY_TARGET_PCT", "instant_monthly_target_pct"))
+    instant_risk_base_pct: float = Field(0.0015, validation_alias=AliasChoices("INSTANT_RISK_BASE_PCT", "instant_risk_base_pct"))
+    instant_risk_max_pct: float = Field(0.0020, validation_alias=AliasChoices("INSTANT_RISK_MAX_PCT", "instant_risk_max_pct"))
+    instant_max_daily_dd_pct: float = Field(0.03, validation_alias=AliasChoices("INSTANT_MAX_DAILY_DD_PCT", "instant_max_daily_dd_pct"))
+    instant_max_global_dd_pct: float = Field(0.06, validation_alias=AliasChoices("INSTANT_MAX_GLOBAL_DD_PCT", "instant_max_global_dd_pct"))
+    instant_max_trades_per_day: int = Field(10, validation_alias=AliasChoices("INSTANT_MAX_TRADES_PER_DAY", "instant_max_trades_per_day"))
+    instant_cooldown_minutes: int = Field(60, validation_alias=AliasChoices("INSTANT_COOLDOWN_MINUTES", "instant_cooldown_minutes"))
+    instant_min_signal_score: int = Field(62, validation_alias=AliasChoices("INSTANT_MIN_SIGNAL_SCORE", "instant_min_signal_score"))
+
     be_enabled: bool = Field(True, validation_alias=AliasChoices("BE_ENABLED", "be_enabled"))
     partial_tp_enabled: bool = Field(True, validation_alias=AliasChoices("PARTIAL_TP_ENABLED", "partial_tp_enabled"))
     partial_tp_r: float = Field(1.0, validation_alias=AliasChoices("PARTIAL_TP_R", "partial_tp_r"))
@@ -606,6 +615,17 @@ class Settings(BaseSettings):
             self.engine_mode = self.MODE
         if self.run_mode == "replay":
             self.market_data_provider = "replay"
+        if self.PROFILE == "instant_funded":
+            self.strategy_profile = "INSTANT_FUNDED"
+            self.max_daily_loss_pct = float(self.instant_max_daily_dd_pct)
+            self.global_drawdown_limit_pct = float(self.instant_max_global_dd_pct)
+            self.max_trades_per_day = int(self.instant_max_trades_per_day)
+            self.cooldown_minutes_after_loss = int(self.instant_cooldown_minutes)
+            self.base_risk_pct = float(self.instant_risk_base_pct)
+            self.max_risk_pct = float(self.instant_risk_max_pct)
+            self.min_signal_score = max(int(self.min_signal_score), int(self.instant_min_signal_score))
+            self.prop_enabled = False
+            self.prop_governor_enabled = True
         if self.asset_class == "forex" and "MARKET_PROVIDER" not in os.environ:
             self.market_provider = "oanda"
         if self.asset_class == "forex" and "MARKET_DATA_PROVIDER" not in os.environ and self.run_mode != "replay":
@@ -805,6 +825,22 @@ class Settings(BaseSettings):
                 "htf_bias_enabled": True,
                 "htf_interval": "1h",
             },
+            "INSTANT_FUNDED": {
+                "account_size": 25000,
+                "base_risk_pct": 0.0015,
+                "max_risk_pct": 0.0020,
+                "max_daily_loss_pct": 0.03,
+                "global_drawdown_limit_pct": 0.06,
+                "daily_profit_target_pct": 0.002,
+                "max_consecutive_losses": 3,
+                "candle_interval": "5m",
+                "tick_interval_seconds": 60,
+                "min_signal_score": 62,
+                "cooldown_minutes_after_loss": 60,
+                "max_trades_per_day": 10,
+                "prop_enabled": False,
+                "prop_governor_enabled": True,
+            },
         }
         return profiles[self.strategy_profile]
 
@@ -831,6 +867,21 @@ class Settings(BaseSettings):
             else:
                 aliases[name] = name.upper()
         return aliases
+
+    def unknown_env_keys(self) -> list[str]:
+        aliases = set(self.env_alias_map().values())
+        legacy_allowed = set(self.LEGACY_ENV_KEYS)
+        runtime_known = {
+            "PATH", "PWD", "HOME", "HOSTNAME", "PYTHONPATH", "PYTHONUNBUFFERED", "TERM", "SHLVL", "_",
+        }
+        unknown: list[str] = []
+        for key in os.environ:
+            if key in aliases or key in legacy_allowed or key in runtime_known:
+                continue
+            if key.startswith(("PYTEST_", "UVICORN_", "GUNICORN_", "DOCKER_", "CI", "GITHUB_")):
+                continue
+            unknown.append(key)
+        return sorted(unknown)
 
     def blackout_windows(self) -> list[tuple[time, time]]:
         windows: list[tuple[time, time]] = []
@@ -958,6 +1009,14 @@ class Settings(BaseSettings):
             "market_data_backoff_base_ms": self.market_data_backoff_base_ms,
             "market_data_backoff_max_ms": self.market_data_backoff_max_ms,
             "market_data_enabled": self.market_data_enabled,
+            "instant_monthly_target_pct": self.instant_monthly_target_pct,
+            "instant_risk_base_pct": self.instant_risk_base_pct,
+            "instant_risk_max_pct": self.instant_risk_max_pct,
+            "instant_max_daily_dd_pct": self.instant_max_daily_dd_pct,
+            "instant_max_global_dd_pct": self.instant_max_global_dd_pct,
+            "instant_max_trades_per_day": self.instant_max_trades_per_day,
+            "instant_cooldown_minutes": self.instant_cooldown_minutes,
+            "instant_min_signal_score": self.instant_min_signal_score,
             "bybit_testnet": self.bybit_testnet,
             "bybit_rest_base": self.bybit_rest_base,
             "bybit_ws_public_linear": self.bybit_ws_public_linear,
@@ -975,4 +1034,9 @@ class Settings(BaseSettings):
 
 @lru_cache
 def get_settings() -> Settings:
-    return Settings()
+    settings = Settings()
+    logger = logging.getLogger(__name__)
+    unknown = settings.unknown_env_keys()
+    if unknown:
+        logger.warning("Unknown environment keys detected (ignored): %s", ", ".join(unknown))
+    return settings

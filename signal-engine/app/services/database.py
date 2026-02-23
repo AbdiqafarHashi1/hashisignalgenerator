@@ -88,6 +88,18 @@ class RuntimeStateRow(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=func.now())
 
 
+class ReplayStateRow(Base):
+    __tablename__ = "replay_state"
+
+    symbol: Mapped[str] = mapped_column(String(32), primary_key=True)
+    interval: Mapped[str] = mapped_column(String(16), primary_key=True)
+    run_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    last_processed_candle_ts: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_processed_index: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    last_tick_seq: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=func.now())
+
+
 class EventRow(Base):
     __tablename__ = "events"
 
@@ -295,6 +307,32 @@ class Database:
     def list_runtime_state(self) -> list[RuntimeStateRow]:
         with self._Session() as session:
             return session.execute(select(RuntimeStateRow).order_by(RuntimeStateRow.key.asc())).scalars().all()
+
+    def set_replay_state(
+        self,
+        *,
+        symbol: str,
+        interval: str,
+        run_id: str,
+        last_processed_candle_ts: datetime | None,
+        last_processed_index: int | None,
+        last_tick_seq: int | None,
+    ) -> None:
+        with self._Session() as session:
+            row = session.get(ReplayStateRow, {"symbol": symbol.upper(), "interval": interval})
+            if row is None:
+                row = ReplayStateRow(symbol=symbol.upper(), interval=interval, run_id=run_id)
+                session.add(row)
+            row.run_id = run_id
+            row.last_processed_candle_ts = _as_utc(last_processed_candle_ts) if last_processed_candle_ts is not None else None
+            row.last_processed_index = int(last_processed_index) if last_processed_index is not None else None
+            row.last_tick_seq = int(last_tick_seq) if last_tick_seq is not None else None
+            row.updated_at = datetime.now(timezone.utc)
+            session.commit()
+
+    def get_replay_state(self, *, symbol: str, interval: str) -> ReplayStateRow | None:
+        with self._Session() as session:
+            return session.get(ReplayStateRow, {"symbol": symbol.upper(), "interval": interval})
 
     def delete_runtime_state_keys(self, keys: list[str]) -> int:
         if not keys:

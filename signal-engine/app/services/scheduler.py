@@ -7,6 +7,7 @@ import os
 import random
 import time
 import traceback
+from uuid import uuid4
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -116,6 +117,7 @@ class DecisionScheduler:
         self._stopping_requested = False
         self._replay_active = False
         self._replay_bars_processed = 0
+        self._replay_run_id = f"replay-{uuid4().hex[:12]}"
         self._engine_clock: datetime | None = None
         if settings.run_mode == "replay" and settings.replay_seed is not None:
             random.seed(settings.replay_seed)
@@ -225,6 +227,7 @@ class DecisionScheduler:
             self._consecutive_failures = 0
             self._replay_active = self._settings.run_mode == "replay"
             self._replay_bars_processed = 0
+            self._replay_run_id = f"replay-{uuid4().hex[:12]}"
             self.started_ts = time.time()
             self._task = asyncio.create_task(self._run_loop(), name="decision_scheduler")
             self._task.add_done_callback(self._on_task_done)
@@ -511,6 +514,15 @@ class DecisionScheduler:
                     if isinstance(self._clock, ReplayClock):
                         self._clock.set_ts(int(tick_ts.timestamp()))
                     now_ms = snapshot.kline_close_time_ms
+                    if self._database is not None:
+                        self._database.set_replay_state(
+                            symbol=symbol,
+                            interval=self._settings.candle_interval,
+                            run_id=self._replay_run_id,
+                            last_processed_candle_ts=tick_ts,
+                            last_processed_index=getattr(snapshot, "replay_cursor_index", None),
+                            last_tick_seq=self._replay_bars_processed,
+                        )
                 self._last_symbol_tick_time[symbol] = tick_ts
                 if snapshot is None:
                     self._last_fetch_counts[symbol] = 0

@@ -123,6 +123,8 @@ latest_snapshot_publish_started_monotonic: float | None = None
 latest_snapshot_publish_task: asyncio.Task | None = None
 STATE_SNAPSHOT_PUBLISH_TTL_SECONDS = 0.25
 runtime_clock: RealClock | ReplayClock | None = None
+_dashboard_cache: dict[str, Any] = {"overview": None, "overview_ts": 0.0}
+_DASHBOARD_CACHE_TTL_SECONDS = 0.5
 
 
 def _record_heartbeat() -> None:
@@ -172,6 +174,19 @@ def _trade_to_dict(trade: Any, trader: PaperTrader | None = None, cfg: Settings 
 
     fee_value = _trade_fee(trade, cfg) if cfg is not None else (float(getattr(trade, "fees", 0.0) or 0.0) if getattr(trade, "fees", None) is not None else None)
 
+    raw_result = str(getattr(trade, "result", "") or "").strip().upper()
+    result_map = {
+        "TP_CLOSE": "TP_CLOSE",
+        "SL_CLOSE": "SL_CLOSE",
+        "TIME_STOP_CLOSE": "TIME_EXIT",
+        "TIME_EXIT": "TIME_EXIT",
+        "FORCE_CLOSE": "MANUAL",
+        "FORCE_TRADE_AUTO_CLOSE": "MANUAL",
+        "MANUAL": "MANUAL",
+        "LIQUIDATION": "LIQUIDATION",
+    }
+    normalized_result = result_map.get(raw_result, "MANUAL" if raw_result in {"", "UNKNOWN"} else raw_result)
+
     return {
         "id": trade.id,
         "symbol": trade.symbol,
@@ -185,7 +200,8 @@ def _trade_to_dict(trade: Any, trader: PaperTrader | None = None, cfg: Settings 
         "side": trade.side,
         "opened_at": trade.opened_at,
         "closed_at": trade.closed_at,
-        "result": trade.result,
+        "result": normalized_result,
+        "result_raw": getattr(trade, "result", None),
         "trade_mode": trade.trade_mode,
         "mark_price": mark,
         "unrealized_pnl": unrealized,
@@ -794,8 +810,11 @@ async def stats() -> dict:
 
 
 @app.get("/trades")
-async def trades() -> dict:
-    return {"trades": [trade.__dict__ for trade in _require_database().fetch_trades()]}
+async def trades(limit: int = Query(200, ge=1, le=2000), page: int = Query(1, ge=1)) -> dict:
+    all_trades = _require_database().fetch_trades(limit=limit * page)
+    offset = (page - 1) * limit
+    paged = all_trades[offset : offset + limit]
+    return {"trades": [trade.__dict__ for trade in paged], "page": page, "limit": limit, "returned": len(paged)}
 
 
 @app.get("/equity")
@@ -946,6 +965,12 @@ async def set_kill_switch(enabled: bool = Query(...)) -> dict[str, Any]:
 
 @app.get("/dashboard/overview", response_model=DashboardOverview)
 async def dashboard_overview() -> DashboardOverview:
+    now_monotonic = time.monotonic()
+    cached = _dashboard_cache.get("overview")
+    cached_ts = float(_dashboard_cache.get("overview_ts") or 0.0)
+    if cached is not None and (now_monotonic - cached_ts) <= _DASHBOARD_CACHE_TTL_SECONDS:
+        return cached
+
     cfg = _require_settings()
     state_store = _require_state()
     db = _require_database()
@@ -1103,7 +1128,7 @@ async def dashboard_overview() -> DashboardOverview:
         "mode": cfg.MODE,
     }
 
-    return DashboardOverview(
+    payload = DashboardOverview(
         account={
             "live_equity": equity,
             "starting_equity": starting_equity,
@@ -1181,6 +1206,9 @@ async def dashboard_overview() -> DashboardOverview:
         equity_curve=[{"index": idx, "equity": starting_equity + val} for idx, val in enumerate(perf.equity_curve)],
         skip_reasons={"global": state_store.skip_reason_counts(), "by_symbol": skip_by_symbol},
     )
+    _dashboard_cache["overview"] = payload
+    _dashboard_cache["overview_ts"] = now_monotonic
+    return payload
 
 
 @app.get("/dashboard/metrics")
@@ -1391,13 +1419,27 @@ async def state_today(symbol: str = Query(..., min_length=1)) -> dict:
 def debug_config() -> dict[str, Any]:
     cfg = _require_settings()
     effective = cfg.resolved_settings()
+    sources = cfg.config_sources()
+    aliases = cfg.env_alias_map()
     for secret_key in ("bybit_api_key", "bybit_api_secret", "telegram_bot_token"):
         if secret_key in effective:
             effective[secret_key] = "***"
+    settings_report: dict[str, Any] = {}
+    for key, value in effective.items():
+        source = sources.get(key, "default")
+        env_key = aliases.get(key, key.upper())
+        settings_report[key] = {
+            "value": value,
+            "source": source,
+            "used": True,
+            "env_key": env_key,
+        }
     return {
         "effective": effective,
-        "sources": cfg.config_sources(),
-        "env_keys": cfg.env_alias_map(),
+        "sources": sources,
+        "env_keys": aliases,
+        "settings_report": settings_report,
+        "unknown_env_keys": cfg.unknown_env_keys(),
     }
 
 
@@ -1521,6 +1563,7 @@ async def debug_runtime() -> dict[str, Any]:
         for path in data_root.rglob("*.db") if path.is_file()
     ]
     runtime_rows = db.list_runtime_state()
+    replay_rows = [db.get_replay_state(symbol=s, interval=interval) for s in symbols]
     gov_row = db.get_runtime_state("prop.governor")
     gov_payload = None
     if gov_row and gov_row.value_text:
@@ -1583,6 +1626,18 @@ async def debug_runtime() -> dict[str, Any]:
             "sqlite_file_path": sqlite_path,
             "db_files_found": db_files,
             "active_runtime_state_keys": [row.key for row in runtime_rows],
+            "replay_state_rows": [
+                {
+                    "symbol": row.symbol,
+                    "interval": row.interval,
+                    "run_id": row.run_id,
+                    "last_processed_candle_ts": row.last_processed_candle_ts.isoformat() if row and row.last_processed_candle_ts else None,
+                    "last_processed_index": row.last_processed_index,
+                    "last_tick_seq": row.last_tick_seq,
+                }
+                for row in replay_rows
+                if row is not None
+            ],
             "prop_governor_state_row": gov_payload,
         },
         "risk_sizing_truth": {

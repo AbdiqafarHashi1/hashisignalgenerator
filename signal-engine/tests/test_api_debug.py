@@ -607,3 +607,17 @@ def test_debug_env_keys_returns_503_when_tools_unavailable(monkeypatch) -> None:
         response = client.get("/debug/env-keys")
         assert response.status_code == 503
         assert response.json()["error"] == "tools_unavailable"
+
+def test_debug_env_keys_returns_503_when_env_templates_missing(monkeypatch) -> None:
+    from app import main as main_module
+
+    def fake_collect(_root):
+        return {"templates": {"missing": [".env.example.crypto"]}}
+
+    monkeypatch.setattr("tools.env_audit.collect_env_audit", fake_collect)
+    with TestClient(main_module.app) as client:
+        response = client.get("/debug/env-keys")
+        assert response.status_code == 503
+        payload = response.json()
+        assert payload["error"] == "env_templates_missing"
+        assert ".env.example.crypto" in payload["missing"]

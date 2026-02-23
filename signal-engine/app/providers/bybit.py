@@ -453,6 +453,9 @@ async def fetch_symbol_klines(
     replay_end_ts: str | None = None,
     replay_history_limit: int | None = None,
     replay_resume: bool | None = None,
+    oanda_api_token: str = "",
+    oanda_account_id: str = "",
+    oanda_env: str = "practice",
 ) -> BybitKlineSnapshot | None:
     provider_normalized = (provider or "bybit").lower()
     fallback_order = _parse_fallbacks(fallback_provider)
@@ -462,6 +465,11 @@ async def fetch_symbol_klines(
         return await _fetch_from_binance(symbol=symbol, interval=interval, limit=limit)
     if provider_normalized == "okx":
         return await _fetch_from_okx(symbol=symbol, interval=interval, limit=limit)
+    if provider_normalized == "oanda":
+        from .oanda import OandaPriceProvider
+
+        client = OandaPriceProvider(api_token=oanda_api_token, account_id=oanda_account_id, environment=oanda_env)
+        return await client.fetch_candles(symbol=symbol, interval=interval, limit=limit)
     if provider_normalized != "bybit":
         raise ValueError(f"unsupported_market_data_provider:{provider_normalized}")
 

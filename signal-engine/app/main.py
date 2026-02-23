@@ -1440,7 +1440,18 @@ def debug_env_keys() -> Any:
             },
         )
 
-    return collect_env_audit(selected_root)
+    payload = collect_env_audit(selected_root)
+    missing_templates = payload.get("templates", {}).get("missing", []) if isinstance(payload, dict) else []
+    if missing_templates:
+        return JSONResponse(
+            status_code=503,
+            content={
+                "error": "env_templates_missing",
+                "detail": "Required env template files are missing",
+                "missing": missing_templates,
+            },
+        )
+    return payload
 
 
 @app.get("/debug/runtime")
@@ -1457,7 +1468,8 @@ async def debug_runtime() -> dict[str, Any]:
     resolved = cfg.resolved_settings()
     env_keys = [
         "MODE", "ENGINE_MODE", "RUN_MODE", "STRATEGY_PROFILE", "PROFILE", "SETTINGS_ENABLE_LEGACY", "SYMBOLS",
-        "MARKET_DATA_PROVIDER", "MARKET_DATA_REPLAY_PATH", "CANDLE_INTERVAL", "CANDLE_HISTORY_LIMIT", "TICK_INTERVAL_SECONDS", "MARKET_DATA_REPLAY_SPEED",
+        "ASSET_CLASS", "MARKET_PROVIDER", "MARKET_DATA_PROVIDER", "MARKET_DATA_REPLAY_PATH", "CANDLE_INTERVAL", "CANDLE_HISTORY_LIMIT", "TICK_INTERVAL_SECONDS", "MARKET_DATA_REPLAY_SPEED",
+        "OANDA_ENV", "OANDA_API_TOKEN", "OANDA_ACCOUNT_ID", "OANDA_INSTRUMENTS",
         "REPLAY_START_TS", "REPLAY_END_TS", "REPLAY_RESUME", "REPLAY_MAX_TRADES", "REPLAY_MAX_BARS", "REPLAY_SEED", "REPLAY_HISTORY_LIMIT",
         "REPLAY_PAUSE_SECONDS",
         "ACCOUNT_SIZE", "PROP_ENABLED", "PROP_GOVERNOR_ENABLED",

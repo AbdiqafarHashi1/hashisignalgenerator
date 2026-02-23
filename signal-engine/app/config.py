@@ -23,7 +23,7 @@ class Settings(BaseSettings):
     MODE: Literal["prop_cfd", "personal_crypto", "paper", "signal_only", "live"] = Field("prop_cfd", validation_alias=AliasChoices("MODE", "mode"))
     run_mode: Literal["live", "replay"] = Field("live", validation_alias=AliasChoices("RUN_MODE", "run_mode"))
     PROFILE: Literal["profit", "diag"] = Field("profit", validation_alias=AliasChoices("PROFILE", "profile"))
-    strategy_profile: Literal["SCALPER_FAST", "SCALPER_STABLE", "RANGE_MEAN_REVERT", "INTRADAY_TREND_SELECTIVE", "PROP_PASS"] = Field("SCALPER_STABLE", validation_alias=AliasChoices("STRATEGY_PROFILE", "strategy_profile"))
+    strategy_profile: Literal["SCALPER_FAST", "SCALPER_STABLE", "RANGE_MEAN_REVERT", "INTRADAY_TREND_SELECTIVE", "PROP_PASS", "CRYPTO_SCALP_25", "FTMO_PASS_25"] = Field("SCALPER_STABLE", validation_alias=AliasChoices("STRATEGY_PROFILE", "strategy_profile"))
     strategy_bias_ema_fast: int = Field(50, validation_alias=AliasChoices("STRATEGY_BIAS_EMA_FAST", "strategy_bias_ema_fast"))
     strategy_bias_ema_slow: int = Field(200, validation_alias=AliasChoices("STRATEGY_BIAS_EMA_SLOW", "strategy_bias_ema_slow"))
     strategy_swing_lookback: int = Field(30, validation_alias=AliasChoices("STRATEGY_SWING_LOOKBACK", "strategy_swing_lookback"))
@@ -178,6 +178,7 @@ class Settings(BaseSettings):
         False,
         validation_alias=AliasChoices("DEBUG_DISABLE_HARD_RISK_GATES", "debug_disable_hard_risk_gates"),
     )
+    asset_class: Literal["crypto", "forex"] = Field("crypto", validation_alias=AliasChoices("ASSET_CLASS", "asset_class"))
     market_provider: str = Field("bybit", validation_alias=AliasChoices("MARKET_PROVIDER", "market_provider"))
     market_data_provider: str = Field("bybit", validation_alias=AliasChoices("MARKET_DATA_PROVIDER", "market_data_provider"))
     market_data_fallbacks: str = Field("binance,okx,replay", validation_alias=AliasChoices("MARKET_DATA_FALLBACKS", "market_data_fallbacks"))
@@ -216,6 +217,12 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("MARKET_DATA_ALLOW_STALE", "market_data_allow_stale"),
     )
     market_data_enabled: bool = Field(True, validation_alias=AliasChoices("MARKET_DATA_ENABLED", "market_data_enabled"))
+
+
+    oanda_env: Literal["practice", "live"] = Field("practice", validation_alias=AliasChoices("OANDA_ENV", "oanda_env"))
+    oanda_api_token: str = Field("", validation_alias=AliasChoices("OANDA_API_TOKEN", "oanda_api_token"))
+    oanda_account_id: str = Field("", validation_alias=AliasChoices("OANDA_ACCOUNT_ID", "oanda_account_id"))
+    oanda_instruments: Annotated[list[str], NoDecode] = Field(default_factory=list, validation_alias=AliasChoices("OANDA_INSTRUMENTS", "oanda_instruments"))
 
     bybit_testnet: bool = Field(False, validation_alias=AliasChoices("BYBIT_TESTNET", "bybit_testnet"))
     bybit_api_key: str = Field("", validation_alias=AliasChoices("BYBIT_API_KEY", "bybit_api_key"))
@@ -543,6 +550,23 @@ class Settings(BaseSettings):
             raise ValueError(f"SYMBOLS must be a list of strings, got {value!r}")
         return [item.strip().upper() for item in value if item.strip()]
 
+    @field_validator("oanda_instruments", mode="before")
+    @classmethod
+    def parse_oanda_instruments(cls, value: str | list[str]) -> list[str]:
+        if value is None:
+            return []
+        if isinstance(value, str):
+            raw = value.strip()
+            if not raw:
+                return []
+            if raw.startswith("["):
+                value = json.loads(raw)
+            else:
+                value = [item.strip() for item in raw.split(",") if item.strip()]
+        if not isinstance(value, list):
+            raise ValueError(f"OANDA_INSTRUMENTS must be a list of strings, got {value!r}")
+        return [str(item).strip().upper() for item in value if str(item).strip()]
+
     @field_validator("candle_interval", mode="before")
     @classmethod
     def validate_candle_interval(cls, value: str | None) -> str | None:
@@ -582,6 +606,12 @@ class Settings(BaseSettings):
             self.engine_mode = self.MODE
         if self.run_mode == "replay":
             self.market_data_provider = "replay"
+        if self.asset_class == "forex" and "MARKET_PROVIDER" not in os.environ:
+            self.market_provider = "oanda"
+        if self.asset_class == "forex" and "MARKET_DATA_PROVIDER" not in os.environ and self.run_mode != "replay":
+            self.market_data_provider = "oanda"
+        if not self.oanda_instruments:
+            self.oanda_instruments = [self._symbol_to_oanda(symbol) for symbol in self.symbols]
 
         prop_max_env = os.environ.get("PROP_MAX_TRADES_PER_DAY")
         max_env = os.environ.get("MAX_TRADES_PER_DAY") if self.settings_enable_legacy else None
@@ -619,6 +649,13 @@ class Settings(BaseSettings):
             if changes:
                 logger.info("debug_loosen applied: %s", ", ".join(changes))
         return self
+
+
+    def _symbol_to_oanda(self, symbol: str) -> str:
+        normalized = symbol.strip().upper().replace("_", "")
+        if len(normalized) == 6:
+            return f"{normalized[:3]}_{normalized[3:]}"
+        return symbol.strip().upper()
 
     def _profile_defaults(self) -> dict[str, object]:
         if self.PROFILE == "diag":
@@ -703,6 +740,36 @@ class Settings(BaseSettings):
                 "htf_bias_require_slope": False,
                 "trigger_body_ratio_min": 0.55,
                 "trigger_close_location_min": 0.65,
+            },
+            "CRYPTO_SCALP_25": {
+                "account_size": 25000,
+                "base_risk_pct": 0.0022,
+                "max_risk_pct": 0.0025,
+                "max_daily_loss_pct": 0.014,
+                "daily_profit_target_pct": 0.018,
+                "max_consecutive_losses": 3,
+                "candle_interval": "5m",
+                "tick_interval_seconds": 45,
+                "min_signal_score": 54,
+                "trend_strength_min": 0.33,
+                "cooldown_minutes_after_loss": 5,
+                "max_trades_per_day": 25,
+                "scalp_min_score": 74,
+            },
+            "FTMO_PASS_25": {
+                "account_size": 25000,
+                "base_risk_pct": 0.0012,
+                "max_risk_pct": 0.0018,
+                "max_daily_loss_pct": 0.04,
+                "daily_profit_target_pct": 0.02,
+                "max_consecutive_losses": 2,
+                "candle_interval": "5m",
+                "tick_interval_seconds": 60,
+                "min_signal_score": 66,
+                "trend_strength_min": 0.52,
+                "cooldown_minutes_after_loss": 20,
+                "max_trades_per_day": 4,
+                "scalp_min_score": 82,
             },
             "PROP_PASS": {
                 "account_size": 25000,
@@ -871,8 +938,11 @@ class Settings(BaseSettings):
             "debug_loosen": self.debug_loosen,
             "debug_disable_hard_risk_gates": self.debug_disable_hard_risk_gates,
             "strategy": self.strategy,
+            "asset_class": self.asset_class,
             "market_provider": self.market_provider,
             "market_data_provider": self.market_data_provider,
+            "oanda_env": self.oanda_env,
+            "oanda_instruments": list(self.oanda_instruments),
             "market_data_fallbacks": self.market_data_fallbacks,
             "market_data_replay_path": self.market_data_replay_path,
             "market_data_replay_speed": self.market_data_replay_speed,

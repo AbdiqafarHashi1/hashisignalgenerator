@@ -14,6 +14,7 @@ from typing import Any, get_args, get_origin
 ROOT = Path(__file__).resolve().parents[1]
 CONFIG_PATH = ROOT / "app" / "config.py"
 ENV_EXAMPLE_PATH = ROOT / ".env.example"
+ENV_TEMPLATE_PATHS = [ROOT / ".env.example", ROOT / ".env.example.crypto", ROOT / ".env.example.ftmo"]
 DOC_PATH = ROOT / "docs" / "ENV_KEYS.md"
 
 
@@ -232,11 +233,18 @@ def collect_env_audit(root: Path | None = None) -> dict[str, Any]:
     aliases.sort(key=lambda item: item["legacy_key"])
 
     env_example_keys: set[str] = set()
-    for line in ENV_EXAMPLE_PATH.read_text(encoding="utf-8-sig").splitlines():
-        stripped = line.strip()
-        if not stripped or stripped.startswith("#") or "=" not in stripped:
+    template_files: list[str] = []
+    missing_template_files: list[str] = []
+    for template_path in ENV_TEMPLATE_PATHS:
+        if not template_path.exists():
+            missing_template_files.append(str(template_path.relative_to(root)))
             continue
-        env_example_keys.add(stripped.split("=", 1)[0].strip())
+        template_files.append(str(template_path.relative_to(root)))
+        for line in template_path.read_text(encoding="utf-8-sig").splitlines():
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#") or "=" not in stripped:
+                continue
+            env_example_keys.add(stripped.split("=", 1)[0].strip())
 
     used_keys = canonical_key_set | {a["legacy_key"] for a in aliases} | {r.key for r in static_refs if r.key != "load_dotenv"}
     docs_not_used = sorted(env_example_keys - used_keys)
@@ -255,6 +263,7 @@ def collect_env_audit(root: Path | None = None) -> dict[str, Any]:
         "aliases": aliases,
         "profiles": profile_defaults,
         "forbidden_when_legacy_disabled": sorted(legacy_forbidden),
+        "templates": {"loaded": template_files, "missing": missing_template_files},
         "drift": {
             "docs_not_used": docs_not_used,
             "used_not_documented": used_not_docs,

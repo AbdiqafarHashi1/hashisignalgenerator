@@ -199,7 +199,11 @@ class Settings(BaseSettings):
     )
     market_data_replay_speed: float = Field(
         1.0,
-        validation_alias=AliasChoices("MARKET_DATA_REPLAY_SPEED", "market_data_replay_speed"),
+        validation_alias=AliasChoices("MARKET_DATA_REPLAY_SPEED", "REPLAY_SPEED", "market_data_replay_speed"),
+    )
+    replay_pause_seconds: float | None = Field(
+        None,
+        validation_alias=AliasChoices("REPLAY_PAUSE_SECONDS", "replay_pause_seconds"),
     )
     replay_max_trades: int = Field(120, validation_alias=AliasChoices("REPLAY_MAX_TRADES", "replay_max_trades"))
     replay_max_bars: int = Field(5000, validation_alias=AliasChoices("REPLAY_MAX_BARS", "replay_max_bars"))
@@ -872,6 +876,7 @@ class Settings(BaseSettings):
             "market_data_fallbacks": self.market_data_fallbacks,
             "market_data_replay_path": self.market_data_replay_path,
             "market_data_replay_speed": self.market_data_replay_speed,
+            "replay_pause_seconds": self.replay_pause_seconds,
             "replay_max_trades": self.replay_max_trades,
             "replay_max_bars": self.replay_max_bars,
             "replay_start_ts": self.replay_start_ts,

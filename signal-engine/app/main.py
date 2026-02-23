@@ -118,6 +118,9 @@ last_status_reason_logged: str | None = None
 replay_last_error: str | None = None
 state_subscribers: set[asyncio.Queue[str]] = set()
 latest_engine_state: EngineState | None = None
+latest_snapshot_publish_started_monotonic: float | None = None
+latest_snapshot_publish_task: asyncio.Task | None = None
+STATE_SNAPSHOT_PUBLISH_TTL_SECONDS = 0.25
 runtime_clock: RealClock | ReplayClock | None = None
 
 
@@ -333,7 +336,7 @@ def _build_engine_state_snapshot() -> EngineState:
     )
 
 
-def _publish_state_snapshot() -> None:
+async def _publish_state_snapshot_async() -> None:
     global latest_engine_state
     snapshot = _build_engine_state_snapshot()
     latest_engine_state = snapshot
@@ -354,9 +357,24 @@ def _publish_state_snapshot() -> None:
         state_subscribers.discard(queue)
 
 
+def _publish_state_snapshot() -> None:
+    global latest_snapshot_publish_started_monotonic, latest_snapshot_publish_task
+    now_monotonic = time.monotonic()
+    if latest_snapshot_publish_task is not None and not latest_snapshot_publish_task.done():
+        return
+    if (
+        latest_snapshot_publish_started_monotonic is not None
+        and (now_monotonic - latest_snapshot_publish_started_monotonic) < STATE_SNAPSHOT_PUBLISH_TTL_SECONDS
+    ):
+        return
+    latest_snapshot_publish_started_monotonic = now_monotonic
+    latest_snapshot_publish_task = asyncio.create_task(_publish_state_snapshot_async(), name="publish_state_snapshot")
+
+
 def _initialize_engine(app: FastAPI) -> None:
     global settings, state, database, paper_trader, scheduler, performance_store, challenge_service, prop_governor, runtime_clock
     global running, last_heartbeat_ts, last_action, last_correlation_id, last_status_reason_logged, replay_last_error
+    global latest_snapshot_publish_started_monotonic, latest_snapshot_publish_task
 
     settings = get_settings()
     runtime_clock = ReplayClock() if settings.run_mode == "replay" else RealClock()
@@ -388,6 +406,8 @@ def _initialize_engine(app: FastAPI) -> None:
     last_correlation_id = None
     last_status_reason_logged = None
     replay_last_error = None
+    latest_snapshot_publish_started_monotonic = None
+    latest_snapshot_publish_task = None
 
     if os.getenv("DEBUG_RUNTIME_DIAG", "false").strip().lower() in {"1", "true", "yes", "on"}:
         env_file = str(Path.cwd() / ".env") if (Path.cwd() / ".env").exists() else None
@@ -1408,6 +1428,7 @@ async def debug_runtime() -> dict[str, Any]:
         "MODE", "ENGINE_MODE", "RUN_MODE", "STRATEGY_PROFILE", "PROFILE", "SETTINGS_ENABLE_LEGACY", "SYMBOLS",
         "MARKET_DATA_PROVIDER", "MARKET_DATA_REPLAY_PATH", "CANDLE_INTERVAL", "CANDLE_HISTORY_LIMIT", "TICK_INTERVAL_SECONDS", "MARKET_DATA_REPLAY_SPEED",
         "REPLAY_START_TS", "REPLAY_END_TS", "REPLAY_RESUME", "REPLAY_MAX_TRADES", "REPLAY_MAX_BARS", "REPLAY_SEED", "REPLAY_HISTORY_LIMIT",
+        "REPLAY_PAUSE_SECONDS",
         "ACCOUNT_SIZE", "PROP_ENABLED", "PROP_GOVERNOR_ENABLED",
         "PROP_RISK_BASE_PCT", "PROP_RISK_MIN_PCT", "PROP_RISK_MAX_PCT",
         "RISK_PER_TRADE_USD", "BASE_RISK_PCT", "POSITION_SIZE_USD_CAP", "MAX_POSITION_SIZE_USD", "POSITION_SIZE_USD_MAX", "MAX_POSITION_USD", "DATABASE_URL", "DATA_DIR",
@@ -1476,6 +1497,7 @@ async def debug_runtime() -> dict[str, Any]:
             "running": sch.running,
             "last_tick_time": sch.last_tick_time().isoformat() if sch.last_tick_time() else None,
             "tick_interval_seconds": sch.tick_interval,
+            "pacing": st.tick_timing(),
         },
         "symbols": [
             {

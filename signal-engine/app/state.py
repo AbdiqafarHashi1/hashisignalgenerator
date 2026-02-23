@@ -38,6 +38,12 @@ class StateStore:
         self._global_peak_equity_usd: float | None = None
         self._market_data_errors: dict[str, int] = {}
         self._gate_events: dict[str, deque[dict[str, object]]] = {}
+        self._tick_timing: dict[str, float | None] = {
+            "last_tick_started_ts": None,
+            "last_tick_finished_ts": None,
+            "last_tick_compute_ms": None,
+            "last_sleep_s": None,
+        }
         self._clock = lambda: datetime.now(timezone.utc)
 
     def set_clock(self, clock_fn) -> None:
@@ -205,6 +211,26 @@ class StateStore:
             events = list(self._gate_events.get(symbol, deque()))
         return events[-max(1, limit):]
 
+    def set_tick_timing(
+        self,
+        *,
+        last_tick_started_ts: float | None,
+        last_tick_finished_ts: float | None,
+        last_tick_compute_ms: float | None,
+        last_sleep_s: float | None,
+    ) -> None:
+        with self._lock:
+            self._tick_timing = {
+                "last_tick_started_ts": last_tick_started_ts,
+                "last_tick_finished_ts": last_tick_finished_ts,
+                "last_tick_compute_ms": last_tick_compute_ms,
+                "last_sleep_s": last_sleep_s,
+            }
+
+    def tick_timing(self) -> dict[str, float | None]:
+        with self._lock:
+            return dict(self._tick_timing)
+
     def reset(self) -> None:
         with self._lock:
             self._daily.clear()
@@ -221,6 +247,12 @@ class StateStore:
             self._global_peak_equity_usd = None
             self._market_data_errors.clear()
             self._gate_events.clear()
+            self._tick_timing = {
+                "last_tick_started_ts": None,
+                "last_tick_finished_ts": None,
+                "last_tick_compute_ms": None,
+                "last_sleep_s": None,
+            }
 
     def risk_snapshot(self, symbol: str, cfg: Settings, now: datetime) -> dict[str, object]:
         state = self.get_daily_state(symbol, now)

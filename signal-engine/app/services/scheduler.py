@@ -103,6 +103,10 @@ class DecisionScheduler:
         self._listener_error_log_window_seconds = 10.0
         self._last_listener_error_message: str | None = None
         self._last_listener_error_traceback_ts: float = 0.0
+        self._last_tick_started_ts: float | None = None
+        self._last_tick_finished_ts: float | None = None
+        self._last_tick_compute_ms: float | None = None
+        self._last_sleep_s: float | None = None
 
         self._stop_event = asyncio.Event()
         self._task: asyncio.Task | None = None
@@ -1130,9 +1134,11 @@ class DecisionScheduler:
     async def _run_loop(self) -> None:
         logger.info("scheduler_loop_start")
         replay_speed = max(0.1, float(self._settings.market_data_replay_speed or 1.0))
-        replay_pause_seconds = 1.0 / replay_speed
         progress_log_every = max(50, int(replay_speed * 25))
         while not self._stop_event.is_set():
+            tick_started_ts = time.time()
+            loop_started_monotonic = time.monotonic()
+            sleep_seconds = 0.0
             try:
                 heartbeat_age = time.monotonic() - self._last_heartbeat_monotonic
                 if heartbeat_age > max(5.0, self._interval * 3):
@@ -1167,25 +1173,79 @@ class DecisionScheduler:
                     backoff_seconds,
                     self._stop_reason,
                 )
+                tick_finished_ts = time.time()
+                compute_ms = max(0.0, (time.monotonic() - loop_started_monotonic) * 1000.0)
+                self._last_tick_started_ts = tick_started_ts
+                self._last_tick_finished_ts = tick_finished_ts
+                self._last_tick_compute_ms = compute_ms
+                self._last_sleep_s = float(backoff_seconds)
+                self._state.set_tick_timing(
+                    last_tick_started_ts=tick_started_ts,
+                    last_tick_finished_ts=tick_finished_ts,
+                    last_tick_compute_ms=compute_ms,
+                    last_sleep_s=float(backoff_seconds),
+                )
                 try:
                     await asyncio.wait_for(self._stop_event.wait(), timeout=backoff_seconds)
                 except asyncio.TimeoutError:
                     continue
                 break
+
+            loop_compute_seconds = max(0.0, time.monotonic() - loop_started_monotonic)
+            if self._settings.run_mode == "replay":
+                sleep_seconds = self._compute_replay_sleep_seconds(loop_compute_seconds)
+            else:
+                sleep_seconds = float(self._interval)
+
+            tick_finished_ts = time.time()
+            compute_ms = loop_compute_seconds * 1000.0
+            self._last_tick_started_ts = tick_started_ts
+            self._last_tick_finished_ts = tick_finished_ts
+            self._last_tick_compute_ms = compute_ms
+            self._last_sleep_s = sleep_seconds
+            self._state.set_tick_timing(
+                last_tick_started_ts=tick_started_ts,
+                last_tick_finished_ts=tick_finished_ts,
+                last_tick_compute_ms=compute_ms,
+                last_sleep_s=sleep_seconds,
+            )
+
             if self._settings.run_mode == "replay":
                 try:
-                    if replay_pause_seconds > 0:
-                        await asyncio.wait_for(self._stop_event.wait(), timeout=replay_pause_seconds)
+                    if sleep_seconds > 0:
+                        await asyncio.wait_for(self._stop_event.wait(), timeout=sleep_seconds)
                     else:
                         await asyncio.sleep(0)
                 except asyncio.TimeoutError:
                     pass
                 continue
             try:
-                await asyncio.wait_for(self._stop_event.wait(), timeout=self._interval)
+                await asyncio.wait_for(self._stop_event.wait(), timeout=sleep_seconds)
             except asyncio.TimeoutError:
                 continue
         logger.info("scheduler_loop_end stop_requested=%s reason=%s", self._stopping_requested, self._stop_reason)
+
+
+    def _compute_replay_sleep_seconds(self, loop_compute_seconds: float) -> float:
+        replay_speed = max(0.1, float(self._settings.market_data_replay_speed or 1.0))
+        target_dt = 1.0 / replay_speed
+        sleep_seconds = max(0.0, target_dt - max(0.0, loop_compute_seconds))
+
+        replay_pause_override = self._settings.replay_pause_seconds
+        if replay_pause_override is not None:
+            sleep_seconds = max(0.0, float(replay_pause_override))
+
+        if replay_speed >= 1000 or replay_pause_override == 0:
+            return 0.0
+        return sleep_seconds
+
+    def pacing_snapshot(self) -> dict[str, float | None]:
+        return {
+            "last_tick_started_ts": self._last_tick_started_ts,
+            "last_tick_finished_ts": self._last_tick_finished_ts,
+            "last_tick_compute_ms": self._last_tick_compute_ms,
+            "last_sleep_s": self._last_sleep_s,
+        }
 
     def _compute_backoff_seconds(self, failures: int) -> int:
         schedule = [1, 2, 5, 10, 20, 30]

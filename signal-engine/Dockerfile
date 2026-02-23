@@ -8,10 +8,15 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy API code
 COPY app ./app
 
-# ✅ Copy new engine package (this is what you're missing)
+# Copy engine package
 COPY signal_engine ./signal_engine
 
-# ✅ Ensure Python can import /app/signal_engine
+# ✅ ADD THIS LINE
+COPY tools ./tools
+
+#✅ ADD THIS
+COPY .env.example ./.env.example
+
 ENV PYTHONPATH=/app
 
 EXPOSE 8000

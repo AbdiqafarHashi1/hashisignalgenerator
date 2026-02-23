@@ -560,3 +560,50 @@ def test_dashboard_overview_surfaces_blocker_reason(monkeypatch) -> None:
         assert payload["challenge"]["status_reason"] == "Prop governor cooldown is active."
         assert payload["governor"]["blocker_name"] == "prop_time_cooldown"
         assert payload["account"]["status_reason"] == "Prop governor cooldown is active."
+
+
+def test_main_import_does_not_require_tools(monkeypatch) -> None:
+    import builtins
+    from importlib import reload
+
+    from app import main as main_module
+
+    original_import = builtins.__import__
+
+    def guarded_import(name, globals=None, locals=None, fromlist=(), level=0):
+        if name == "tools" or name.startswith("tools."):
+            raise ModuleNotFoundError("No module named 'tools'")
+        return original_import(name, globals, locals, fromlist, level)
+
+    monkeypatch.setattr(builtins, "__import__", guarded_import)
+    reload(main_module)
+
+
+def test_debug_env_keys_returns_200_when_tools_available() -> None:
+    from app import main as main_module
+
+    with TestClient(main_module.app) as client:
+        response = client.get("/debug/env-keys")
+        assert response.status_code == 200
+        payload = response.json()
+        assert "canonical" in payload
+        assert "aliases" in payload
+
+
+def test_debug_env_keys_returns_503_when_tools_unavailable(monkeypatch) -> None:
+    import builtins
+
+    from app import main as main_module
+
+    original_import = builtins.__import__
+
+    def guarded_import(name, globals=None, locals=None, fromlist=(), level=0):
+        if name == "tools" or name.startswith("tools."):
+            raise ModuleNotFoundError("No module named 'tools'")
+        return original_import(name, globals, locals, fromlist, level)
+
+    with TestClient(main_module.app) as client:
+        monkeypatch.setattr(builtins, "__import__", guarded_import)
+        response = client.get("/debug/env-keys")
+        assert response.status_code == 503
+        assert response.json()["error"] == "tools_unavailable"

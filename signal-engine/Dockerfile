@@ -10,6 +10,9 @@ COPY app ./app
 
 # ✅ Copy new engine package (this is what you're missing)
 COPY signal_engine ./signal_engine
+COPY tools ./tools
+COPY .env.example.crypto ./.env.example.crypto
+COPY .env.example.ftmo ./.env.example.ftmo
 
 # ✅ Ensure Python can import /app/signal_engine
 ENV PYTHONPATH=/app

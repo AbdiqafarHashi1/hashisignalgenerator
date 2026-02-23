@@ -501,6 +501,9 @@ class DecisionScheduler:
                         replay_end_ts=self._settings.replay_end_ts,
                         replay_history_limit=replay_history_limit,
                         replay_resume=self._settings.replay_resume,
+                        oanda_api_token=self._settings.oanda_api_token,
+                        oanda_account_id=self._settings.oanda_account_id,
+                        oanda_env=self._settings.oanda_env,
                     )
                 if self._settings.run_mode == "replay" or self._settings.market_data_provider == "replay":
                     tick_ts = snapshot.candle.close_time

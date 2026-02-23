@@ -490,3 +490,35 @@ Switch back to live:
 export RUN_MODE=live
 unset REPLAY_MAX_TRADES REPLAY_MAX_BARS REPLAY_START_TS REPLAY_END_TS
 ```
+
+## Quick start profiles (crypto + forex)
+
+### Bash
+- Crypto live paper:
+  - `cp .env.example.crypto .env`
+  - `sed -i 's/^RUN_MODE=.*/RUN_MODE=live/' .env`
+  - `docker compose up --build`
+- Crypto replay:
+  - `cp .env.example.crypto .env`
+  - set `RUN_MODE=replay` and `MARKET_DATA_PROVIDER=replay`
+  - `docker compose up --build`
+- Forex live paper (OANDA practice):
+  - `cp .env.example.ftmo .env`
+  - set `OANDA_API_TOKEN` + `OANDA_ACCOUNT_ID`
+  - `docker compose up --build`
+- Forex replay:
+  - `cp .env.example.ftmo .env`
+  - set `RUN_MODE=replay` and `MARKET_DATA_PROVIDER=replay`
+  - `docker compose up --build`
+
+### Windows PowerShell
+- Crypto: `copy .env.example.crypto .env`
+- FTMO/Forex: `copy .env.example.ftmo .env`
+- Then edit `.env` (`RUN_MODE`, `MARKET_DATA_PROVIDER`) and run: `docker compose up --build`
+
+### Download free forex replay (Dukascopy)
+```bash
+python tools/forex_replay_download.py --pair EURUSD --timeframe 5m --start 2024-06-01 --end 2025-02-18 --out data/replay
+python tools/forex_replay_download.py --pair EURUSD --all-timeframes --start 2024-06-01 --end 2025-02-18 --out data/replay
+```
+Writes replay CSVs to `data/replay/<PAIR>/{5m.csv,1h.csv}`.

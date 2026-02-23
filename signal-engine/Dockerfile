@@ -11,8 +11,6 @@ COPY app ./app
 # Copy engine package
 COPY signal_engine ./signal_engine
 COPY tools ./tools
-COPY .env.example.crypto ./.env.example.crypto
-COPY .env.example.ftmo ./.env.example.ftmo
 
 # ✅ ADD THIS LINE
 COPY tools ./tools

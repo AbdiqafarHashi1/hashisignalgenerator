@@ -184,3 +184,24 @@ def test_replay_warmup_reporting_keeps_trade_start_anchor(tmp_path: Path) -> Non
         assert resolution["history_preload_start_ts"] == "2024-01-01T00:05:00+00:00"
 
     asyncio.run(run())
+
+
+def test_replay_provider_loads_forex_pair_when_dataset_exists(tmp_path: Path) -> None:
+    replay_root = tmp_path / "replay"
+    symbol_dir = replay_root / "EURUSD"
+    symbol_dir.mkdir(parents=True, exist_ok=True)
+    (symbol_dir / "5m.csv").write_text(
+        "timestamp,open,high,low,close,volume,close_time\n"
+        "2024-06-01T00:00:00+00:00,1.1000,1.1002,1.0998,1.1001,10,2024-06-01T00:05:00+00:00\n"
+        "2024-06-01T00:05:00+00:00,1.1001,1.1003,1.0999,1.1002,10,2024-06-01T00:10:00+00:00\n",
+        encoding="utf-8",
+    )
+    provider = ReplayProvider(str(replay_root), resume_enabled=False)
+
+    async def run() -> None:
+        snap = await provider.fetch_symbol_klines("EURUSD", "5m", limit=2, speed=1.0)
+        assert snap.candle.close > 0
+        status = provider.status("EURUSD", "5m")
+        assert status["total_bars"] >= 2
+
+    asyncio.run(run())

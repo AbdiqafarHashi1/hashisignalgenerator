@@ -142,3 +142,20 @@ def test_risk_rules_enforced_by_governor() -> None:
     scheduler = DecisionScheduler(cfg, StateStore(), database=db)
     blockers = scheduler._governor_blockers(datetime(2026, 1, 2, 12, 0, tzinfo=timezone.utc))
     assert any(b.code == "prop_max_trades_per_day" for b in blockers)
+
+
+def test_instant_profile_never_uses_prop_governor_blockers() -> None:
+    cfg = Settings(_env_file=None, data_dir="data/test_strategy_pipeline_instant", PROFILE="instant_funded")
+    db = Database(cfg)
+    db.reset_all()
+    db.set_runtime_state("prop.governor", value_text=db.dumps_json({
+        "day_key": "2026-01-02",
+        "daily_net_r": 0.0,
+        "daily_losses": cfg.prop_daily_stop_after_losses,
+        "daily_trades": cfg.prop_max_trades_per_day,
+        "consecutive_losses": cfg.prop_max_consec_losses,
+        "locked_until_ts": "2026-01-02T12:00:00+00:00",
+    }))
+    scheduler = DecisionScheduler(cfg, StateStore(), database=db)
+    blockers = scheduler._governor_blockers(datetime(2026, 1, 2, 12, 0, tzinfo=timezone.utc))
+    assert blockers == []

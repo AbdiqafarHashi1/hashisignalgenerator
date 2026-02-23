@@ -298,3 +298,23 @@ def test_direction_limit_blocks_second_long_but_allows_short(tmp_path):
 
     short_open = trader.maybe_open_trade("BTCUSDT", _short_plan(), allow_multiple=True)
     assert short_open is not None
+
+
+def test_fee_calculation_uses_fill_notional_without_leverage_multiplier(tmp_path):
+    settings = _settings(tmp_path)
+    settings.fee_rate_bps = 10.0
+    settings.leverage_elevated = 50.0
+    db = Database(settings)
+    trader = PaperTrader(settings, db)
+
+    qty = 2.0
+    entry = 100.0
+    exit_price = 110.0
+    expected_fee = ((qty * entry) + (qty * exit_price)) * (settings.fee_rate_bps / 10_000.0)
+
+    fee = trader._fees_usd(entry=entry, exit_price=exit_price, qty_base=qty)
+    assert fee == expected_fee
+
+    pnl_usd, _, fees = trader._calculate_pnl("long", entry=entry, exit_price=exit_price, stop=95.0, size=qty)
+    assert fees == expected_fee
+    assert pnl_usd == ((exit_price - entry) * qty) - expected_fee

@@ -130,7 +130,7 @@ Returns aggregated account metrics for the dashboard:
 - **Equity Now**: current account equity from canonical dashboard metrics (balance + unrealized PnL).
 - **Equity Start**: challenge baseline equity (configured account size), not the intraday day-start anchor.
 - **Daily DD**: drawdown from the trading-day start equity; this resets at each trading-day rollover.
-- **Global DD**: drawdown from equity high-watermark (with high-watermark seeded from current equity if not yet set).
+- **Global DD**: challenge-scope drawdown from equity baseline (`equity_start`) using `max(0, (equity_start - equity_now) / equity_start)`.
 - **Profit Target Progress**: `(Equity Now - Equity Start) / target_amount`, shown as both dollar progress and percent-to-target.
 - **Realized PnL (Total)**: closed-trade realized PnL aggregate since challenge/session start.
 - **Unrealized PnL**: live mark-to-market PnL for open positions.
@@ -139,6 +139,18 @@ Returns aggregated account metrics for the dashboard:
 - **Status / Reason / Blocker**: engine run state plus readable gate/cooldown context.
 - **Risk Heat**: max of daily and global drawdown utilization ratios (`used/limit`) as a fast severity signal.
 - **Risk Summary (Max Global DD / Worst Day)**: drawdown stress checkpoints when available.
+
+
+
+### Canonical drawdown fields (dashboard + debug)
+The API now exposes these canonical accounting fields consistently across `/dashboard/metrics` and `/dashboard/overview`:
+- `equity_start`: configured challenge/session baseline equity.
+- `equity_now`: current equity after realized net pnl and unrealized pnl.
+- `day_start_equity`: trading-day anchor equity (anchored to replay candle time in replay mode).
+- `daily_dd_pct`: ratio drawdown from `day_start_equity` (`0.0..1.0`).
+- `global_dd_pct`: ratio drawdown from `equity_start` (`0.0..1.0`).
+
+Backward-compatible aliases remain (`daily_drawdown_pct`, `global_drawdown_pct`, and `*_dd_pct_percent`) for clients that expect percentage-point values.
 
 ### How to interpret this dashboard for prop challenges
 - Start with **Tier A**: Equity Now, DD usage, and Profit Target Progress to confirm challenge viability.

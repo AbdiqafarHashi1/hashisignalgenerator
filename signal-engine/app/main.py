@@ -123,7 +123,7 @@ latest_snapshot_publish_started_monotonic: float | None = None
 latest_snapshot_publish_task: asyncio.Task | None = None
 STATE_SNAPSHOT_PUBLISH_TTL_SECONDS = 0.25
 runtime_clock: RealClock | ReplayClock | None = None
-_dashboard_cache: dict[str, Any] = {"overview": None, "overview_ts": 0.0}
+_dashboard_cache: dict[str, Any] = {"overview": None, "overview_ts": 0.0, "overview_tick_key": None}
 _DASHBOARD_CACHE_TTL_SECONDS = 0.5
 
 
@@ -159,7 +159,8 @@ def _trade_fee(trade: Any, cfg: Settings) -> float:
         return float(trade.fees or 0.0)
     if trade.exit is None:
         return 0.0
-    return ((trade.entry * trade.size) + (trade.exit * trade.size)) * (float(cfg.fee_rate_bps or 0.0) / 10000)
+    qty = abs(float(trade.size or 0.0))
+    return ((float(trade.entry or 0.0) * qty) + (float(trade.exit or 0.0) * qty)) * (float(cfg.fee_rate_bps or 0.0) / 10000)
 
 
 def _trade_to_dict(trade: Any, trader: PaperTrader | None = None, cfg: Settings | None = None) -> dict[str, Any]:
@@ -968,8 +969,6 @@ async def dashboard_overview() -> DashboardOverview:
     now_monotonic = time.monotonic()
     cached = _dashboard_cache.get("overview")
     cached_ts = float(_dashboard_cache.get("overview_ts") or 0.0)
-    if cached is not None and (now_monotonic - cached_ts) <= _DASHBOARD_CACHE_TTL_SECONDS:
-        return cached
 
     cfg = _require_settings()
     state_store = _require_state()
@@ -977,45 +976,29 @@ async def dashboard_overview() -> DashboardOverview:
     trader = _require_paper_trader()
     scheduler = _require_scheduler()
     now = _runtime_now()
+
+    last_tick = scheduler.last_tick_time()
+    trades_version = len(db.fetch_trades())
+    events_version = len(db.fetch_events(limit=500))
+    tick_key = f"{last_tick.isoformat() if last_tick is not None else 'no_tick'}:{trades_version}:{events_version}"
+    cached_tick_key = _dashboard_cache.get("overview_tick_key")
+    if cached is not None and cached_tick_key == tick_key and (now_monotonic - cached_ts) <= _DASHBOARD_CACHE_TTL_SECONDS:
+        return cached
     acct = build_dashboard_metrics(cfg, db, trader, state_store, now)
     trades = acct["trades"]
     all_trades = acct.get("trades_all", trades)
     perf = build_performance_snapshot(all_trades, account_size=float(cfg.account_size or 0.0), skip_reason_counts=state_store.skip_reason_counts())
 
-    fee_rate = float(cfg.fee_rate_bps or 0.0) / 10000
-    realized = 0.0
-    unrealized = 0.0
-    fees_total = 0.0
-    trades_today = 0
-    realized_today = 0.0
-    fees_today = 0.0
-    trades_today_by_symbol: dict[str, int] = {}
-    day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
-    for trade in all_trades:
-        closed_at = _as_datetime_utc(getattr(trade, "closed_at", None))
-        opened_at = _as_datetime_utc(getattr(trade, "opened_at", None))
-        symbol = str(getattr(trade, "symbol", ""))
-        if closed_at is not None:
-            realized += float(getattr(trade, "pnl_usd", 0.0) or 0.0)
-            fees_total += _trade_fee(trade, cfg)
-            if closed_at >= day_start:
-                trades_today += 1
-                realized_today += float(getattr(trade, "pnl_usd", 0.0) or 0.0)
-                fees_today += _trade_fee(trade, cfg)
-                trades_today_by_symbol[symbol] = trades_today_by_symbol.get(symbol, 0) + 1
-            continue
-
-        mark = float(trader._last_mark_prices.get(trade.symbol, trade.entry))
-        side_sign = 1.0 if trade.side == "long" else -1.0
-        unrealized += (mark - trade.entry) * trade.size * side_sign
-        fees_total += (trade.entry * trade.size) * fee_rate
-        if opened_at is not None and opened_at >= day_start:
-            trades_today += 1
-            fees_today += (trade.entry * trade.size) * fee_rate
-            trades_today_by_symbol[symbol] = trades_today_by_symbol.get(symbol, 0) + 1
+    realized = float(acct["realized_net_usd"])
+    unrealized = float(acct["unrealized_usd"])
+    fees_total = float(acct["fees_total_usd"])
+    trades_today = int(acct["trades_today"])
+    realized_today = float(acct["pnl_realized_today"])
+    fees_today = float(acct["fees_today"])
+    trades_today_by_symbol = dict(acct["trades_today_by_symbol"])
 
     starting_equity = float(acct["equity_start"])
-    equity = starting_equity + realized + unrealized
+    equity = float(acct["equity_now_usd"])
 
     daily_dd_pct = float(acct["daily_dd_pct_percent"])
     global_dd_pct = float(acct["global_dd_pct_percent"])
@@ -1120,6 +1103,9 @@ async def dashboard_overview() -> DashboardOverview:
         "blocker_reason": blocker_reason or None,
         "blockers": governor_blockers_with_ttl,
         "last_decision": decision_meta.get("decision"),
+        "active_set": "prop" if (cfg.prop_enabled and cfg.prop_governor_enabled) else "instant",
+        "prop_enabled": bool(cfg.prop_enabled),
+        "prop_governor_enabled": bool(cfg.prop_governor_enabled),
     }
     meta_contract = {
         "now_ts": now.isoformat(),
@@ -1132,6 +1118,8 @@ async def dashboard_overview() -> DashboardOverview:
         account={
             "live_equity": equity,
             "starting_equity": starting_equity,
+            "equity_start": starting_equity,
+            "equity_now": equity,
             "balance": float(acct["balance"]),
             "unrealized_pnl": unrealized,
             "realized_pnl": realized,  # deprecated: now net
@@ -1143,7 +1131,7 @@ async def dashboard_overview() -> DashboardOverview:
             "fees_today": fees_today,
             "metrics_version": int(acct["metrics_version"]),
             "equity_reconcile_delta": float(acct["equity_reconcile_delta"]),
-            "equity_calc_usd": float(equity),
+            "equity_calc_usd": float(acct["equity_calc_usd"]),
             "equity_now_usd": float(equity),
             "reconciliation_delta_usd": float(acct["reconciliation_delta_usd"]),
             "challenge_start_ts": acct["challenge_start_ts"],
@@ -1154,6 +1142,9 @@ async def dashboard_overview() -> DashboardOverview:
             "pass_at_ts": challenge_payload.get("pass_at_ts"),
             "pass_at_equity": challenge_payload.get("pass_at_equity"),
             "daily_start_equity": float(acct["day_start_equity"]),
+            "day_start_equity": float(acct["day_start_equity"]),
+            "daily_dd_pct": float(acct["daily_dd_pct"]),
+            "global_dd_pct": float(acct["global_dd_pct"]),
             "global_peak_equity": float(acct["equity_high_watermark"]),
             "daily_drawdown_usd": daily_dd_usd,
             "daily_drawdown_pct": daily_dd_pct,
@@ -1208,6 +1199,7 @@ async def dashboard_overview() -> DashboardOverview:
     )
     _dashboard_cache["overview"] = payload
     _dashboard_cache["overview_ts"] = now_monotonic
+    _dashboard_cache["overview_tick_key"] = tick_key
     return payload
 
 

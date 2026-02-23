@@ -331,6 +331,8 @@ class DecisionScheduler:
 
     def _governor_blockers(self, now: datetime) -> list[Blocker]:
         blockers: list[Blocker] = []
+        if not self._settings.prop_enabled or not self._settings.prop_governor_enabled:
+            return blockers
         gov = self._roll_governor_day(now)
         if not gov:
             return blockers

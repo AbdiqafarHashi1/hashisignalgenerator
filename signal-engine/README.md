@@ -218,6 +218,29 @@ Risk environment thresholds:
 
 Safety controls:
 - `cooldown_minutes_after_loss`
+
+## Instant funded mode (5–7% monthly objective)
+
+Use the new profile to enforce tighter drawdown controls without prop pass-target logic:
+
+```bash
+cp .env.example.instant .env
+uvicorn app.main:app --reload
+```
+
+Key knobs:
+- `PROFILE=instant_funded`
+- `INSTANT_MONTHLY_TARGET_PCT` (default `0.06`)
+- `INSTANT_RISK_BASE_PCT` / `INSTANT_RISK_MAX_PCT`
+- `INSTANT_MAX_DAILY_DD_PCT` (default `0.03`)
+- `INSTANT_MAX_GLOBAL_DD_PCT` (default `0.06`)
+- `INSTANT_MAX_TRADES_PER_DAY` (default `10`)
+
+## Diagnostics
+
+- `GET /debug/config` now includes a per-setting source report and unknown env key list.
+- `GET /debug/runtime` includes replay state rows (run id, candle timestamp/index, tick sequence).
+- `GET /replay/progress` should move steadily in replay and no longer rely on wall-clock timebase.
 - `max_losses_per_day`
 - `news_blackouts` (UTC windows like `12:00-13:00,19:30-20:15`)
 

@@ -40,6 +40,9 @@ export type NormalizedSymbol = {
 
 export type DashboardBundle = {
   account: Record<string, unknown>;
+  challenge: Record<string, unknown>;
+  governor: Record<string, unknown>;
+  meta: Record<string, unknown>;
   risk: Record<string, number>;
   activity: Record<string, number>;
   symbols: NormalizedSymbol[];
@@ -153,6 +156,9 @@ const normalizeSymbols = (input: unknown): NormalizedSymbol[] => {
 
 const normalizeOverview = (payload: DashboardOverview): Omit<DashboardBundle, "debugConfig"> => {
   const account = asObject(payload.account);
+  const challenge = asObject((payload as Record<string, unknown>).challenge);
+  const governor = asObject((payload as Record<string, unknown>).governor);
+  const meta = asObject((payload as Record<string, unknown>).meta);
   const risk = toNumericRecord(payload.risk);
   const activity = toNumericRecord(payload.activity);
   const symbols = normalizeSymbols(payload.symbols);
@@ -164,7 +170,7 @@ const normalizeOverview = (payload: DashboardOverview): Omit<DashboardBundle, "d
     : [];
   const skipGlobal = toNumericRecord(asObject(payload.skip_reasons).global);
 
-  return { account, risk, activity, symbols, trades, equitySeries, skipGlobal };
+  return { account, challenge, governor, meta, risk, activity, symbols, trades, equitySeries, skipGlobal };
 };
 
 export async function fetchDashboardBundle(): Promise<DashboardBundle> {

@@ -130,6 +130,9 @@ export type PerformanceMetrics = {
 
 export type DashboardOverview = {
   account: Record<string, unknown>;
+  challenge?: Record<string, unknown>;
+  governor?: Record<string, unknown>;
+  meta?: Record<string, unknown>;
   risk: Record<string, unknown>;
   activity: Record<string, unknown>;
   symbols: Record<string, Record<string, unknown>>;

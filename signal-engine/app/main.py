@@ -87,6 +87,9 @@ class AccountSummary(BaseModel):
 
 class DashboardOverview(BaseModel):
     account: dict[str, Any]
+    challenge: dict[str, Any] = Field(default_factory=dict)
+    governor: dict[str, Any] = Field(default_factory=dict)
+    meta: dict[str, Any] = Field(default_factory=dict)
     risk: dict[str, Any]
     activity: dict[str, Any]
     symbols: dict[str, dict[str, Any]]
@@ -968,8 +971,8 @@ async def dashboard_overview() -> DashboardOverview:
     starting_equity = float(acct["equity_start"])
     equity = starting_equity + realized + unrealized
 
-    daily_dd_pct = float(acct["daily_dd_pct"])
-    global_dd_pct = float(acct["global_dd_pct"])
+    daily_dd_pct = float(acct["daily_dd_pct_percent"])
+    global_dd_pct = float(acct["global_dd_pct_percent"])
     daily_dd_usd = float(acct["daily_dd_abs"])
     global_dd_usd = float(acct["global_dd_abs"])
 
@@ -1028,6 +1031,56 @@ async def dashboard_overview() -> DashboardOverview:
     ]
 
     challenge_payload = _require_challenge_service().status_payload(now=now)
+    risk_symbol = cfg.symbols[0] if cfg.symbols else "BTCUSDT"
+    decision_meta = state_store.get_decision_meta(risk_symbol)
+    governor_blockers = list(decision_meta.get("blockers") or [])
+    primary_blocker = governor_blockers[0] if governor_blockers else {}
+    blocker_name = str(primary_blocker.get("code") or decision_meta.get("blocker_code") or "")
+    blocker_reason = str(primary_blocker.get("detail") or decision_meta.get("blocker_detail") or "")
+    running_status = "RUNNING" if scheduler.running else "STOPPED"
+    normalized_challenge_status = str(challenge_payload.get("status") or running_status)
+    if normalized_challenge_status not in {"RUNNING", "STOPPED", "FAILED", "PASSED"}:
+        normalized_challenge_status = "FAILED" if normalized_challenge_status.startswith("FAILED") else running_status
+
+    status_reason = blocker_reason or str(challenge_payload.get("status_reason") or "")
+    if not status_reason:
+        status_reason = "Challenge running normally." if normalized_challenge_status == "RUNNING" else "Challenge is not running."
+
+    pass_target_pct = float(cfg.prop_profit_target_pct * 100.0) if cfg.prop_profit_target_pct is not None else None
+    progress_pct: float | None = None
+    if starting_equity > 0 and pass_target_pct is not None and pass_target_pct > 0:
+        progress_pct = ((equity - starting_equity) / starting_equity) * 100.0 / pass_target_pct * 100.0
+
+    seq_row = db.get_runtime_state("dashboard.overview_seq")
+    current_seq = int(seq_row.value_number) if seq_row and seq_row.value_number is not None else 0
+    next_seq = current_seq + 1
+    db.set_runtime_state("dashboard.overview_seq", value_number=float(next_seq))
+
+    challenge_contract = {
+        "status": normalized_challenge_status,
+        "status_reason": status_reason,
+        "pass_target_pct": pass_target_pct,
+        "profit_target_progress_pct": progress_pct,
+    }
+    governor_blockers_with_ttl = []
+    for item in governor_blockers:
+        enriched = dict(item)
+        until_dt = _as_datetime_utc(item.get("until_ts"))
+        enriched["remaining_seconds"] = max(0.0, (until_dt - now).total_seconds()) if until_dt is not None else None
+        governor_blockers_with_ttl.append(enriched)
+
+    governor_contract = {
+        "blocker_name": blocker_name or None,
+        "blocker_reason": blocker_reason or None,
+        "blockers": governor_blockers_with_ttl,
+        "last_decision": decision_meta.get("decision"),
+    }
+    meta_contract = {
+        "now_ts": now.isoformat(),
+        "seq": next_seq,
+        "replay_ts": now.isoformat() if str(cfg.run_mode).lower() == "replay" else None,
+        "mode": cfg.MODE,
+    }
 
     return DashboardOverview(
         account={
@@ -1048,8 +1101,8 @@ async def dashboard_overview() -> DashboardOverview:
             "equity_now_usd": float(equity),
             "reconciliation_delta_usd": float(acct["reconciliation_delta_usd"]),
             "challenge_start_ts": acct["challenge_start_ts"],
-            "challenge_status": challenge_payload.get("status"),
-            "challenge_status_reason": challenge_payload.get("status_reason"),
+            "challenge_status": challenge_contract["status"],
+            "challenge_status_reason": challenge_contract["status_reason"],
             "failed_at_ts": challenge_payload.get("failed_at_ts"),
             "failed_at_equity": challenge_payload.get("failed_at_equity"),
             "pass_at_ts": challenge_payload.get("pass_at_ts"),
@@ -1075,7 +1128,11 @@ async def dashboard_overview() -> DashboardOverview:
             "last_tick_time": scheduler.last_tick_time().isoformat() if scheduler.last_tick_time() else None,
             "last_tick_age_seconds": (now - scheduler.last_tick_time()).total_seconds() if scheduler.last_tick_time() else None,
             "tick_interval_seconds": scheduler.tick_interval,
+            "status_reason": challenge_contract["status_reason"],
         },
+        challenge=challenge_contract,
+        governor=governor_contract,
+        meta=meta_contract,
         risk={
             "risk_pct_per_trade": float(cfg.base_risk_pct or 0.0),
             "risk_per_trade_usd": float(cfg.risk_per_trade_usd or 0.0),

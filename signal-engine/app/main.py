@@ -32,6 +32,7 @@ from .strategy.decision import decide
 from .services.scheduler import DecisionScheduler
 from .providers.bybit import BybitClient, fetch_symbol_klines, replay_reset, replay_reset_all_state, replay_status, replay_validate_dataset
 from .providers.replay import ReplayDatasetError
+from tools.env_audit import collect_env_audit
 from .utils.clock import RealClock, ReplayClock
 def _as_datetime_utc(value: Any) -> Optional[datetime]:
     """
@@ -1412,6 +1413,13 @@ def debug_db() -> dict[str, Any]:
         "connected": True,
         "trade_count": len(trades),
     }
+
+
+@app.get("/debug/env-keys")
+def debug_env_keys() -> dict[str, Any]:
+    return collect_env_audit(Path(__file__).resolve().parents[1])
+
+
 @app.get("/debug/runtime")
 async def debug_runtime() -> dict[str, Any]:
     cfg = _require_settings()

@@ -312,9 +312,9 @@ def test_fee_calculation_uses_fill_notional_without_leverage_multiplier(tmp_path
     exit_price = 110.0
     expected_fee = ((qty * entry) + (qty * exit_price)) * (settings.fee_rate_bps / 10_000.0)
 
-    fee = trader._fees_usd(entry=entry, exit_price=exit_price, qty_base=qty)
+    fee = trader._fees_usd("ETHUSDT", entry=entry, exit_price=exit_price, qty_base=qty)
     assert fee == expected_fee
 
-    pnl_usd, _, fees = trader._calculate_pnl("long", entry=entry, exit_price=exit_price, stop=95.0, size=qty)
+    pnl_usd, _, fees = trader._calculate_pnl("ETHUSDT", "long", entry=entry, exit_price=exit_price, stop=95.0, size=qty)
     assert fees == expected_fee
     assert pnl_usd == ((exit_price - entry) * qty) - expected_fee

@@ -95,9 +95,22 @@ def test_drawdown_percentages_and_peak_tracking_are_live(tmp_path):
 
     assert m_dd["equity_now_usd"] == 1050.0
     assert m_dd["daily_drawdown_usd"] == 0.0
-    assert m_dd["global_drawdown_usd"] == 50.0
+    assert m_dd["global_drawdown_usd"] == 0.0
     assert m_dd["daily_drawdown_pct"] == 0.0
-    assert m_dd["global_drawdown_pct"] == 4.545454545454546
-    # Legacy ratio fields remain for backward compatibility.
+    assert m_dd["global_drawdown_pct"] == 0.0
     assert m_dd["daily_dd_pct"] == 0.0
-    assert m_dd["global_dd_pct"] == 0.045454545454545456
+    assert m_dd["global_dd_pct"] == 0.0
+
+
+def test_global_dd_pct_uses_equity_start_anchor(tmp_path):
+    settings, db, trader, state = _setup(tmp_path)
+    now = datetime(2024, 1, 1, 12, 0, tzinfo=timezone.utc)
+    db.set_runtime_state("accounting.challenge_start_ts", value_text=(now - timedelta(days=1)).isoformat())
+
+    _closed_trade(db, now - timedelta(hours=2), now - timedelta(hours=1), pnl_net=-100.0, fee=0.0)
+    metrics = build_dashboard_metrics(settings, db, trader, state, now)
+
+    assert metrics["equity_start"] == 1000.0
+    assert metrics["equity_now"] == 900.0
+    assert metrics["global_dd_pct"] == 0.1
+    assert metrics["global_drawdown_pct"] == 10.0

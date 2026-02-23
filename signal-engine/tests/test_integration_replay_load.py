@@ -52,3 +52,31 @@ def test_replay_and_dashboard_endpoints_under_load(monkeypatch, tmp_path: Path):
 
         progress = client.get("/replay/progress").json()
         assert progress["bars_processed"] >= 1000
+
+
+def test_replay_overview_drawdown_fields_track_equity(monkeypatch, tmp_path: Path):
+    main_module = _load_app(monkeypatch, tmp_path)
+    observed: list[tuple[float, float, float, float]] = []
+    with TestClient(main_module.app) as client:
+        main_module.database.set_runtime_state("accounting.challenge_start_ts", value_text="1970-01-01T00:00:00+00:00")
+        for i in range(320):
+            r = client.get("/engine/run_once", params={"force": "true"})
+            assert r.status_code == 200
+            if i in {80, 160, 240}:
+                now = main_module._runtime_now()
+                trade_id = main_module.database.open_trade("ETHUSDT", 100.0, 95.0, 110.0, 1.0, "long", now, trade_mode="paper")
+                main_module.database.close_trade(trade_id, 96.0, -4.0, -0.8, now, "sl_close", fees=0.0)
+            payload = client.get("/dashboard/overview").json()
+            acct = payload["account"]
+            equity_start = float(acct["equity_start"])
+            equity_now = float(acct["equity_now"])
+            global_dd = float(acct["global_dd_pct"])
+            daily_dd = float(acct["daily_dd_pct"])
+            observed.append((equity_start, equity_now, global_dd, daily_dd))
+
+    assert any(abs(cur[1] - prev[1]) > 1e-9 for prev, cur in zip(observed, observed[1:]))
+    assert any(abs(cur[2] - prev[2]) > 1e-12 for prev, cur in zip(observed, observed[1:]))
+    for equity_start, equity_now, global_dd, daily_dd in observed:
+        expected_global = max(0.0, (equity_start - equity_now) / equity_start) if equity_start > 0 else 0.0
+        assert abs(global_dd - expected_global) < 1e-9
+        assert daily_dd >= 0.0

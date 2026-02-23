@@ -615,7 +615,10 @@ class Settings(BaseSettings):
             self.engine_mode = self.MODE
         if self.run_mode == "replay":
             self.market_data_provider = "replay"
-        if self.PROFILE == "instant_funded":
+        explicit_prop_enabled = "PROP_ENABLED" in os.environ or "prop_enabled" in os.environ
+        explicit_prop_governor_enabled = "PROP_GOVERNOR_ENABLED" in os.environ or "prop_governor_enabled" in os.environ
+
+        if self.PROFILE == "instant_funded" or self.strategy_profile == "INSTANT_FUNDED":
             self.strategy_profile = "INSTANT_FUNDED"
             self.max_daily_loss_pct = float(self.instant_max_daily_dd_pct)
             self.global_drawdown_limit_pct = float(self.instant_max_global_dd_pct)
@@ -624,8 +627,10 @@ class Settings(BaseSettings):
             self.base_risk_pct = float(self.instant_risk_base_pct)
             self.max_risk_pct = float(self.instant_risk_max_pct)
             self.min_signal_score = max(int(self.min_signal_score), int(self.instant_min_signal_score))
-            self.prop_enabled = False
-            self.prop_governor_enabled = True
+            if not explicit_prop_enabled:
+                self.prop_enabled = False
+            if not explicit_prop_governor_enabled:
+                self.prop_governor_enabled = False
         if self.asset_class == "forex" and "MARKET_PROVIDER" not in os.environ:
             self.market_provider = "oanda"
         if self.asset_class == "forex" and "MARKET_DATA_PROVIDER" not in os.environ and self.run_mode != "replay":
@@ -839,7 +844,7 @@ class Settings(BaseSettings):
                 "cooldown_minutes_after_loss": 60,
                 "max_trades_per_day": 10,
                 "prop_enabled": False,
-                "prop_governor_enabled": True,
+                "prop_governor_enabled": False,
             },
         }
         return profiles[self.strategy_profile]

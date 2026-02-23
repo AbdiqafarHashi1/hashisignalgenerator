@@ -43,3 +43,22 @@ def test_intraday_trend_selective_profile_defaults(monkeypatch) -> None:
     assert settings.trend_strength_min == 0.50
     assert settings.cooldown_minutes_after_loss == 15
     assert settings.max_trades_per_day == 6
+
+
+def test_instant_profile_disables_prop_governor_by_default(monkeypatch) -> None:
+    monkeypatch.setenv("PROFILE", "instant_funded")
+    monkeypatch.delenv("PROP_ENABLED", raising=False)
+    monkeypatch.delenv("PROP_GOVERNOR_ENABLED", raising=False)
+    settings = Settings(_env_file=None)
+    assert settings.strategy_profile == "INSTANT_FUNDED"
+    assert settings.prop_enabled is False
+    assert settings.prop_governor_enabled is False
+
+
+def test_instant_profile_allows_explicit_prop_overrides(monkeypatch) -> None:
+    monkeypatch.setenv("PROFILE", "instant_funded")
+    monkeypatch.setenv("PROP_ENABLED", "true")
+    monkeypatch.setenv("PROP_GOVERNOR_ENABLED", "true")
+    settings = Settings(_env_file=None)
+    assert settings.prop_enabled is True
+    assert settings.prop_governor_enabled is True

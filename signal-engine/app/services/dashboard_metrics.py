@@ -21,7 +21,8 @@ def _trade_fee(trade: TradeRecord, cfg: Settings) -> float:
         return float(trade.fees or 0.0)
     if trade.exit is None:
         return 0.0
-    return ((trade.entry * trade.size) + (trade.exit * trade.size)) * (float(cfg.fee_rate_bps or 0.0) / 10000)
+    qty = abs(float(trade.size or 0.0))
+    return ((float(trade.entry or 0.0) * qty) + (float(trade.exit or 0.0) * qty)) * (float(cfg.fee_rate_bps or 0.0) / 10000)
 
 
 def build_dashboard_metrics(cfg: Settings, db: Database, trader: PaperTrader, state_store: StateStore, now: datetime) -> dict[str, Any]:
@@ -120,16 +121,18 @@ def build_dashboard_metrics(cfg: Settings, db: Database, trader: PaperTrader, st
 
     day_dd_abs = max(0.0, day_start_equity - equity_now_usd)
     day_dd_ratio = (day_dd_abs / day_start_equity) if day_start_equity > 0 else 0.0
-    day_dd_pct = day_dd_ratio * 100.0
+    day_dd_pct = day_dd_ratio
+    day_dd_percent = day_dd_ratio * 100.0
 
     peak_row = db.get_runtime_state("accounting.equity_high_watermark")
     prev_peak = float(peak_row.value_number) if peak_row and peak_row.value_number is not None else equity_now_usd
     equity_high_watermark = max(prev_peak, equity_now_usd)
     db.set_runtime_state("accounting.equity_high_watermark", value_number=equity_high_watermark)
 
-    global_dd_abs = max(0.0, equity_high_watermark - equity_now_usd)
-    global_dd_ratio = (global_dd_abs / equity_high_watermark) if equity_high_watermark > 0 else 0.0
-    global_dd_pct = global_dd_ratio * 100.0
+    global_dd_abs = max(0.0, equity_start - equity_now_usd)
+    global_dd_ratio = (global_dd_abs / equity_start) if equity_start > 0 else 0.0
+    global_dd_pct = global_dd_ratio
+    global_dd_percent = global_dd_ratio * 100.0
 
     max_abs_row = db.get_runtime_state("accounting.max_global_dd_abs")
     max_global_dd_abs_prev = float(max_abs_row.value_number) if max_abs_row and max_abs_row.value_number is not None else 0.0
@@ -173,16 +176,16 @@ def build_dashboard_metrics(cfg: Settings, db: Database, trader: PaperTrader, st
         "daily_dd_abs": day_dd_abs,
         "daily_dd_pct": day_dd_pct,
         "daily_dd_ratio": day_dd_ratio,
-        "daily_dd_pct_percent": day_dd_pct,
+        "daily_dd_pct_percent": day_dd_percent,
         "daily_drawdown_usd": day_dd_abs,
-        "daily_drawdown_pct": day_dd_pct,
+        "daily_drawdown_pct": day_dd_percent,
         "equity_high_watermark": equity_high_watermark,
         "global_dd_abs": global_dd_abs,
         "global_dd_pct": global_dd_pct,
         "global_dd_ratio": global_dd_ratio,
-        "global_dd_pct_percent": global_dd_pct,
+        "global_dd_pct_percent": global_dd_percent,
         "global_drawdown_usd": global_dd_abs,
-        "global_drawdown_pct": global_dd_pct,
+        "global_drawdown_pct": global_dd_percent,
         "max_global_dd_abs": max_global_dd_abs,
         "max_global_dd_pct": max_global_dd_pct,
         "trades_today_by_symbol": trades_today_by_symbol,

@@ -5,6 +5,7 @@ import csv
 import json
 import logging
 import os
+import sys
 import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
@@ -14,7 +15,7 @@ from uuid import uuid4
 
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 from .services.notifier import format_trade_message, send_telegram_message
@@ -32,7 +33,6 @@ from .strategy.decision import decide
 from .services.scheduler import DecisionScheduler
 from .providers.bybit import BybitClient, fetch_symbol_klines, replay_reset, replay_reset_all_state, replay_status, replay_validate_dataset
 from .providers.replay import ReplayDatasetError
-from tools.env_audit import collect_env_audit
 from .utils.clock import RealClock, ReplayClock
 def _as_datetime_utc(value: Any) -> Optional[datetime]:
     """
@@ -1416,8 +1416,31 @@ def debug_db() -> dict[str, Any]:
 
 
 @app.get("/debug/env-keys")
-def debug_env_keys() -> dict[str, Any]:
-    return collect_env_audit(Path(__file__).resolve().parents[1])
+def debug_env_keys() -> Any:
+    resolved = Path(__file__).resolve()
+    repo_root_preferred = resolved.parents[2] if len(resolved.parents) > 2 else resolved.parents[1]
+    repo_root_fallback = resolved.parents[1]
+
+    for candidate in (repo_root_preferred, repo_root_fallback):
+        candidate_path = str(candidate)
+        if candidate_path not in sys.path:
+            sys.path.insert(0, candidate_path)
+
+    selected_root = repo_root_preferred if (repo_root_preferred / "tools").exists() else repo_root_fallback
+
+    try:
+        from tools.env_audit import collect_env_audit
+    except ModuleNotFoundError as exc:
+        logger.warning("debug_env_keys_tools_unavailable", extra={"error": str(exc)})
+        return JSONResponse(
+            status_code=503,
+            content={
+                "error": "tools_unavailable",
+                "detail": "tools.env_audit is unavailable at request time",
+            },
+        )
+
+    return collect_env_audit(selected_root)
 
 
 @app.get("/debug/runtime")

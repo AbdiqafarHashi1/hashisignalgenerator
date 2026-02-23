@@ -74,3 +74,30 @@ def test_daily_rollover_resets_daily_but_not_global(tmp_path):
     assert m2["pnl_realized_today"] == 0.0
     assert m2["trades_today"] == 0
     assert m2["equity_high_watermark"] >= m1["equity_high_watermark"]
+
+
+def test_drawdown_percentages_and_peak_tracking_are_live(tmp_path):
+    settings, db, trader, state = _setup(tmp_path)
+    now = datetime(2024, 1, 1, 10, 0, tzinfo=timezone.utc)
+    db.set_runtime_state("accounting.challenge_start_ts", value_text=(now - timedelta(days=1)).isoformat())
+
+    m0 = build_dashboard_metrics(settings, db, trader, state, now)
+    assert m0["daily_drawdown_pct"] == 0.0
+    assert m0["global_drawdown_pct"] == 0.0
+
+    # New equity peak (+100), then draw down to 1050 from 1100 peak.
+    _closed_trade(db, now - timedelta(hours=2), now - timedelta(hours=1, minutes=30), pnl_net=100.0, fee=0.0)
+    m_peak = build_dashboard_metrics(settings, db, trader, state, now)
+    assert m_peak["equity_high_watermark"] == 1100.0
+
+    _closed_trade(db, now - timedelta(hours=1), now - timedelta(minutes=30), pnl_net=-50.0, fee=0.0)
+    m_dd = build_dashboard_metrics(settings, db, trader, state, now)
+
+    assert m_dd["equity_now_usd"] == 1050.0
+    assert m_dd["daily_drawdown_usd"] == 0.0
+    assert m_dd["global_drawdown_usd"] == 50.0
+    assert m_dd["daily_drawdown_pct"] == 0.0
+    assert m_dd["global_drawdown_pct"] == 4.545454545454546
+    # Legacy ratio fields remain for backward compatibility.
+    assert m_dd["daily_dd_pct"] == 0.0
+    assert m_dd["global_dd_pct"] == 0.045454545454545456

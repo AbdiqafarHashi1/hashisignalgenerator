@@ -47,6 +47,8 @@ export default function LiveDashboard() {
   const [actionLoading, setActionLoading] = useState<ControlKey | null>(null);
   const [confirmForce, setConfirmForce] = useState(false);
   const [toasts, setToasts] = useState<Toast[]>([]);
+  const [lastSeq, setLastSeq] = useState<number | null>(null);
+  const [lastSeqAt, setLastSeqAt] = useState<number>(Date.now());
 
   const [diag, setDiag] = useState<Record<string, unknown> | null>(null);
   const [diagLoading, setDiagLoading] = useState(false);
@@ -61,6 +63,11 @@ export default function LiveDashboard() {
   const loadOverview = useCallback(async () => {
     try {
       const payload = await fetchDashboardBundle();
+      const seq = num(payload.meta?.seq);
+      if (seq != null && seq !== lastSeq) {
+        setLastSeq(seq);
+        setLastSeqAt(Date.now());
+      }
       setBundle(payload);
       setError("");
     } catch (err) {
@@ -68,7 +75,7 @@ export default function LiveDashboard() {
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [lastSeq]);
 
   const refreshState = useCallback(async () => {
     const payload = await fetchEngineStateSafe();
@@ -139,6 +146,9 @@ export default function LiveDashboard() {
   }, [refreshState]);
 
   const account = bundle?.account ?? {};
+  const challenge = bundle?.challenge ?? {};
+  const governor = bundle?.governor ?? {};
+  const meta = bundle?.meta ?? {};
   const risk = bundle?.risk ?? {};
   const activity = bundle?.activity ?? {};
   const symbols = bundle?.symbols ?? [];
@@ -160,35 +170,49 @@ export default function LiveDashboard() {
   const equityNow = num(account.live_equity ?? state?.equity);
   const feesToday = num(account.fees_today);
   const feesTotal = num(account.fees_total_usd ?? account.fees_total);
-  const challengeStatus = asText(account.challenge_status) || "RUNNING";
-  const challengeStatusReason = asText(account.challenge_status_reason) || asText((account.pause_reasons as unknown[] | undefined)?.[0]);
-  const statusReasonRaw = challengeStatusReason || asText(state?.blocker_code) || "none";
+  const challengeStatus = asText(challenge.status ?? account.challenge_status) || "RUNNING";
+  const challengeStatusReason =
+    asText(challenge.status_reason ?? account.status_reason ?? account.challenge_status_reason) ||
+    asText((account.pause_reasons as unknown[] | undefined)?.[0]);
+  const blockerName = asText(governor.blocker_name ?? state?.blocker_code);
+  const blockerReason = asText(governor.blocker_reason ?? state?.blocker_detail);
+  const statusReasonRaw = challengeStatusReason || blockerReason || "none";
   const unrealizedPnl = num(account.unrealized_pnl ?? state?.unrealized_pnl_usd);
   const statusText = challengeStatus || (running ? "RUNNING" : "STOPPED");
-  const dailyDdPct = num(account.daily_drawdown_pct ?? state?.daily_loss_pct);
-  const globalDdPct = num(account.global_drawdown_pct);
-  const dailyLimitPct = num(risk.daily_loss_limit_pct);
-  const globalLimitPct = num(risk.global_dd_limit_pct);
+  const dailyDdPct = toPercent(num(account.daily_drawdown_pct ?? account.daily_dd_pct ?? state?.max_dd_today_pct));
+  const globalDdPct = toPercent(num(account.global_drawdown_pct ?? account.global_dd_pct));
+  const dailyLimitPct = toPercent(num(risk.daily_loss_limit_pct));
+  const globalLimitPct = toPercent(num(risk.global_dd_limit_pct));
   const dailyRemainingPct = dailyDdPct != null && dailyLimitPct != null ? dailyLimitPct - dailyDdPct : null;
   const globalRemainingPct = globalDdPct != null && globalLimitPct != null ? globalLimitPct - globalDdPct : null;
   const dailyTone = getRiskTone(dailyDdPct, dailyLimitPct);
   const globalTone = getRiskTone(globalDdPct, globalLimitPct);
 
   const targetPct =
-    num(account.prop_profit_target_pct) ??
-    num(account.target_pct) ??
-    num(risk.prop_profit_target_pct) ??
-    num(bundle?.debugConfig.effective?.prop_profit_target_pct) ??
-    num(bundle?.debugConfig.effective?.daily_profit_target_pct);
-  const targetAmount = equityStart != null && targetPct != null ? equityStart * targetPct : null;
-  const realizedToTarget = equityNow != null && equityStart != null ? equityNow - equityStart : null;
-  const targetProgress = realizedToTarget != null && targetAmount && targetAmount > 0 ? realizedToTarget / targetAmount : null;
+    toPercent(num(challenge.pass_target_pct)) ??
+    toPercent(num(account.prop_profit_target_pct)) ??
+    toPercent(num(account.target_pct)) ??
+    toPercent(num(risk.prop_profit_target_pct)) ??
+    toPercent(num(bundle?.debugConfig.effective?.prop_profit_target_pct)) ??
+    toPercent(num(bundle?.debugConfig.effective?.daily_profit_target_pct));
+  const targetAmount = equityStart != null && targetPct != null ? equityStart * (targetPct / 100) : null;
+  const realizedToTarget = num(challenge.profit_target_progress_pct) != null && targetAmount != null
+    ? (targetAmount * num(challenge.profit_target_progress_pct)!) / 100
+    : equityNow != null && equityStart != null
+      ? equityNow - equityStart
+      : null;
+  const targetProgress =
+    toPercent(num(challenge.profit_target_progress_pct)) != null
+      ? (toPercent(num(challenge.profit_target_progress_pct)) as number) / 100
+      : realizedToTarget != null && targetAmount && targetAmount > 0
+        ? realizedToTarget / targetAmount
+        : null;
 
   const cooldownSeconds = num(risk.cooldown_remaining_seconds);
   const cooldownMins = cooldownSeconds != null ? Math.ceil(cooldownSeconds / 60) : null;
   const statusReason = `${formatStatusReason(statusReasonRaw)}${cooldownMins && cooldownMins > 0 ? ` (${cooldownMins}m remaining)` : ""}`;
 
-  const maxGlobalDdPct = num(account.max_global_dd_pct);
+  const maxGlobalDdPct = toPercent(num(account.max_global_dd_pct));
   const worstDayDdPct = num(account.max_daily_dd_pct ?? account.worst_day_dd_pct ?? activity.worst_day_dd_pct);
 
   const totalR = num(account.net_r ?? activity.net_r);
@@ -205,8 +229,13 @@ export default function LiveDashboard() {
   const elapsedDays = num(account.challenge_day_number ?? account.elapsed_days ?? activity.challenge_day_number);
   const maxDays = num(account.prop_max_days ?? risk.prop_max_days ?? bundle?.debugConfig.effective?.prop_max_days);
   const rolloverLabel = asText(account.rollover_label ?? account.trading_day_rollover ?? risk.rollover_label) || "default";
-  const blockerCode = asText(state?.blocker_code) || asText((account.pause_reasons as unknown[] | undefined)?.[0]);
-  const blockerSummary = challengeStatusReason ? `${challengeStatus} · ${challengeStatusReason}` : blockerCode ? `${blockerCode} · ${formatBlocker(blockerCode)}` : "No active blocker";
+  const blockerCode = blockerName || asText((account.pause_reasons as unknown[] | undefined)?.[0]);
+  const blockerSummary = blockerCode
+    ? `${blockerCode} · ${blockerReason || formatBlocker(blockerCode)}`
+    : `RUNNING · ${challengeStatusReason || "No active blocker"}`;
+  const metaNowTs = asText(meta.now_ts ?? account.last_tick_time);
+  const heartbeatAgeSeconds = Math.max(0, (Date.now() - lastSeqAt) / 1000);
+  const heartbeatStale = heartbeatAgeSeconds > 12;
   const openPositions = Array.isArray(account.open_positions_detail) ? (account.open_positions_detail as Array<Record<string, unknown>>) : [];
   const openOrders = Array.isArray(account.open_orders) ? (account.open_orders as Array<Record<string, unknown>>) : [];
   const executions = Array.isArray(account.executions) ? (account.executions as Array<Record<string, unknown>>) : [];
@@ -224,12 +253,14 @@ export default function LiveDashboard() {
             <div>
               <h1 className="text-3xl font-semibold tracking-tight">Signal Engine Dashboard</h1>
               <p className="mt-1 text-sm text-slate-400">API: {API_BASE}</p>
+              <p className="text-xs text-slate-500">Heartbeat: {metaNowTs || "—"} (seq {lastSeq ?? "—"})</p>
             </div>
             <div className="flex flex-col items-end gap-1">
               <div className="flex flex-wrap items-center gap-2">
                 <StatusChip label="LIVE" tone="green" />
                 <StatusChip label={`REPLAY @ ${String((state as any)?.candle_ts ?? "--")}`} tone="blue" />
                 <StatusChip label="PAPER" tone="blue" />
+                <StatusChip label={heartbeatStale ? `STALE ${Math.floor(heartbeatAgeSeconds)}s` : "LIVE HB"} tone={heartbeatStale ? "amber" : "green"} pulse={!heartbeatStale} />
                 <div className="inline-flex h-10 items-center rounded-full border border-slate-600/70 bg-slate-900/65 p-1 text-xs backdrop-blur-[2px]">
                   <button
                     type="button"
@@ -261,7 +292,7 @@ export default function LiveDashboard() {
               loading={loading}
               tier="a"
               label="Daily DD"
-              value={`${pct(dailyDdPct)} used | ${pct(dailyRemainingPct)} remaining`}
+              value={`${formatPercent(dailyDdPct)} used | ${formatPercent(dailyRemainingPct)} remaining`}
               valueClass={dailyTone === "red" ? "text-rose-200" : dailyTone === "amber" ? "text-amber-200" : ""}
               cardClass={toneClasses(dailyTone)}
             />
@@ -269,7 +300,7 @@ export default function LiveDashboard() {
               loading={loading}
               tier="a"
               label="Global DD"
-              value={`${pct(globalDdPct)} used | ${pct(globalRemainingPct)} remaining`}
+              value={`${formatPercent(globalDdPct)} used | ${formatPercent(globalRemainingPct)} remaining`}
               valueClass={globalTone === "red" ? "text-rose-200" : globalTone === "amber" ? "text-amber-200" : ""}
               cardClass={toneClasses(globalTone)}
             />
@@ -381,15 +412,15 @@ export default function LiveDashboard() {
         {viewMode === "professional" ? (
           <section className="grid gap-4 lg:grid-cols-3">
             <Card title="Risk Panel">
-              <Metric label="Daily loss limit" value={pct(risk.daily_loss_limit_pct)} />
-              <Metric label="Global DD limit" value={pct(risk.global_dd_limit_pct)} />
+              <Metric label="Daily loss limit" value={formatPercent(dailyLimitPct)} />
+              <Metric label="Global DD limit" value={formatPercent(globalLimitPct)} />
               <Metric label="Consecutive losses" value={fmt(risk.consecutive_losses)} />
               <Metric label="Cooldown remaining" value={`${fmt(risk.cooldown_remaining_seconds)}s`} />
               <Metric label="Max trades/day" value={`${fmt(risk.max_trades_per_day)} (used ${fmt(risk.trades_today)})`} />
             </Card>
 
             <Card title="Risk Summary">
-              <Metric label="Max Global DD" value={pct(maxGlobalDdPct)} />
+              <Metric label="Max Global DD" value={formatPercent(maxGlobalDdPct)} />
               {worstDayDdPct != null ? <Metric label="Worst Day" value={`-${(Math.abs(worstDayDdPct) * 100).toFixed(2)}%`} /> : null}
               <div className="mt-2 space-y-1">
                 <p className="text-xs text-slate-400">Risk Heat</p>
@@ -661,7 +692,7 @@ function ProfitProgressCard({
           <p className="mt-1 text-xs text-slate-300">
             {realized != null ? money(realized) : "—"} / {targetAmount != null ? money(targetAmount) : "—"}
           </p>
-          <p className="text-xs text-slate-400">{progress == null ? "—" : `${width.toFixed(1)}%`} / {targetPct != null ? `${(targetPct * 100).toFixed(2)}%` : "target pct unknown"}</p>
+          <p className="text-xs text-slate-400">{progress == null ? "—" : `${width.toFixed(1)}%`} / {targetPct != null ? `${targetPct.toFixed(2)}%` : "target pct unknown"}</p>
           <div className="mt-3 h-2.5 overflow-hidden rounded-full border border-emerald-500/30 bg-slate-900/85">
             <div className="h-full rounded-full bg-emerald-400/75" style={{ width: `${width}%` }} />
           </div>
@@ -671,15 +702,16 @@ function ProfitProgressCard({
   );
 }
 
-function StatusChip({ label, tone }: { label: string; tone: "green" | "blue" }) {
+function StatusChip({ label, tone, pulse = false }: { label: string; tone: "green" | "blue" | "amber"; pulse?: boolean }) {
   const styles = {
     green: "border-emerald-300/55 bg-gradient-to-r from-emerald-500/20 to-emerald-500/8 text-emerald-100",
     blue: "border-cyan-300/55 bg-gradient-to-r from-cyan-500/20 to-cyan-500/8 text-cyan-100",
+    amber: "border-amber-300/55 bg-gradient-to-r from-amber-500/25 to-amber-500/8 text-amber-100",
   };
 
   return (
     <span className={`inline-flex h-10 items-center gap-2 rounded-full border px-4 py-2 text-sm font-semibold backdrop-blur-[1px] shadow-[0_4px_10px_rgba(15,23,42,0.2)] ${styles[tone]}`}>
-      <span className="text-[10px]">●</span>
+      <span className={`text-[10px] ${pulse ? "animate-pulse" : ""}`}>●</span>
       <span>{label}</span>
     </span>
   );
@@ -965,6 +997,16 @@ const money = (value: unknown): string => {
 const pct = (value: unknown): string => {
   const parsed = num(value);
   return parsed == null ? "—" : `${(parsed * 100).toFixed(2)}%`;
+};
+
+const toPercent = (value: number | null): number | null => {
+  if (value == null) return null;
+  return Math.abs(value) <= 1 ? value * 100 : value;
+};
+
+const formatPercent = (value: number | null): string => {
+  if (value == null) return "—";
+  return `${value.toFixed(2)}%`;
 };
 
 const buttonTone = (kind: "primary" | "secondary" | "danger"): string => {

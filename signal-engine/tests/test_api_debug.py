@@ -529,3 +529,34 @@ def test_debug_runtime_reports_trade_anchor_and_cursor_consistently(monkeypatch,
         assert payload["replay_pointer_now"]["cursor_index"] == 1
         assert payload["replay_pointer_now"]["last_processed_timestamp"] == "2024-06-01T00:10:00+00:00"
         assert payload["why_start_ts_overridden"] == "start_ts_used"
+
+
+def test_dashboard_overview_surfaces_blocker_reason(monkeypatch) -> None:
+    from app import main as main_module
+
+    with TestClient(main_module.app) as client:
+        state_store = client.app.state.state_store
+        state_store.set_decision_meta(
+            "BTCUSDT",
+            {
+                "decision": "skip",
+                "blocker_code": "prop_time_cooldown",
+                "blocker_detail": "Prop governor cooldown is active.",
+                "blockers": [
+                    {
+                        "code": "prop_time_cooldown",
+                        "layer": "governor",
+                        "detail": "Prop governor cooldown is active.",
+                        "until_ts": datetime.now(timezone.utc).isoformat(),
+                    }
+                ],
+            },
+        )
+
+        response = client.get("/dashboard/overview")
+        assert response.status_code == 200
+        payload = response.json()
+
+        assert payload["challenge"]["status_reason"] == "Prop governor cooldown is active."
+        assert payload["governor"]["blocker_name"] == "prop_time_cooldown"
+        assert payload["account"]["status_reason"] == "Prop governor cooldown is active."

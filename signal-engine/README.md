@@ -556,29 +556,28 @@ unset REPLAY_MAX_TRADES REPLAY_MAX_BARS REPLAY_START_TS REPLAY_END_TS
 ### Windows PowerShell replay verification (no bash pipes)
 1. Rebuild and recreate containers:
    ```powershell
-   docker compose down
-   docker compose up -d --build --force-recreate
+   docker compose down -v
+   docker compose up --build -d
    ```
 2. Verify running build/version:
    ```powershell
    curl.exe http://localhost:8000/debug/version
    ```
-3. Verify stale gating in replay mode:
+3. Verify bounded dashboard payloads:
    ```powershell
-   curl.exe http://localhost:8000/debug/stale
+   curl.exe "http://localhost:8000/dashboard/overview?executions_limit=5&trades_limit=5&open_orders_limit=5"
+   curl.exe "http://localhost:8000/dashboard/trades?limit=20"
+   curl.exe "http://localhost:8000/dashboard/executions?limit=20"
    ```
-   Expected in replay mode: `stale_blocked=false` and `stale_clock_source` is `replay_clock` (or `always_fresh_fallback` if replay pointer is unavailable).
-4. Verify bounded overview payload:
-   ```powershell
-   curl.exe "http://localhost:8000/dashboard/overview?trades_limit=200&executions_limit=200"
-   ```
-   Expected: fast response with small bounded lists.
-5. Verify replay progress moves:
+4. Replay smoke start/clock checks:
    ```powershell
    curl.exe -X POST http://localhost:8000/engine/replay/start
    curl.exe http://localhost:8000/debug/runtime
+   curl.exe http://localhost:8000/dashboard/overview
    ```
-   Check `scheduler.last_tick_time` continues advancing between calls.
+5. UI timeout regression check:
+   - Open `http://localhost:3000`.
+   - Confirm no `Request timed out after 5000ms` toast appears while replay advances.
 
 ### Download free forex replay (Dukascopy)
 ```bash

@@ -15,7 +15,7 @@ import {
 import { formatBlocker, formatStatusReason, getRiskHeat, getRiskTone, toneClasses } from "../../lib/dashboardDisplay";
 
 const UI_REFRESH_MS = 3000;
-const HEAVY_REFRESH_MS = 15000;
+const HEAVY_REFRESH_MS = 3000;
 
 type Toast = { id: number; message: string; type: "success" | "error" };
 type ViewMode = "professional" | "minimal";
@@ -237,8 +237,8 @@ export default function LiveDashboard() {
   const heartbeatAgeSeconds = Math.max(0, (Date.now() - lastSeqAt) / 1000);
   const heartbeatStale = heartbeatAgeSeconds > 12;
   const openPositions = Array.isArray(account.open_positions_detail) ? (account.open_positions_detail as Array<Record<string, unknown>>) : [];
-  const openOrders = Array.isArray(account.open_orders) ? (account.open_orders as Array<Record<string, unknown>>) : [];
-  const executions = Array.isArray(account.executions) ? (account.executions as Array<Record<string, unknown>>) : [];
+  const openOrders = bundle?.openOrders ?? [];
+  const executions = bundle?.executions ?? [];
   const eventTape = Array.isArray(account.event_tape) ? (account.event_tape as Array<Record<string, unknown>>) : [];
   const replayState = (diag?.replay_state as Record<string, unknown> | undefined) ?? {};
   const replayResume = (replayState?.replay_resume_files_in_use as Record<string, unknown> | undefined) ?? {};

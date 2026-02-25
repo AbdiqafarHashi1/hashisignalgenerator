@@ -141,6 +141,13 @@ export type DashboardOverview = {
   skip_reasons: Record<string, unknown>;
 };
 
+export type PaginatedResponse<T> = {
+  items: T[];
+  limit: number;
+  offset: number;
+  total?: number | null;
+};
+
 export const stateEventsUrl = `${API_BASE}/events/state`;
 
 export async function apiFetch<T>(

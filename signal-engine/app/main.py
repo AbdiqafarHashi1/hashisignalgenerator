@@ -127,6 +127,12 @@ STATE_SNAPSHOT_PUBLISH_TTL_SECONDS = 0.25
 runtime_clock: RealClock | ReplayClock | None = None
 _dashboard_cache: dict[str, Any] = {"overview": None, "overview_ts": 0.0, "overview_tick_key": None, "overview_cache_key": None}
 _DASHBOARD_CACHE_TTL_SECONDS = 0.5
+_dashboard_perf: dict[str, Any] = {
+    "last_overview_ms": None,
+    "last_trades_query_ms": None,
+    "last_exec_query_ms": None,
+    "last_response_sizes": {"recent_trades": 0, "recent_executions": 0, "recent_open_orders": 0},
+}
 
 
 def _record_heartbeat() -> None:
@@ -968,11 +974,11 @@ async def set_kill_switch(enabled: bool = Query(...)) -> dict[str, Any]:
     return {"status": "ok", "manual_kill_switch": cfg.manual_kill_switch}
 
 
-def _bounded_limit(value: int, default: int = 200, cap: int = 2000) -> int:
+def _bounded_limit(value: int | None, default: int = 50, cap: int = 200) -> int:
     return max(1, min(cap, int(value if value is not None else default)))
 
 
-def _dashboard_execution_rows(db: Database, limit: int, offset: int = 0) -> list[dict[str, Any]]:
+def _dashboard_execution_rows(db: Database, limit: int, offset: int = 0, event_type: str | None = "execution_fill") -> list[dict[str, Any]]:
     return [
         {
             "id": item.get("id"),
@@ -984,7 +990,7 @@ def _dashboard_execution_rows(db: Database, limit: int, offset: int = 0) -> list
             "status": item.get("payload", {}).get("reason"),
             "time": item.get("timestamp"),
         }
-        for item in db.fetch_events(limit=limit, offset=offset, event_type="execution_fill")
+        for item in db.fetch_events(limit=limit, offset=offset, event_type=event_type)
     ]
 
 
@@ -1038,13 +1044,14 @@ async def debug_version() -> dict[str, Any]:
 
 @app.get("/dashboard/overview", response_model=DashboardOverview)
 async def dashboard_overview(
-    executions_limit: int = Query(200, ge=1, le=2000),
-    trades_limit: int = Query(200, ge=1, le=2000),
-    open_orders_limit: int = Query(200, ge=1, le=2000),
+    executions_limit: int = Query(50, ge=1),
+    trades_limit: int = Query(50, ge=1),
+    open_orders_limit: int = Query(50, ge=1),
     executions_offset: int = Query(0, ge=0),
     trades_offset: int = Query(0, ge=0),
     open_orders_offset: int = Query(0, ge=0),
 ) -> DashboardOverview:
+    overview_start = time.perf_counter()
     now_monotonic = time.monotonic()
     cached = _dashboard_cache.get("overview")
     cached_ts = float(_dashboard_cache.get("overview_ts") or 0.0)
@@ -1072,7 +1079,9 @@ async def dashboard_overview(
     all_trades = acct.get("trades_all", trades)
     perf_trades = all_trades[: max(500, trades_limit)]
     perf = build_performance_snapshot(perf_trades, account_size=float(cfg.account_size or 0.0), skip_reason_counts=state_store.skip_reason_counts())
+    trades_query_start = time.perf_counter()
     recent_trade_rows = db.fetch_trades(limit=trades_limit, offset=trades_offset)
+    _dashboard_perf["last_trades_query_ms"] = round((time.perf_counter() - trades_query_start) * 1000, 2)
 
     realized = float(acct["realized_net_usd"])
     unrealized = float(acct["unrealized_usd"])
@@ -1093,9 +1102,11 @@ async def dashboard_overview(
     active_reasons = _active_risk_gates(cfg.symbols[0] if cfg.symbols else "BTCUSDT", now)
 
     open_trades = db.fetch_open_trades()
-    open_positions = [_trade_to_dict(t, trader, cfg) for t in open_trades]
+    open_positions = [_trade_to_dict(t, trader, cfg) for t in open_trades][:200]
     open_orders: list[dict[str, Any]] = []
+    exec_query_start = time.perf_counter()
     executions = _dashboard_execution_rows(db, executions_limit, executions_offset)
+    _dashboard_perf["last_exec_query_ms"] = round((time.perf_counter() - exec_query_start) * 1000, 2)
 
     symbol_data: dict[str, dict[str, Any]] = {}
     for symbol in cfg.symbols:
@@ -1229,7 +1240,7 @@ async def dashboard_overview(
             "fees_by_symbol": dict(acct["fees_by_symbol"]),
             "open_positions_detail": open_positions,
             "open_orders": open_orders[:open_orders_limit],
-            "executions": executions,
+            "executions": executions[:executions_limit],
             "event_tape": event_tape,
             "status": "PAUSED" if active_reasons else "ACTIVE",
             "pause_reasons": [item.get("reason") for item in active_reasons],
@@ -1265,9 +1276,22 @@ async def dashboard_overview(
             "market_data_errors": state_store.market_data_error_counts(),
         },
         symbols=symbol_data,
-        recent_trades=[_trade_to_dict(t, trader, cfg) for t in recent_trade_rows],
+        recent_trades=[_trade_to_dict(t, trader, cfg) for t in recent_trade_rows[:trades_limit]],
         equity_curve=[{"index": idx, "equity": starting_equity + val} for idx, val in enumerate(perf.equity_curve)],
         skip_reasons={"global": state_store.skip_reason_counts(), "by_symbol": skip_by_symbol},
+    )
+    _dashboard_perf["last_overview_ms"] = round((time.perf_counter() - overview_start) * 1000, 2)
+    _dashboard_perf["last_response_sizes"] = {
+        "recent_trades": len(payload.recent_trades),
+        "recent_executions": len(payload.account.get("executions", [])),
+        "recent_open_orders": len(payload.account.get("open_orders", [])),
+    }
+    logger.info(
+        "overview_ms=%s trades_n=%s exec_n=%s orders_n=%s",
+        _dashboard_perf["last_overview_ms"],
+        _dashboard_perf["last_response_sizes"]["recent_trades"],
+        _dashboard_perf["last_response_sizes"]["recent_executions"],
+        _dashboard_perf["last_response_sizes"]["recent_open_orders"],
     )
     _dashboard_cache["overview"] = payload
     _dashboard_cache["overview_ts"] = now_monotonic
@@ -1277,26 +1301,36 @@ async def dashboard_overview(
 
 
 @app.get("/dashboard/executions")
-async def dashboard_executions(limit: int = Query(200, ge=1, le=2000), offset: int = Query(0, ge=0)) -> dict[str, Any]:
+async def dashboard_executions(limit: int = Query(50, ge=1), offset: int = Query(0, ge=0), event_type: str | None = Query("execution_fill")) -> dict[str, Any]:
     db = _require_database()
     bounded = _bounded_limit(limit)
-    return {"items": _dashboard_execution_rows(db, bounded, offset), "limit": bounded, "offset": offset}
+    query_start = time.perf_counter()
+    items = _dashboard_execution_rows(db, bounded, offset, event_type=event_type)
+    _dashboard_perf["last_exec_query_ms"] = round((time.perf_counter() - query_start) * 1000, 2)
+    return {"items": items[:bounded], "limit": bounded, "offset": offset, "total": None}
 
 
 @app.get("/dashboard/trades")
-async def dashboard_trades(limit: int = Query(200, ge=1, le=2000), offset: int = Query(0, ge=0)) -> dict[str, Any]:
+async def dashboard_trades(limit: int = Query(50, ge=1), offset: int = Query(0, ge=0)) -> dict[str, Any]:
     cfg = _require_settings()
     db = _require_database()
     trader = _require_paper_trader()
     bounded = _bounded_limit(limit)
+    query_start = time.perf_counter()
     rows = db.fetch_trades(limit=bounded, offset=offset)
-    return {"items": [_trade_to_dict(t, trader, cfg) for t in rows], "limit": bounded, "offset": offset}
+    _dashboard_perf["last_trades_query_ms"] = round((time.perf_counter() - query_start) * 1000, 2)
+    return {"items": [_trade_to_dict(t, trader, cfg) for t in rows[:bounded]], "limit": bounded, "offset": offset, "total": None}
 
 
 @app.get("/dashboard/open_orders")
-async def dashboard_open_orders(limit: int = Query(200, ge=1, le=2000), offset: int = Query(0, ge=0)) -> dict[str, Any]:
+async def dashboard_open_orders(limit: int = Query(50, ge=1), offset: int = Query(0, ge=0)) -> dict[str, Any]:
     bounded = _bounded_limit(limit)
-    return {"items": [], "limit": bounded, "offset": offset}
+    return {"items": [], "limit": bounded, "offset": offset, "total": None}
+
+
+@app.get("/debug/perf")
+async def debug_perf() -> dict[str, Any]:
+    return dict(_dashboard_perf)
 
 
 

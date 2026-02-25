@@ -175,9 +175,10 @@ class Database:
                 conn.exec_driver_sql("PRAGMA journal_mode=WAL;")
                 conn.exec_driver_sql("PRAGMA busy_timeout=1500;")
                 conn.exec_driver_sql("CREATE INDEX IF NOT EXISTS ix_events_id ON events (id DESC);")
+                conn.exec_driver_sql("CREATE INDEX IF NOT EXISTS ix_events_timestamp_desc ON events (timestamp DESC, id DESC);")
                 conn.exec_driver_sql("CREATE INDEX IF NOT EXISTS ix_trades_id ON trades (id DESC);")
-                conn.exec_driver_sql("CREATE INDEX IF NOT EXISTS ix_trades_opened_at ON trades (opened_at DESC);")
-                conn.exec_driver_sql("CREATE INDEX IF NOT EXISTS ix_trades_closed_at_desc ON trades (closed_at DESC);")
+                conn.exec_driver_sql("CREATE INDEX IF NOT EXISTS ix_trades_opened_at ON trades (opened_at DESC, id DESC);")
+                conn.exec_driver_sql("CREATE INDEX IF NOT EXISTS ix_trades_closed_at_desc ON trades (closed_at DESC, id DESC);")
                 conn.commit()
 
     def _resolve_database_url(self, settings: Settings) -> str:
@@ -281,7 +282,7 @@ class Database:
                     "correlation_id": row.correlation_id,
                     "payload": row.payload or {},
                 }
-                for row in reversed(rows)
+                for row in rows
             ]
 
     def record_equity(self, equity: float, realized_pnl_today: float, drawdown_pct: float) -> None:
@@ -299,7 +300,7 @@ class Database:
                     "pnl_today": row.realized_pnl_today,
                     "drawdown_pct": row.drawdown_pct,
                 }
-                for row in reversed(rows)
+                for row in rows
             ]
 
     def set_runtime_state(self, key: str, value_text: str | None = None, value_number: float | None = None, symbol: str | None = None) -> None:

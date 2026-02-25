@@ -1,4 +1,4 @@
-import { apiFetch, DashboardOverview, DebugConfigResponse, DebugResetRequest, EngineState, RuntimeDiagnostics } from "./api";
+import { apiFetch, DashboardOverview, DebugConfigResponse, DebugResetRequest, EngineState, PaginatedResponse, RuntimeDiagnostics } from "./api";
 
 export type NormalizedTrade = {
   id: string;
@@ -39,6 +39,8 @@ export type NormalizedSymbol = {
 };
 
 export type DashboardBundle = {
+  executions: Array<Record<string, unknown>>;
+  openOrders: Array<Record<string, unknown>>;
   account: Record<string, unknown>;
   challenge: Record<string, unknown>;
   governor: Record<string, unknown>;
@@ -154,6 +156,22 @@ const normalizeSymbols = (input: unknown): NormalizedSymbol[] => {
   });
 };
 
+
+
+const TABLE_PAGE_LIMIT = 200;
+
+async function fetchTradesPage(limit = TABLE_PAGE_LIMIT, offset = 0): Promise<PaginatedResponse<Record<string, unknown>>> {
+  return apiFetch<PaginatedResponse<Record<string, unknown>>>(`/dashboard/trades?limit=${limit}&offset=${offset}`);
+}
+
+async function fetchExecutionsPage(limit = TABLE_PAGE_LIMIT, offset = 0): Promise<PaginatedResponse<Record<string, unknown>>> {
+  return apiFetch<PaginatedResponse<Record<string, unknown>>>(`/dashboard/executions?limit=${limit}&offset=${offset}`);
+}
+
+async function fetchOpenOrdersPage(limit = TABLE_PAGE_LIMIT, offset = 0): Promise<PaginatedResponse<Record<string, unknown>>> {
+  return apiFetch<PaginatedResponse<Record<string, unknown>>>(`/dashboard/open_orders?limit=${limit}&offset=${offset}`);
+}
+
 const normalizeOverview = (payload: DashboardOverview): Omit<DashboardBundle, "debugConfig"> => {
   const account = asObject(payload.account);
   const challenge = asObject((payload as Record<string, unknown>).challenge);
@@ -170,16 +188,23 @@ const normalizeOverview = (payload: DashboardOverview): Omit<DashboardBundle, "d
     : [];
   const skipGlobal = toNumericRecord(asObject(payload.skip_reasons).global);
 
-  return { account, challenge, governor, meta, risk, activity, symbols, trades, equitySeries, skipGlobal };
+  return { account, challenge, governor, meta, risk, activity, symbols, trades, equitySeries, skipGlobal, executions: [], openOrders: [] };
 };
 
 export async function fetchDashboardBundle(): Promise<DashboardBundle> {
-  const [overview, debugConfig] = await Promise.all([
+  const [overview, trades, executions, openOrders, debugConfig] = await Promise.all([
     apiFetch<DashboardOverview>("/dashboard/overview"),
+    fetchTradesPage(),
+    fetchExecutionsPage(),
+    fetchOpenOrdersPage(),
     apiFetch<DebugConfigResponse>("/debug/config").catch(() => DEFAULT_DEBUG),
   ]);
 
-  return { ...normalizeOverview(overview), debugConfig };
+  const normalized = normalizeOverview(overview);
+  normalized.trades = normalizeTrades(trades.items);
+  normalized.executions = executions.items;
+  normalized.openOrders = openOrders.items;
+  return { ...normalized, debugConfig };
 }
 
 export async function fetchEngineStateSafe(): Promise<EngineState | null> {

@@ -30,6 +30,7 @@ from ..utils.intervals import interval_to_ms
 from ..utils.clock import Clock, ReplayClock
 from ..utils.trading_day import trading_day_key, trading_day_start
 from .notifier import format_trade_message, send_telegram_message
+from .stale_guard import compute_freshness_status
 
 logger = logging.getLogger(__name__)
 
@@ -119,6 +120,7 @@ class DecisionScheduler:
         self._replay_bars_processed = 0
         self._replay_run_id = f"replay-{uuid4().hex[:12]}"
         self._engine_clock: datetime | None = None
+        self._last_stale_status: dict[str, dict[str, object]] = {}
         if settings.run_mode == "replay" and settings.replay_seed is not None:
             random.seed(settings.replay_seed)
 
@@ -179,6 +181,12 @@ class DecisionScheduler:
 
     def last_symbol_tick_time(self, symbol: str) -> datetime | None:
         return self._last_symbol_tick_time.get(symbol)
+
+    def stale_status(self, symbol: str | None = None) -> dict[str, object]:
+        selected = symbol or (self._settings.symbols[0] if self._settings.symbols else None)
+        if selected is None:
+            return {}
+        return dict(self._last_stale_status.get(selected, {}))
 
     def engine_now(self) -> datetime:
         if self._settings.run_mode == "replay" and self._engine_clock is not None:
@@ -602,10 +610,15 @@ class DecisionScheduler:
                     self._state.set_decision_meta(symbol, {"decision": "skip", "skip_reason": "candle_open"})
                     self._state.record_skip_reason("candle_open")
                     continue
-                last_candle_age_seconds = max(0.0, (now_ms - snapshot.kline_close_time_ms) / 1000.0)
-                stale_gate_enabled = snapshot.kline_close_time_ms >= 1_600_000_000_000
-                stale_threshold_seconds = (interval_to_ms(snapshot.interval) / 1000.0) + float(self._settings.market_data_allow_stale or 0)
-                if stale_gate_enabled and last_candle_age_seconds > stale_threshold_seconds:
+                freshness = compute_freshness_status(
+                    settings=self._settings,
+                    interval=snapshot.interval,
+                    last_candle_ts_ms=snapshot.kline_close_time_ms,
+                    replay_now_ts=tick_ts,
+                )
+                self._last_stale_status[symbol] = freshness.to_dict()
+                last_candle_age_seconds = float(freshness.last_candle_age_seconds or 0.0)
+                if freshness.stale_blocked:
                     stale_reason = "MARKET_DATA_STALE"
                     self._state.record_market_data_error(stale_reason)
                     self._state.set_decision_meta(
@@ -615,8 +628,9 @@ class DecisionScheduler:
                             "skip_reason": stale_reason,
                             "final_entry_gate": stale_reason,
                             "provider": getattr(snapshot, "provider_name", "bybit"),
-                            "last_candle_age_seconds": last_candle_age_seconds,
+                            "last_candle_age_seconds": freshness.last_candle_age_seconds,
                             "market_data_status": "STALE",
+                            "stale_clock_source": freshness.stale_clock_source,
                         },
                     )
                     self._state.record_skip_reason(stale_reason)
@@ -999,8 +1013,9 @@ class DecisionScheduler:
                 "entry_block_reasons": (plan.raw_input_snapshot.get("entry_block_reasons") if plan is not None and isinstance(plan.raw_input_snapshot, dict) else None),
                 "equity_state": (plan.raw_input_snapshot.get("equity_state") if plan is not None and isinstance(plan.raw_input_snapshot, dict) else None),
                 "provider": getattr(snapshot, "provider_name", "bybit"),
-                "last_candle_age_seconds": max(0.0, (now_ms - snapshot.kline_close_time_ms) / 1000.0),
+                "last_candle_age_seconds": freshness.last_candle_age_seconds,
                 "market_data_status": "OK",
+                "stale_clock_source": freshness.stale_clock_source,
             }
             self._state.set_decision_meta(symbol, decision_meta)
             self._state.record_gate_event(

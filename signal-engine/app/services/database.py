@@ -174,6 +174,10 @@ class Database:
             with self._engine.connect() as conn:
                 conn.exec_driver_sql("PRAGMA journal_mode=WAL;")
                 conn.exec_driver_sql("PRAGMA busy_timeout=1500;")
+                conn.exec_driver_sql("CREATE INDEX IF NOT EXISTS ix_events_id ON events (id DESC);")
+                conn.exec_driver_sql("CREATE INDEX IF NOT EXISTS ix_trades_id ON trades (id DESC);")
+                conn.exec_driver_sql("CREATE INDEX IF NOT EXISTS ix_trades_opened_at ON trades (opened_at DESC);")
+                conn.exec_driver_sql("CREATE INDEX IF NOT EXISTS ix_trades_closed_at_desc ON trades (closed_at DESC);")
                 conn.commit()
 
     def _resolve_database_url(self, settings: Settings) -> str:
@@ -253,17 +257,22 @@ class Database:
             rows = session.execute(stmt).scalars().all()
             return [self._to_trade_record(row) for row in rows]
 
-    def fetch_trades(self, limit: int | None = None) -> list[TradeRecord]:
+    def fetch_trades(self, limit: int | None = None, offset: int = 0) -> list[TradeRecord]:
         with self._Session() as session:
-            stmt = select(TradeRow).order_by(TradeRow.opened_at.desc())
+            stmt = select(TradeRow).order_by(TradeRow.opened_at.desc(), TradeRow.id.desc()).offset(max(0, int(offset or 0)))
             if limit is not None:
                 stmt = stmt.limit(limit)
             rows = session.execute(stmt).scalars().all()
             return [self._to_trade_record(row) for row in rows]
 
-    def fetch_events(self, limit: int = 200) -> list[dict[str, Any]]:
+    def fetch_events(self, limit: int = 200, offset: int = 0, event_type: str | None = None) -> list[dict[str, Any]]:
         with self._Session() as session:
-            rows = session.execute(select(EventRow).order_by(EventRow.timestamp.desc()).limit(limit)).scalars().all()
+            stmt = select(EventRow)
+            if event_type:
+                stmt = stmt.where(EventRow.event_type == event_type)
+            rows = session.execute(
+                stmt.order_by(EventRow.timestamp.desc(), EventRow.id.desc()).offset(max(0, int(offset or 0))).limit(limit)
+            ).scalars().all()
             return [
                 {
                     "id": row.id,

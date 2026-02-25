@@ -625,8 +625,10 @@ class Settings(BaseSettings):
             self.risk_mode = "SAFE_75"
 
         explicit_risk_mode = "RISK_MODE" in os.environ or "risk_mode" in os.environ
-        if explicit_risk_mode or self.PROFILE == "instant_funded":
-            self.risk_mode = "FAST_25" if self.risk_mode == "FAST_25" or self.PROFILE == "instant_funded" else "SAFE_75"
+        instant_profile_active = self.PROFILE == "instant_funded" or self.strategy_profile == "INSTANT_FUNDED"
+
+        if explicit_risk_mode or instant_profile_active:
+            self.risk_mode = "FAST_25" if self.risk_mode == "FAST_25" or instant_profile_active else "SAFE_75"
             if self.risk_mode == "FAST_25":
                 self.base_risk_pct = max(float(self.base_risk_pct or 0.0), 0.0020)
                 self.max_risk_pct = max(float(self.max_risk_pct or 0.0), 0.0030)
@@ -635,7 +637,7 @@ class Settings(BaseSettings):
                 self.cooldown_minutes_after_loss = min(int(self.cooldown_minutes_after_loss or 0), 15)
                 self.min_signal_score = min(int(self.min_signal_score or 0), 58)
 
-        if self.PROFILE == "instant_funded":
+        if instant_profile_active:
             self.strategy_profile = "INSTANT_FUNDED"
             self.max_daily_loss_pct = float(self.instant_max_daily_dd_pct)
             self.global_drawdown_limit_pct = float(self.instant_max_global_dd_pct)

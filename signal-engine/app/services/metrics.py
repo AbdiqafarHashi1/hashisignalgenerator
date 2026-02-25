@@ -45,7 +45,16 @@ def _trade_fee(trade: TradeRecord, cfg: Settings) -> float:
     return ((float(trade.entry or 0.0) * qty) + (float(trade.exit or 0.0) * qty)) * (float(cfg.fee_rate_bps or 0.0) / 10000.0)
 
 
-def compute_metrics(cfg: Settings, db: Database, trader: PaperTrader, state_store: StateStore, now: datetime, replay_status: dict[str, Any] | None = None) -> dict[str, Any]:
+def compute_metrics(
+    cfg: Settings,
+    db: Database,
+    trader: PaperTrader,
+    state_store: StateStore,
+    now: datetime,
+    replay_status: dict[str, Any] | None = None,
+    *,
+    persist_runtime_state: bool = True,
+) -> dict[str, Any]:
     trades = db.fetch_trades()
     day_start = trading_day_start(now)
     day_key = trading_day_key(now)
@@ -99,7 +108,7 @@ def compute_metrics(cfg: Settings, db: Database, trader: PaperTrader, state_stor
 
     prev_day_key = db.get_runtime_state("accounting.day_key")
     prev_day_text = prev_day_key.value_text if prev_day_key and prev_day_key.value_text else None
-    if prev_day_text != day_key:
+    if persist_runtime_state and prev_day_text != day_key:
         db.set_runtime_state("accounting.day_key", value_text=day_key)
         db.set_runtime_state("accounting.day_start_equity", value_number=equity_now)
 
@@ -109,7 +118,8 @@ def compute_metrics(cfg: Settings, db: Database, trader: PaperTrader, state_stor
     peak_row = db.get_runtime_state("accounting.equity_high_watermark")
     prev_peak = float(peak_row.value_number) if peak_row and peak_row.value_number is not None else equity_now
     peak_equity = max(prev_peak, equity_now)
-    db.set_runtime_state("accounting.equity_high_watermark", value_number=peak_equity)
+    if persist_runtime_state:
+        db.set_runtime_state("accounting.equity_high_watermark", value_number=peak_equity)
 
     daily_dd_pct = (max(0.0, daily_start_equity - equity_now) / daily_start_equity) if daily_start_equity > 0 else 0.0
     global_dd_pct = (max(0.0, equity_start - equity_now) / equity_start) if equity_start > 0 else 0.0

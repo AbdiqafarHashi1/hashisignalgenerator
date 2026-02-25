@@ -244,7 +244,7 @@ def _get_runtime_text(db: Database, key: str, default: str) -> str:
     return str(row.value_text)
 
 
-def _build_engine_state_snapshot() -> EngineState:
+def _build_engine_state_snapshot(*, persist_runtime_state: bool = True) -> EngineState:
     scheduler = _require_scheduler()
     cfg = _require_settings()
     db = _require_database()
@@ -252,7 +252,7 @@ def _build_engine_state_snapshot() -> EngineState:
     trader = _require_paper_trader()
     now = _runtime_now()
 
-    acct = build_dashboard_metrics(cfg, db, trader, state_store, now)
+    acct = build_dashboard_metrics(cfg, db, trader, state_store, now, persist_runtime_state=persist_runtime_state)
     challenge = None
     challenge_ready = False
     challenge_error: str | None = "engine_not_ready"
@@ -282,7 +282,8 @@ def _build_engine_state_snapshot() -> EngineState:
     balance = float(acct["balance"])
     equity = float(acct["equity_now_usd"])
     max_dd_today_pct = float(acct["daily_dd_pct"]) * 100
-    db.record_equity(equity=equity, realized_pnl_today=realized_pnl_today, drawdown_pct=max_dd_today_pct)
+    if persist_runtime_state:
+        db.record_equity(equity=equity, realized_pnl_today=realized_pnl_today, drawdown_pct=max_dd_today_pct)
 
     symbols = state_store.get_symbols()
     risk_symbol = symbols[0] if symbols else (cfg.symbols[0] if cfg.symbols else "BTCUSDT")
@@ -356,7 +357,7 @@ def _build_engine_state_snapshot() -> EngineState:
 
 async def _publish_state_snapshot_async() -> None:
     global latest_engine_state
-    snapshot = _build_engine_state_snapshot()
+    snapshot = _build_engine_state_snapshot(persist_runtime_state=True)
     latest_engine_state = snapshot
     logger.info(
         "state_tick_summary equity=%.2f unrealized=%.2f open_positions=%s",
@@ -619,7 +620,7 @@ async def run_once(force: bool = Query(False)) -> dict:
 @app.get("/state", response_model=EngineState)
 async def latest_state() -> EngineState:
     global latest_engine_state
-    snapshot = _build_engine_state_snapshot()
+    snapshot = _build_engine_state_snapshot(persist_runtime_state=False)
     latest_engine_state = snapshot
     return snapshot
 
@@ -978,13 +979,11 @@ async def dashboard_overview() -> DashboardOverview:
     now = _runtime_now()
 
     last_tick = scheduler.last_tick_time()
-    trades_version = len(db.fetch_trades())
-    events_version = len(db.fetch_events(limit=500))
-    tick_key = f"{last_tick.isoformat() if last_tick is not None else 'no_tick'}:{trades_version}:{events_version}"
+    tick_key = last_tick.isoformat() if last_tick is not None else "no_tick"
     cached_tick_key = _dashboard_cache.get("overview_tick_key")
     if cached is not None and cached_tick_key == tick_key and (now_monotonic - cached_ts) <= _DASHBOARD_CACHE_TTL_SECONDS:
         return cached
-    acct = build_dashboard_metrics(cfg, db, trader, state_store, now)
+    acct = build_dashboard_metrics(cfg, db, trader, state_store, now, persist_runtime_state=False)
     trades = acct["trades"]
     all_trades = acct.get("trades_all", trades)
     perf = build_performance_snapshot(all_trades, account_size=float(cfg.account_size or 0.0), skip_reason_counts=state_store.skip_reason_counts())
@@ -1209,7 +1208,9 @@ async def dashboard_metrics() -> dict[str, Any]:
     state_store = _require_state()
     db = _require_database()
     trader = _require_paper_trader()
-    return build_dashboard_metrics(cfg, db, trader, state_store, _runtime_now())
+    return build_dashboard_metrics(cfg, db, trader, state_store, _runtime_now(), persist_runtime_state=False)
+
+
 @app.get("/positions")
 async def positions() -> dict:
     return {"positions": [trade.__dict__ for trade in _require_database().fetch_open_trades()]}

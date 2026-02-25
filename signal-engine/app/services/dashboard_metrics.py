@@ -10,8 +10,16 @@ from .metrics import compute_metrics
 from .paper_trader import PaperTrader
 
 
-def build_dashboard_metrics(cfg: Settings, db: Database, trader: PaperTrader, state_store: StateStore, now: datetime) -> dict[str, Any]:
-    payload = compute_metrics(cfg, db, trader, state_store, now)
+def build_dashboard_metrics(
+    cfg: Settings,
+    db: Database,
+    trader: PaperTrader,
+    state_store: StateStore,
+    now: datetime,
+    *,
+    persist_runtime_state: bool = True,
+) -> dict[str, Any]:
+    payload = compute_metrics(cfg, db, trader, state_store, now, persist_runtime_state=persist_runtime_state)
 
     # Backward-compatible aliases expected by existing endpoints/UI/tests.
     payload.update(

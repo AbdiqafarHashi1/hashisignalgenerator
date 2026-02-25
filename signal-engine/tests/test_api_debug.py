@@ -621,3 +621,20 @@ def test_debug_env_keys_returns_503_when_env_templates_missing(monkeypatch) -> N
         payload = response.json()
         assert payload["error"] == "env_templates_missing"
         assert ".env.example.crypto" in payload["missing"]
+
+
+def test_debug_stale_and_version_endpoints() -> None:
+    from app import main as main_module
+
+    with TestClient(main_module.app) as client:
+        stale = client.get("/debug/stale")
+        assert stale.status_code == 200
+        assert "stale_blocked" in stale.json()
+        assert "stale_clock_source" in stale.json()
+
+        version = client.get("/debug/version")
+        assert version.status_code == 200
+        payload = version.json()
+        assert "git_sha" in payload
+        assert "build_time" in payload
+        assert "app_version" in payload

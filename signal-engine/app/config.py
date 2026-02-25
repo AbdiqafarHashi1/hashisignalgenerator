@@ -217,6 +217,7 @@ class Settings(BaseSettings):
         60,
         validation_alias=AliasChoices("MARKET_DATA_ALLOW_STALE", "market_data_allow_stale"),
     )
+    replay_enforce_stale: bool = Field(False, validation_alias=AliasChoices("REPLAY_ENFORCE_STALE", "replay_enforce_stale"))
     market_data_enabled: bool = Field(True, validation_alias=AliasChoices("MARKET_DATA_ENABLED", "market_data_enabled"))
 
 
@@ -1042,6 +1043,7 @@ class Settings(BaseSettings):
             "replay_resume": self.replay_resume,
             "replay_seed": self.replay_seed,
             "market_data_allow_stale": self.market_data_allow_stale,
+            "replay_enforce_stale": self.replay_enforce_stale,
             "market_data_failover_threshold": self.market_data_failover_threshold,
             "market_data_backoff_base_ms": self.market_data_backoff_base_ms,
             "market_data_backoff_max_ms": self.market_data_backoff_max_ms,

@@ -551,6 +551,35 @@ unset REPLAY_MAX_TRADES REPLAY_MAX_BARS REPLAY_START_TS REPLAY_END_TS
 - FTMO/Forex: `copy .env.example.ftmo .env`
 - Then edit `.env` (`RUN_MODE`, `MARKET_DATA_PROVIDER`) and run: `docker compose up --build`
 
+
+
+### Windows PowerShell replay verification (no bash pipes)
+1. Rebuild and recreate containers:
+   ```powershell
+   docker compose down
+   docker compose up -d --build --force-recreate
+   ```
+2. Verify running build/version:
+   ```powershell
+   curl.exe http://localhost:8000/debug/version
+   ```
+3. Verify stale gating in replay mode:
+   ```powershell
+   curl.exe http://localhost:8000/debug/stale
+   ```
+   Expected in replay mode: `stale_blocked=false` and `stale_clock_source` is `replay_clock` (or `always_fresh_fallback` if replay pointer is unavailable).
+4. Verify bounded overview payload:
+   ```powershell
+   curl.exe "http://localhost:8000/dashboard/overview?trades_limit=200&executions_limit=200"
+   ```
+   Expected: fast response with small bounded lists.
+5. Verify replay progress moves:
+   ```powershell
+   curl.exe -X POST http://localhost:8000/engine/replay/start
+   curl.exe http://localhost:8000/debug/runtime
+   ```
+   Check `scheduler.last_tick_time` continues advancing between calls.
+
 ### Download free forex replay (Dukascopy)
 ```bash
 python tools/forex_replay_download.py --pair EURUSD --timeframe 5m --start 2024-06-01 --end 2025-02-18 --out data/replay

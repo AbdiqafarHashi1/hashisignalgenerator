@@ -7,6 +7,7 @@ import logging
 import os
 import sys
 import time
+import subprocess
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -31,6 +32,7 @@ from .services.challenge import ChallengeService
 from .services.prop_governor import PropRiskGovernor
 from .strategy.decision import decide
 from .services.scheduler import DecisionScheduler
+from .services.stale_guard import compute_freshness_status
 from .providers.bybit import BybitClient, fetch_symbol_klines, replay_reset, replay_reset_all_state, replay_status, replay_validate_dataset
 from .providers.replay import ReplayDatasetError
 from .utils.clock import RealClock, ReplayClock
@@ -123,7 +125,7 @@ latest_snapshot_publish_started_monotonic: float | None = None
 latest_snapshot_publish_task: asyncio.Task | None = None
 STATE_SNAPSHOT_PUBLISH_TTL_SECONDS = 0.25
 runtime_clock: RealClock | ReplayClock | None = None
-_dashboard_cache: dict[str, Any] = {"overview": None, "overview_ts": 0.0, "overview_tick_key": None}
+_dashboard_cache: dict[str, Any] = {"overview": None, "overview_ts": 0.0, "overview_tick_key": None, "overview_cache_key": None}
 _DASHBOARD_CACHE_TTL_SECONDS = 0.5
 
 
@@ -466,6 +468,7 @@ async def lifespan(app: FastAPI):
             settings.force_trade_auto_close_seconds,
             settings.force_trade_random_direction,
         )
+        logger.info("app_version_info=%s", _resolve_version_info())
     try:
         yield
     finally:
@@ -965,8 +968,83 @@ async def set_kill_switch(enabled: bool = Query(...)) -> dict[str, Any]:
     return {"status": "ok", "manual_kill_switch": cfg.manual_kill_switch}
 
 
+def _bounded_limit(value: int, default: int = 200, cap: int = 2000) -> int:
+    return max(1, min(cap, int(value if value is not None else default)))
+
+
+def _dashboard_execution_rows(db: Database, limit: int, offset: int = 0) -> list[dict[str, Any]]:
+    return [
+        {
+            "id": item.get("id"),
+            "symbol": item.get("payload", {}).get("symbol"),
+            "side": item.get("payload", {}).get("side"),
+            "price": item.get("payload", {}).get("price"),
+            "qty": item.get("payload", {}).get("qty"),
+            "fee": item.get("payload", {}).get("fee"),
+            "status": item.get("payload", {}).get("reason"),
+            "time": item.get("timestamp"),
+        }
+        for item in db.fetch_events(limit=limit, offset=offset, event_type="execution_fill")
+    ]
+
+
+def _resolve_version_info() -> dict[str, Any]:
+    git_sha = os.getenv("GIT_SHA")
+    if not git_sha:
+        try:
+            git_sha = subprocess.check_output(["git", "rev-parse", "--short", "HEAD"], text=True, stderr=subprocess.DEVNULL).strip()
+        except Exception:
+            git_sha = None
+    app_version = None
+    try:
+        app_version = app.version
+    except Exception:
+        app_version = None
+    return {
+        "git_sha": git_sha,
+        "build_time": os.getenv("BUILD_TIME"),
+        "app_version": app_version,
+    }
+
+
+def _stale_debug_payload() -> dict[str, Any]:
+    cfg = _require_settings()
+    sch = _require_scheduler()
+    symbol = cfg.symbols[0] if cfg.symbols else "BTCUSDT"
+    snapshot = sch.last_snapshot(symbol)
+    stale_data = sch.stale_status(symbol)
+    if stale_data:
+        return stale_data
+    freshness = compute_freshness_status(
+        settings=cfg,
+        interval=(snapshot.interval if snapshot is not None else (cfg.candle_interval or "5m")),
+        last_candle_ts_ms=(snapshot.kline_close_time_ms if snapshot is not None else None),
+        replay_now_ts=(sch.engine_now() if snapshot is not None else None),
+    )
+    return freshness.to_dict()
+
+
+@app.get("/debug/stale")
+async def debug_stale() -> dict[str, Any]:
+    return _stale_debug_payload()
+
+
+@app.get("/debug/version")
+async def debug_version() -> dict[str, Any]:
+    return _resolve_version_info()
+
+
+
+
 @app.get("/dashboard/overview", response_model=DashboardOverview)
-async def dashboard_overview() -> DashboardOverview:
+async def dashboard_overview(
+    executions_limit: int = Query(200, ge=1, le=2000),
+    trades_limit: int = Query(200, ge=1, le=2000),
+    open_orders_limit: int = Query(200, ge=1, le=2000),
+    executions_offset: int = Query(0, ge=0),
+    trades_offset: int = Query(0, ge=0),
+    open_orders_offset: int = Query(0, ge=0),
+) -> DashboardOverview:
     now_monotonic = time.monotonic()
     cached = _dashboard_cache.get("overview")
     cached_ts = float(_dashboard_cache.get("overview_ts") or 0.0)
@@ -978,15 +1056,23 @@ async def dashboard_overview() -> DashboardOverview:
     scheduler = _require_scheduler()
     now = _runtime_now()
 
+    executions_limit = _bounded_limit(executions_limit)
+    trades_limit = _bounded_limit(trades_limit)
+    open_orders_limit = _bounded_limit(open_orders_limit)
+
     last_tick = scheduler.last_tick_time()
     tick_key = last_tick.isoformat() if last_tick is not None else "no_tick"
+    cache_key = f"{tick_key}:{executions_limit}:{trades_limit}:{open_orders_limit}:{executions_offset}:{trades_offset}:{open_orders_offset}"
     cached_tick_key = _dashboard_cache.get("overview_tick_key")
-    if cached is not None and cached_tick_key == tick_key and (now_monotonic - cached_ts) <= _DASHBOARD_CACHE_TTL_SECONDS:
+    cached_cache_key = _dashboard_cache.get("overview_cache_key")
+    if cached is not None and cached_tick_key == tick_key and cached_cache_key == cache_key and (now_monotonic - cached_ts) <= _DASHBOARD_CACHE_TTL_SECONDS:
         return cached
     acct = build_dashboard_metrics(cfg, db, trader, state_store, now, persist_runtime_state=False)
     trades = acct["trades"]
     all_trades = acct.get("trades_all", trades)
-    perf = build_performance_snapshot(all_trades, account_size=float(cfg.account_size or 0.0), skip_reason_counts=state_store.skip_reason_counts())
+    perf_trades = all_trades[: max(500, trades_limit)]
+    perf = build_performance_snapshot(perf_trades, account_size=float(cfg.account_size or 0.0), skip_reason_counts=state_store.skip_reason_counts())
+    recent_trade_rows = db.fetch_trades(limit=trades_limit, offset=trades_offset)
 
     realized = float(acct["realized_net_usd"])
     unrealized = float(acct["unrealized_usd"])
@@ -1009,20 +1095,7 @@ async def dashboard_overview() -> DashboardOverview:
     open_trades = db.fetch_open_trades()
     open_positions = [_trade_to_dict(t, trader, cfg) for t in open_trades]
     open_orders: list[dict[str, Any]] = []
-    executions = [
-        {
-            "id": item.get("id"),
-            "symbol": item.get("payload", {}).get("symbol"),
-            "side": item.get("payload", {}).get("side"),
-            "price": item.get("payload", {}).get("price"),
-            "qty": item.get("payload", {}).get("qty"),
-            "fee": item.get("payload", {}).get("fee"),
-            "status": item.get("payload", {}).get("reason"),
-            "time": item.get("timestamp"),
-        }
-        for item in db.fetch_events(limit=400)
-        if item.get("event_type") == "execution_fill"
-    ]
+    executions = _dashboard_execution_rows(db, executions_limit, executions_offset)
 
     symbol_data: dict[str, dict[str, Any]] = {}
     for symbol in cfg.symbols:
@@ -1047,7 +1120,7 @@ async def dashboard_overview() -> DashboardOverview:
         if reason:
             skip_by_symbol[symbol][str(reason)] = skip_by_symbol[symbol].get(str(reason), 0) + 1
 
-    raw_events = db.fetch_events(limit=200)
+    raw_events = db.fetch_events(limit=min(executions_limit, 200), offset=executions_offset)
     event_tape = [
         {
             "time": item.get("timestamp"),
@@ -1155,7 +1228,7 @@ async def dashboard_overview() -> DashboardOverview:
             "realized_pnl_by_symbol": dict(acct["realized_pnl_by_symbol"]),
             "fees_by_symbol": dict(acct["fees_by_symbol"]),
             "open_positions_detail": open_positions,
-            "open_orders": open_orders,
+            "open_orders": open_orders[:open_orders_limit],
             "executions": executions,
             "event_tape": event_tape,
             "status": "PAUSED" if active_reasons else "ACTIVE",
@@ -1192,14 +1265,39 @@ async def dashboard_overview() -> DashboardOverview:
             "market_data_errors": state_store.market_data_error_counts(),
         },
         symbols=symbol_data,
-        recent_trades=[_trade_to_dict(t, trader, cfg) for t in all_trades[:100]],
+        recent_trades=[_trade_to_dict(t, trader, cfg) for t in recent_trade_rows],
         equity_curve=[{"index": idx, "equity": starting_equity + val} for idx, val in enumerate(perf.equity_curve)],
         skip_reasons={"global": state_store.skip_reason_counts(), "by_symbol": skip_by_symbol},
     )
     _dashboard_cache["overview"] = payload
     _dashboard_cache["overview_ts"] = now_monotonic
     _dashboard_cache["overview_tick_key"] = tick_key
+    _dashboard_cache["overview_cache_key"] = cache_key
     return payload
+
+
+@app.get("/dashboard/executions")
+async def dashboard_executions(limit: int = Query(200, ge=1, le=2000), offset: int = Query(0, ge=0)) -> dict[str, Any]:
+    db = _require_database()
+    bounded = _bounded_limit(limit)
+    return {"items": _dashboard_execution_rows(db, bounded, offset), "limit": bounded, "offset": offset}
+
+
+@app.get("/dashboard/trades")
+async def dashboard_trades(limit: int = Query(200, ge=1, le=2000), offset: int = Query(0, ge=0)) -> dict[str, Any]:
+    cfg = _require_settings()
+    db = _require_database()
+    trader = _require_paper_trader()
+    bounded = _bounded_limit(limit)
+    rows = db.fetch_trades(limit=bounded, offset=offset)
+    return {"items": [_trade_to_dict(t, trader, cfg) for t in rows], "limit": bounded, "offset": offset}
+
+
+@app.get("/dashboard/open_orders")
+async def dashboard_open_orders(limit: int = Query(200, ge=1, le=2000), offset: int = Query(0, ge=0)) -> dict[str, Any]:
+    bounded = _bounded_limit(limit)
+    return {"items": [], "limit": bounded, "offset": offset}
+
 
 
 @app.get("/dashboard/metrics")
@@ -1566,7 +1664,15 @@ async def debug_runtime() -> dict[str, Any]:
             gov_payload = {"raw": gov_row.value_text}
 
     symbol_gate = symbols[0] if symbols else "BTCUSDT"
+    stale_payload = _stale_debug_payload()
     return {
+        "last_candle_ts": stale_payload.get("last_candle_ts"),
+        "computed_now_ts": stale_payload.get("computed_now_ts"),
+        "last_candle_age_seconds": stale_payload.get("last_candle_age_seconds"),
+        "stale_threshold_seconds": stale_payload.get("stale_threshold_seconds"),
+        "stale_blocked": stale_payload.get("stale_blocked"),
+        "stale_clock_source": stale_payload.get("stale_clock_source"),
+        "replay_pointer_now_ts": stale_payload.get("replay_pointer_now_ts"),
         "settings": {
             "profile": resolved.get("profile", resolved.get("PROFILE")),
             "min_signal_score": cfg.min_signal_score,

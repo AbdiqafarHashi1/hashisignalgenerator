@@ -1,7 +1,7 @@
 "use client";
 
 import type { ReactNode } from "react";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { API_BASE, EngineState, stateEventsUrl } from "../../lib/api";
 import {
   fetchDashboardBundle,
@@ -15,7 +15,9 @@ import {
 import { formatBlocker, formatStatusReason, getRiskHeat, getRiskTone, toneClasses } from "../../lib/dashboardDisplay";
 
 const UI_REFRESH_MS = 3000;
-const HEAVY_REFRESH_MS = 3000;
+const OVERVIEW_REFRESH_REPLAY_MS = 1500;
+const OVERVIEW_REFRESH_LIVE_MS = 3000;
+const OVERVIEW_ERROR_THROTTLE_MS = 30000;
 
 type Toast = { id: number; message: string; type: "success" | "error" };
 type ViewMode = "professional" | "minimal";
@@ -49,10 +51,15 @@ export default function LiveDashboard() {
   const [toasts, setToasts] = useState<Toast[]>([]);
   const [lastSeq, setLastSeq] = useState<number | null>(null);
   const [lastSeqAt, setLastSeqAt] = useState<number>(Date.now());
+  const [overviewDelayed, setOverviewDelayed] = useState(false);
+  const overviewRequestInFlight = useRef(false);
+  const lastOverviewErrorAtRef = useRef(0);
 
   const [diag, setDiag] = useState<Record<string, unknown> | null>(null);
   const [diagLoading, setDiagLoading] = useState(false);
   const [resetFlags, setResetFlags] = useState({ reset_replay_state: false, reset_governor_state: false, reset_trades_db: false, reset_performance: false, dry_run: false });
+
+  const debugDashboard = process.env.NEXT_PUBLIC_DEBUG_DASHBOARD === "1" || process.env.DEBUG_DASHBOARD === "1";
 
   const pushToast = useCallback((message: string, type: Toast["type"]) => {
     const id = Date.now() + Math.floor(Math.random() * 10000);
@@ -61,21 +68,43 @@ export default function LiveDashboard() {
   }, []);
 
   const loadOverview = useCallback(async () => {
+    if (overviewRequestInFlight.current) {
+      return;
+    }
+
+    overviewRequestInFlight.current = true;
     try {
       const payload = await fetchDashboardBundle();
-      const seq = num(payload.meta?.seq);
-      if (seq != null && seq !== lastSeq) {
-        setLastSeq(seq);
-        setLastSeqAt(Date.now());
+      if (debugDashboard) {
+        console.debug("[dashboard] overview", payload.overview);
       }
+      setLastSeq((previousSeq) => {
+        const seq = num(payload.meta?.seq);
+        if (seq != null && seq !== previousSeq) {
+          setLastSeqAt(Date.now());
+          return seq;
+        }
+        return previousSeq;
+      });
       setBundle(payload);
+      setOverviewDelayed(false);
       setError("");
     } catch (err) {
-      setError((err as Error).message || "Failed to load dashboard");
+      const message = (err as Error).message || "Failed to load dashboard";
+      const isTimeout = message.includes("timed out");
+      if (isTimeout) {
+        setOverviewDelayed(true);
+      }
+      const now = Date.now();
+      if (!isTimeout || now - lastOverviewErrorAtRef.current >= OVERVIEW_ERROR_THROTTLE_MS) {
+        setError(message);
+        lastOverviewErrorAtRef.current = now;
+      }
     } finally {
+      overviewRequestInFlight.current = false;
       setLoading(false);
     }
-  }, [lastSeq]);
+  }, [debugDashboard]);
 
   const refreshState = useCallback(async () => {
     const payload = await fetchEngineStateSafe();
@@ -126,9 +155,10 @@ export default function LiveDashboard() {
     loadOverview();
     refreshState();
     loadDiagnostics();
-    const timer = setInterval(loadOverview, HEAVY_REFRESH_MS);
+    const refreshMs = bundle?.overview.run_mode === "replay" ? OVERVIEW_REFRESH_REPLAY_MS : OVERVIEW_REFRESH_LIVE_MS;
+    const timer = setInterval(loadOverview, refreshMs);
     return () => clearInterval(timer);
-  }, [loadDiagnostics, loadOverview, refreshState]);
+  }, [bundle?.overview.run_mode, loadDiagnostics, loadOverview, refreshState]);
 
   useEffect(() => {
     const source = new EventSource(stateEventsUrl);
@@ -164,23 +194,25 @@ export default function LiveDashboard() {
   const ethCard = findSymbol(symbols, "ETHUSDT");
   const btcCard = findSymbol(symbols, "BTCUSDT");
 
-  const realizedNet = num(account.realized_net_usd ?? account.realized_pnl);
-  const realizedGross = num(account.realized_gross_usd);
-  const equityStart = num(account.starting_equity);
-  const equityNow = num(account.live_equity ?? state?.equity);
-  const feesToday = num(account.fees_today);
-  const feesTotal = num(account.fees_total_usd ?? account.fees_total);
-  const challengeStatus = asText(challenge.status ?? account.challenge_status) || "RUNNING";
+  const overview = bundle?.overview;
+  const realizedNet = overview?.realized_pnl_net ?? num(account.realized_net_usd ?? account.realized_pnl);
+  const realizedGross = overview?.realized_pnl_gross ?? num(account.realized_gross_usd);
+  const equityStart = overview?.equity_start ?? num(account.starting_equity);
+  const equityNow = overview?.equity_now ?? num(account.live_equity ?? state?.equity);
+  const feesToday = overview?.fees_today ?? num(account.fees_today);
+  const feesTotal = overview?.fees_total ?? num(account.fees_total_usd ?? account.fees_total);
+  const challengeStatus = overview?.status ?? (asText(challenge.status ?? account.challenge_status) || "RUNNING");
   const challengeStatusReason =
-    asText(challenge.status_reason ?? account.status_reason ?? account.challenge_status_reason) ||
+    overview?.reason ??
+    asText(challenge.status_reason ?? account.status_reason ?? account.challenge_status_reason) ??
     asText((account.pause_reasons as unknown[] | undefined)?.[0]);
-  const blockerName = asText(governor.blocker_name ?? state?.blocker_code);
-  const blockerReason = asText(governor.blocker_reason ?? state?.blocker_detail);
+  const blockerName = overview?.blocker_code ?? asText(governor.blocker_name ?? state?.blocker_code);
+  const blockerReason = overview?.blocker_reason ?? asText(governor.blocker_reason ?? state?.blocker_detail);
   const statusReasonRaw = challengeStatusReason || blockerReason || "none";
-  const unrealizedPnl = num(account.unrealized_pnl ?? state?.unrealized_pnl_usd);
+  const unrealizedPnl = overview?.unrealized_pnl ?? num(account.unrealized_pnl ?? state?.unrealized_pnl_usd);
   const statusText = challengeStatus || (running ? "RUNNING" : "STOPPED");
-  const dailyDdPct = toPercent(num(account.daily_drawdown_pct ?? account.daily_dd_pct ?? state?.max_dd_today_pct));
-  const globalDdPct = toPercent(num(account.global_drawdown_pct ?? account.global_dd_pct));
+  const dailyDdPct = toPercent(overview?.daily_dd_pct ?? num(account.daily_drawdown_pct ?? account.daily_dd_pct ?? state?.max_dd_today_pct));
+  const globalDdPct = toPercent(overview?.global_dd_pct ?? num(account.global_drawdown_pct ?? account.global_dd_pct));
   const dailyLimitPct = toPercent(num(risk.daily_loss_limit_pct));
   const globalLimitPct = toPercent(num(risk.global_dd_limit_pct));
   const dailyRemainingPct = dailyDdPct != null && dailyLimitPct != null ? dailyLimitPct - dailyDdPct : null;
@@ -233,7 +265,7 @@ export default function LiveDashboard() {
   const blockerSummary = blockerCode
     ? `${blockerCode} · ${blockerReason || formatBlocker(blockerCode)}`
     : `RUNNING · ${challengeStatusReason || "No active blocker"}`;
-  const metaNowTs = asText(meta.now_ts ?? account.last_tick_time);
+  const metaNowTs = overview?.heartbeat_ts ?? asText(meta.now_ts ?? account.last_tick_time);
   const heartbeatAgeSeconds = Math.max(0, (Date.now() - lastSeqAt) / 1000);
   const heartbeatStale = heartbeatAgeSeconds > 12;
   const openPositions = Array.isArray(account.open_positions_detail) ? (account.open_positions_detail as Array<Record<string, unknown>>) : [];
@@ -254,6 +286,7 @@ export default function LiveDashboard() {
               <h1 className="text-3xl font-semibold tracking-tight">Signal Engine Dashboard</h1>
               <p className="mt-1 text-sm text-slate-400">API: {API_BASE}</p>
               <p className="text-xs text-slate-500">Heartbeat: {metaNowTs || "—"} (seq {lastSeq ?? "—"})</p>
+              {overviewDelayed ? <p className="text-xs text-amber-300">Overview delayed… retrying</p> : null}
             </div>
             <div className="flex flex-col items-end gap-1">
               <div className="flex flex-wrap items-center gap-2">
@@ -319,7 +352,7 @@ export default function LiveDashboard() {
             <Kpi loading={loading} tier="b" label="Realized PnL (Net)" value={money(realizedNet)} helper={`Gross: ${money(realizedGross)} | Fees: ${money(feesTotal)}`} valueClass={pnlToneClass(realizedNet)} />
             <Kpi loading={loading} tier="b" label="Unrealized PnL" value={money(unrealizedPnl)} valueClass={pnlToneClass(unrealizedPnl)} />
             <Kpi loading={loading} tier="b" label="Fees (Today / Total)" value={`${money(feesToday)} / ${money(feesTotal)}`} helper={equityCheckLabel} />
-            <Kpi loading={loading} tier="b" label="Trades (today)" value={String(activity.trades_today ?? state?.trades_today ?? "—")} />
+            <Kpi loading={loading} tier="b" label="Trades (today)" value={String(overview?.trades_today ?? activity.trades_today ?? state?.trades_today ?? "—")} />
           </div>
 
           <div className="grid gap-3 lg:grid-cols-3">

@@ -150,12 +150,37 @@ export type PaginatedResponse<T> = {
 
 export const stateEventsUrl = `${API_BASE}/events/state`;
 
+
+let lastKnownOverviewRunMode: "replay" | "live" = "live";
+
+const inferRunModeFromOverview = (payload: unknown): "replay" | "live" => {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) return lastKnownOverviewRunMode;
+  const root = payload as Record<string, unknown>;
+  const meta = root.meta && typeof root.meta === "object" && !Array.isArray(root.meta) ? (root.meta as Record<string, unknown>) : {};
+  const settings = root.settings && typeof root.settings === "object" && !Array.isArray(root.settings) ? (root.settings as Record<string, unknown>) : {};
+  const account = root.account && typeof root.account === "object" && !Array.isArray(root.account) ? (root.account as Record<string, unknown>) : {};
+  const values = [settings.run_mode, meta.run_mode, meta.mode, account.run_mode, root.run_mode];
+  for (const value of values) {
+    if (typeof value === "string" && value.toLowerCase() === "replay") return "replay";
+  }
+  return "live";
+};
+
+const timeoutForPath = (path: string): number => {
+  if (path.startsWith("/dashboard/overview")) {
+    return lastKnownOverviewRunMode === "replay" ? 15000 : 8000;
+  }
+  if (path.startsWith("/dashboard/trades") || path.startsWith("/dashboard/executions") || path.startsWith("/dashboard/open_orders")) {
+    return 8000;
+  }
+  return 8000;
+};
 export async function apiFetch<T>(
   path: string,
   options: RequestInit = {}
 ): Promise<T> {
   const url = `${API_BASE}${path}`;
-  const timeoutMs = 5000;
+  const timeoutMs = timeoutForPath(path);
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
   let response: Response;
@@ -189,8 +214,13 @@ export async function apiFetch<T>(
     throw apiError;
   }
 
-  return (await response.json()) as T;
+  const payload = (await response.json()) as T;
+  if (path.startsWith("/dashboard/overview")) {
+    lastKnownOverviewRunMode = inferRunModeFromOverview(payload);
+  }
+  return payload;
 }
+
 
 export async function fetchEngineStatus(): Promise<EngineStatus> {
   return apiFetch<EngineStatus>("/engine/status");

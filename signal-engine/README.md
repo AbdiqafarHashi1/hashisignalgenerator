@@ -575,9 +575,14 @@ unset REPLAY_MAX_TRADES REPLAY_MAX_BARS REPLAY_START_TS REPLAY_END_TS
    curl.exe http://localhost:8000/debug/runtime
    curl.exe http://localhost:8000/dashboard/overview
    ```
-5. UI timeout regression check:
+5. UI timeout + KPI tile refresh check:
+   ```powershell
+   curl.exe http://localhost:8000/dashboard/overview
+   curl.exe "http://localhost:8000/dashboard/trades?limit=5"
+   ```
    - Open `http://localhost:3000`.
-   - Confirm no `Request timed out after 5000ms` toast appears while replay advances.
+   - Start replay and watch `Equity Now`, `Realized PnL (Net)`, `Unrealized PnL`, and `Trades (today)` update as trade count increases.
+   - Confirm no repeated `Request timed out after 5000ms` notifications appear while replay advances.
 
 ### Download free forex replay (Dukascopy)
 ```bash

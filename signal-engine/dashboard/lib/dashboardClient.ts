@@ -1,4 +1,5 @@
 import { apiFetch, DashboardOverview, DebugConfigResponse, DebugResetRequest, EngineState, PaginatedResponse, RuntimeDiagnostics } from "./api";
+import { normalizeOverview, NormalizedOverview, validateNormalizeOverviewRuntime } from "./overviewNormalizer";
 
 export type NormalizedTrade = {
   id: string;
@@ -52,6 +53,7 @@ export type DashboardBundle = {
   skipGlobal: Record<string, number>;
   trades: NormalizedTrade[];
   debugConfig: DebugConfigResponse;
+  overview: NormalizedOverview;
 };
 
 const DEFAULT_DEBUG: DebugConfigResponse = {
@@ -158,6 +160,9 @@ const normalizeSymbols = (input: unknown): NormalizedSymbol[] => {
 
 
 
+
+validateNormalizeOverviewRuntime();
+
 const TABLE_PAGE_LIMIT = 200;
 
 async function fetchTradesPage(limit = TABLE_PAGE_LIMIT, offset = 0): Promise<PaginatedResponse<Record<string, unknown>>> {
@@ -172,24 +177,6 @@ async function fetchOpenOrdersPage(limit = TABLE_PAGE_LIMIT, offset = 0): Promis
   return apiFetch<PaginatedResponse<Record<string, unknown>>>(`/dashboard/open_orders?limit=${limit}&offset=${offset}`);
 }
 
-const normalizeOverview = (payload: DashboardOverview): Omit<DashboardBundle, "debugConfig"> => {
-  const account = asObject(payload.account);
-  const challenge = asObject((payload as Record<string, unknown>).challenge);
-  const governor = asObject((payload as Record<string, unknown>).governor);
-  const meta = asObject((payload as Record<string, unknown>).meta);
-  const risk = toNumericRecord(payload.risk);
-  const activity = toNumericRecord(payload.activity);
-  const symbols = normalizeSymbols(payload.symbols);
-  const trades = normalizeTrades(payload.recent_trades);
-  const equitySeries = Array.isArray(payload.equity_curve)
-    ? payload.equity_curve
-        .map((point) => asNumber(asObject(point).equity))
-        .filter((value): value is number => value !== null)
-    : [];
-  const skipGlobal = toNumericRecord(asObject(payload.skip_reasons).global);
-
-  return { account, challenge, governor, meta, risk, activity, symbols, trades, equitySeries, skipGlobal, executions: [], openOrders: [] };
-};
 
 export async function fetchDashboardBundle(): Promise<DashboardBundle> {
   const [overview, trades, executions, openOrders, debugConfig] = await Promise.all([
@@ -200,11 +187,27 @@ export async function fetchDashboardBundle(): Promise<DashboardBundle> {
     apiFetch<DebugConfigResponse>("/debug/config").catch(() => DEFAULT_DEBUG),
   ]);
 
-  const normalized = normalizeOverview(overview);
-  normalized.trades = normalizeTrades(trades.items);
-  normalized.executions = executions.items;
-  normalized.openOrders = openOrders.items;
-  return { ...normalized, debugConfig };
+  const normalizedOverview = normalizeOverview(overview);
+  const normalized = {
+    account: asObject(overview.account),
+    challenge: asObject((overview as Record<string, unknown>).challenge),
+    governor: asObject((overview as Record<string, unknown>).governor),
+    meta: asObject((overview as Record<string, unknown>).meta),
+    risk: toNumericRecord(overview.risk),
+    activity: toNumericRecord(overview.activity),
+    symbols: normalizeSymbols(overview.symbols),
+    trades: normalizeTrades(trades.items),
+    equitySeries: Array.isArray(overview.equity_curve)
+      ? overview.equity_curve
+          .map((point) => asNumber(asObject(point).equity))
+          .filter((value): value is number => value !== null)
+      : [],
+    skipGlobal: toNumericRecord(asObject(overview.skip_reasons).global),
+    executions: executions.items,
+    openOrders: openOrders.items,
+  };
+
+  return { ...normalized, debugConfig, overview: normalizedOverview };
 }
 
 export async function fetchEngineStateSafe(): Promise<EngineState | null> {
